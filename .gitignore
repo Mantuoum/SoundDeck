@@ -1,0 +1,10 @@
+# Rust build output
+sounddeck/target/
+
+# Portable review build (binary + runtime config + demo library)
+sounddeck/review/
+
+# Local screenshots / scratch files
+shot*.png
+crop*.png
+*.tmp
