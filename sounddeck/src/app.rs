@@ -1248,13 +1248,7 @@ impl App {
                             self.open_file_dialog();
                         }
                         ui.add_space(4.0);
-                        let layout_label = match self.cfg.layout {
-                            SoundLayout::Grid => "Switch to list layout",
-                            SoundLayout::List => "Switch to box layout",
-                        };
-                        if ghost_button(ui, layout_label, full).clicked() {
-                            self.toggle_layout();
-                        }
+                        self.layout_selector(ui);
 
                         ui.add_space(6.0);
                         section_line(ui);
@@ -1439,6 +1433,85 @@ impl App {
                 ui.add_space(2.0);
             },
         );
+    }
+
+    /// Pill-shaped Box/List segmented control.
+    fn layout_selector(&mut self, ui: &mut Ui) {
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), 30.0),
+            Sense::hover(),
+        );
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            CornerRadius::same(15),
+            theme::field(),
+            Stroke::new(1.0_f32, theme::border_soft()),
+            StrokeKind::Inside,
+        );
+        let inner = rect.shrink(3.0);
+        let half = inner.width() * 0.5;
+        for (index, layout) in [SoundLayout::Grid, SoundLayout::List].into_iter().enumerate() {
+            let segment = Rect::from_min_size(
+                Pos2::new(inner.left() + index as f32 * half, inner.top()),
+                Vec2::new(half, inner.height()),
+            );
+            let active = self.cfg.layout == layout;
+            let response = ui.interact(
+                segment,
+                Id::new(("layout_segment", index)),
+                Sense::click(),
+            );
+            if active {
+                painter.rect_filled(segment, CornerRadius::same(12), theme::accent());
+            } else if response.hovered() {
+                painter.rect_filled(
+                    segment,
+                    CornerRadius::same(12),
+                    theme::alpha(theme::text(), 10),
+                );
+            }
+            let color = if active {
+                Color32::WHITE
+            } else {
+                theme::muted()
+            };
+            let label = match layout {
+                SoundLayout::Grid => "Box",
+                SoundLayout::List => "List",
+            };
+            let font = if active {
+                theme::medium(12.5)
+            } else {
+                theme::ui_font(12.5)
+            };
+            let text_width = painter
+                .layout_no_wrap(label.to_owned(), font.clone(), color)
+                .size()
+                .x;
+            let group_width = 10.0 + 6.0 + text_width;
+            let start = segment.center().x - group_width * 0.5;
+            let icon_rect = Rect::from_center_size(
+                Pos2::new(start + 5.0, segment.center().y),
+                Vec2::splat(10.0),
+            );
+            match layout {
+                SoundLayout::Grid => paint_box_icon(painter, icon_rect, color),
+                SoundLayout::List => paint_list_icon(painter, icon_rect, color),
+            }
+            painter.text(
+                Pos2::new(start + 16.0, segment.center().y),
+                Align2::LEFT_CENTER,
+                label,
+                font,
+                color,
+            );
+            if response.clicked() && !active {
+                self.cfg.layout = layout;
+                self.mark_dirty();
+            }
+            response.on_hover_text(label);
+        }
     }
 
     fn device_selector(&mut self, ui: &mut Ui, slot: Slot) {
@@ -1671,7 +1744,11 @@ impl App {
             }
         }
 
-        if self.sounds.is_empty() {
+        if self.sounds.is_empty() || !self
+            .sounds
+            .iter()
+            .any(|sound| sound.library_id == self.active_library)
+        {
             self.empty_state(ui);
         } else if filtered.is_empty() {
             self.no_results(ui);
@@ -3501,17 +3578,69 @@ fn sound_row(
         if missing { theme::mix(theme::text(), theme::red(), 0.4) } else { theme::text() },
     );
 
-    // Volume slider in the middle.
-    let pill_width = if sound.hotkey.is_some() { 76.0 } else { 84.0 };
-    let indicator_width = if has_hotkey || missing { 58.0 } else { 0.0 };
-    let volume_rect = Rect::from_min_max(
-        Pos2::new(rect.left() + rect.width() * 0.40, rect.top() + 14.0),
-        Pos2::new(
-            rect.right() - 44.0 - pill_width - 8.0 - indicator_width,
-            rect.top() + 32.0,
-        ),
+    // Controls on the right: chip, hotkey pill and close.
+    let pill_width = if has_hotkey { 94.0 } else { 102.0 };
+    let indicator_width = if has_hotkey || missing { 70.0 } else { 0.0 };
+    let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
+
+    let pill_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 42.0 - pill_width * 0.5, rect.center().y),
+        Vec2::new(pill_width, 26.0),
     );
-    if volume_rect.width() > 40.0 {
+    if hotkey_pill(
+        ui,
+        &painter,
+        pill_rect,
+        ui.id().with(("rowhotkey", sound.id)),
+        sound,
+        capture_active,
+        13.0,
+    ) {
+        actions.push(Action::SetHotkey(sound.id));
+    }
+
+    let chip_rect = Rect::from_center_size(
+        Pos2::new(
+            pill_rect.left() - 8.0 - (indicator_width - 8.0) * 0.5,
+            rect.center().y,
+        ),
+        Vec2::new(indicator_width - 8.0, 26.0),
+    );
+    if indicator_width > 0.0 {
+        if let Some(action) = ram_chip(
+            ui,
+            &painter,
+            chip_rect,
+            ui.id().with(("rowram", sound.id)),
+            sound,
+            info,
+            10.5,
+        ) {
+            actions.push(action);
+        }
+    }
+
+    let close_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 18.0, rect.center().y),
+        Vec2::new(26.0, 26.0),
+    );
+    let close = close_button(ui, &painter, close_rect, ui.id().with(("rowclose", sound.id)));
+    if close.clicked() {
+        actions.push(Action::Remove(sound.id));
+    }
+    close.on_hover_text("Remove sound");
+
+    // Short, centered volume slider in the free space between name and controls.
+    let free_left = name_rect.right() + 16.0;
+    let free_right = controls_left - 16.0;
+    let free_width = (free_right - free_left).max(0.0);
+    let slider_width = 260.0_f32.min(free_width).max(0.0);
+    if slider_width > 80.0 {
+        let center_x = (free_left + free_right) * 0.5;
+        let volume_rect = Rect::from_center_size(
+            Pos2::new(center_x, rect.center().y),
+            Vec2::new(slider_width, 22.0),
+        );
         volume_rects.push((sound.id, volume_rect));
         volume_bar(
             ui,
@@ -3521,50 +3650,6 @@ fn sound_row(
             |v| actions.push(Action::Volume(sound.id, v)),
             true,
         );
-    }
-
-    // Hotkey + close.
-    let close_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - 18.0, rect.center().y),
-        Vec2::new(24.0, 24.0),
-    );
-    let close = close_button(ui, &painter, close_rect, ui.id().with(("rowclose", sound.id)));
-    if close.clicked() {
-        actions.push(Action::Remove(sound.id));
-    }
-    close.on_hover_text("Remove sound");
-
-    let pill_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - 44.0 - pill_width, rect.center().y - 11.0),
-        Vec2::new(pill_width, 22.0),
-    );
-    if hotkey_pill(
-        ui,
-        &painter,
-        pill_rect,
-        ui.id().with(("rowhotkey", sound.id)),
-        sound,
-        capture_active,
-        12.0,
-    ) {
-        actions.push(Action::SetHotkey(sound.id));
-    }
-
-    // RAM / disk / missing chip just before the hotkey pill.
-    let chip_rect = Rect::from_min_size(
-        Pos2::new(pill_rect.left() - indicator_width, rect.center().y - 11.0),
-        Vec2::new(indicator_width - 8.0, 22.0),
-    );
-    if let Some(action) = ram_chip(
-        ui,
-        &painter,
-        chip_rect,
-        ui.id().with(("rowram", sound.id)),
-        sound,
-        info,
-        10.0,
-    ) {
-        actions.push(action);
     }
 
     if let Some(progress) = progress {
@@ -3798,8 +3883,35 @@ fn paint_library_tab(
     }
 }
 
-fn plus_button(ui: &mut Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+fn paint_box_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let gap = 2.0;
+    let size = (rect.width() - gap) * 0.5;
+    for row in 0..2 {
+        for col in 0..2 {
+            let cell = Rect::from_min_size(
+                Pos2::new(
+                    rect.left() + col as f32 * (size + gap),
+                    rect.top() + row as f32 * (size + gap),
+                ),
+                Vec2::splat(size),
+            );
+            painter.rect_filled(cell, CornerRadius::same(1), color);
+        }
+    }
+}
+
+fn paint_list_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.6_f32, color);
+    for row in 0..3 {
+        let y = rect.top() + 1.5 + row as f32 * 3.5;
+        painter.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            stroke,
+        );
+    }
+}
+
+fn plus_button(ui: &mut Ui) -> bool {    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
     let painter = ui.painter();
     if response.hovered() {
         painter.rect_filled(
