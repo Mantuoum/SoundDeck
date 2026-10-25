@@ -246,12 +246,6 @@ impl App {
         for sound in &sounds {
             playback.register(sound.id, sound.path.clone(), sound.volume);
         }
-        for sound in &sounds {
-            if sound.hotkey.is_some() && sound.ram {
-                playback.set_retain(sound.id, true);
-                playback.ensure_loaded(sound.id);
-            }
-        }
 
         let devices_result = wasapi::list_devices();
         let mut devices = Vec::new();
@@ -379,7 +373,7 @@ impl App {
             meter_peak_at: [Instant::now(); 2],
         };
 
-        app.sync_hotkeys();
+        app.sync_active_library();
         app.log(StatusKind::Info, "Ready");
         app
     }
@@ -589,8 +583,7 @@ impl App {
                         sound.hotkey_error = None;
                         sound.ram = false;
                     }
-                    self.playback.set_retain(id, false);
-                    self.sync_hotkeys();
+                    self.sync_active_library();
                     self.mark_dirty();
                 }
                 Action::ToggleRam(id) => self.toggle_sound_ram(id),
@@ -698,7 +691,6 @@ impl App {
         let id = sound.id;
         let path = sound.path.clone();
         let volume = sound.volume;
-        let ram = sound.ram && sound.hotkey.is_some();
         self.playback.register(id, path, volume);
         self.playback.mark_missing(
             id,
@@ -708,12 +700,8 @@ impl App {
         let label = sound.name.clone();
         self.sounds.insert(index, sound);
         self.selected = Some(id);
-        self.sync_hotkeys();
+        self.sync_active_library();
         self.mark_dirty();
-        if ram {
-            self.playback.set_retain(id, true);
-            self.playback.ensure_loaded(id);
-        }
         self.log(StatusKind::Success, format!("Restored \"{label}\""));
     }
 
@@ -882,6 +870,10 @@ impl App {
         let mut used: HashSet<String> = HashSet::new();
         let mut bindings = Vec::new();
         for sound in &mut self.sounds {
+            if sound.library_id != self.active_library {
+                sound.hotkey_error = None;
+                continue;
+            }
             let Some(hotkey) = sound.hotkey else {
                 continue;
             };
@@ -896,11 +888,25 @@ impl App {
         self.hotkeys.set_bindings(bindings);
     }
 
+    /// Only the active library is live: its hotkeys are registered and only its
+    /// hotkey sounds may stay in RAM. Switching tabs swaps the whole set.
+    fn sync_active_library(&mut self) {
+        self.sync_hotkeys();
+        for sound in &self.sounds {
+            let active = sound.library_id == self.active_library;
+            let keep = active && sound.hotkey.is_some() && sound.ram;
+            self.playback.set_retain(sound.id, keep);
+            if keep {
+                self.playback.ensure_loaded(sound.id);
+            }
+        }
+    }
+
     fn ram_summary(&self) -> Option<RamState> {
         let mut eligible = 0usize;
         let mut on = 0usize;
         for sound in &self.sounds {
-            if sound.hotkey.is_some() {
+            if sound.library_id == self.active_library && sound.hotkey.is_some() {
                 eligible += 1;
                 if sound.ram {
                     on += 1;
@@ -926,7 +932,7 @@ impl App {
     fn set_all_hotkey_ram(&mut self, on: bool) {
         let mut changed = false;
         for sound in &mut self.sounds {
-            if sound.hotkey.is_none() {
+            if sound.hotkey.is_none() || sound.library_id != self.active_library {
                 continue;
             }
             if sound.ram != on {
@@ -942,6 +948,14 @@ impl App {
             self.cfg.preload_hotkey_sounds = on;
             self.mark_dirty();
         }
+    }
+
+    fn find_conflict(&self, hotkey: Hotkey, except_id: u64) -> Option<&Sound> {
+        self.sounds.iter().find(|s| {
+            s.id != except_id
+                && s.library_id == self.active_library
+                && s.hotkey == Some(hotkey)
+        })
     }
 
     fn toggle_sound_ram(&mut self, id: u64) {
@@ -1039,12 +1053,6 @@ impl App {
             .find(|s| s.id == id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "Unknown sound".to_string())
-    }
-
-    fn find_conflict(&self, hotkey: Hotkey, except_id: u64) -> Option<&Sound> {
-        self.sounds
-            .iter()
-            .find(|s| s.id != except_id && s.hotkey == Some(hotkey))
     }
 
     // ---------------------------------------------------------------------
@@ -1167,13 +1175,7 @@ impl App {
     fn title_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         let bar_rect = ui.max_rect();
         let drag = ui.interact(bar_rect, Id::new("titlebar_drag"), Sense::click_and_drag());
-        if drag.drag_started() {
-            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-        }
-        if drag.double_clicked() {
-            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-        }
+        let mut tabs_rect = Rect::NOTHING;
 
         ui.horizontal_centered(|ui| {
             let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
@@ -1184,6 +1186,17 @@ impl App {
                     .font(theme::medium(20.0))
                     .color(theme::text()),
             );
+
+            // Browser-style tabs live in the title bar, after the app name.
+            let buttons_width = 116.0;
+            let tabs_width = (ui.available_width() - buttons_width - 10.0).max(90.0);
+            ui.add_space(16.0);
+            let tabs = ui.allocate_ui_with_layout(
+                Vec2::new(tabs_width, 30.0),
+                Layout::left_to_right(Align::Center),
+                |ui| self.library_bar(ui, tabs_width),
+            );
+            tabs_rect = tabs.response.rect;
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if window_button(ui, WindowButton::Close, self.tray_available) {
@@ -1205,6 +1218,19 @@ impl App {
             });
             ui.add_space(6.0);
         });
+
+        // Dragging or double-clicking a tab must not move/maximize the window.
+        let over_tabs = ctx
+            .pointer_interact_pos()
+            .map(|pos| tabs_rect.contains(pos))
+            .unwrap_or(false);
+        if drag.drag_started() && !over_tabs {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() && !over_tabs {
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
     }
 
     fn side_panel(&mut self, ui: &mut Ui) {
@@ -1460,26 +1486,26 @@ impl App {
     }
 
     fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
-        let mut volume = self.slot_volume(slot);
+        let mut position = volume_to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
             theme::speaker_icon(ui.painter(), icon_rect, theme::muted());
             ui.spacing_mut().slider_width = (ui.available_width() - 44.0).max(60.0);
             let changed = ui
                 .add(
-                    egui::Slider::new(&mut volume, 0.0..=1.0)
+                    egui::Slider::new(&mut position, 0.0..=1.0)
                         .show_value(false)
                         .trailing_fill(true),
                 )
                 .changed();
             ui.label(
-                RichText::new(format!("{:>3.0}%", volume * 100.0))
+                RichText::new(format!("{:>3.0}%", position * 100.0))
                     .size(11.0)
                     .color(theme::muted())
                     .monospace(),
             );
             if changed {
-                self.set_slot_volume(slot, volume);
+                self.set_slot_volume(slot, position_to_volume(position));
             }
         });
     }
@@ -1588,8 +1614,6 @@ impl App {
     }
 
     fn main_page(&mut self, ui: &mut Ui) {
-        self.library_bar(ui);
-        ui.add_space(8.0);
         self.toolbar(ui);
         ui.add_space(6.0);
 
@@ -1631,7 +1655,10 @@ impl App {
             {
                 if raw_scroll.abs() > 0.01 {
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        sound.volume = (sound.volume + 0.05 * raw_scroll.signum()).clamp(0.0, 1.0);
+                        let position = (volume_to_position(sound.volume)
+                            + 0.03 * raw_scroll.signum())
+                        .clamp(0.0, 1.0);
+                        sound.volume = position_to_volume(position);
                         let volume = sound.volume;
                         self.playback.set_volume(id, volume);
                         self.mark_dirty();
@@ -1706,13 +1733,13 @@ impl App {
         }
     }
 
-    fn library_bar(&mut self, ui: &mut Ui) {
+    fn library_bar(&mut self, ui: &mut Ui, width: f32) {
         let mut switch_to = None;
         let mut rename = None;
         let mut delete = None;
         let mut add = false;
 
-        let tabs_width = (ui.available_width() - 34.0).max(120.0);
+        let tabs_width = (width - 32.0).max(60.0);
         ui.horizontal(|ui| {
             ui.allocate_ui_with_layout(
                 Vec2::new(tabs_width, 28.0),
@@ -1723,7 +1750,7 @@ impl App {
                         .scroll_bar_visibility(
                             egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
                         )
-                        .auto_shrink([false, true])
+                        .auto_shrink([true, true])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -1799,10 +1826,23 @@ impl App {
         if id == self.active_library || !self.libraries.iter().any(|l| l.id == id) {
             return;
         }
+        self.engine.stop_all();
         self.active_library = id;
         self.search.clear();
         self.selected = None;
+        self.sync_active_library();
         self.mark_dirty();
+        self.log(
+            StatusKind::Info,
+            format!(
+                "Switched to \"{}\"",
+                self.libraries
+                    .iter()
+                    .find(|l| l.id == id)
+                    .map(|l| l.name.clone())
+                    .unwrap_or_default()
+            ),
+        );
     }
 
     fn add_library(&mut self) {
@@ -1821,6 +1861,7 @@ impl App {
             buffer: name,
             focus: true,
         });
+        self.sync_active_library();
     }
 
     fn delete_library(&mut self, id: u64) {
@@ -1844,11 +1885,13 @@ impl App {
             }
         }
         if self.active_library == removed.id {
+            self.engine.stop_all();
             self.active_library = fallback.id;
             self.selected = None;
             self.search.clear();
         }
         self.mark_dirty();
+        self.sync_active_library();
         let suffix = if moved > 0 {
             format!(
                 " - moved {moved} sound{} to \"{}\"",
@@ -1869,6 +1912,7 @@ impl App {
             return;
         };
         let label = library.name.clone();
+        let active = self.active_library;
         let Some(sound) = self.sounds.iter_mut().find(|s| s.id == sound_id) else {
             return;
         };
@@ -1880,14 +1924,19 @@ impl App {
         if self.selected == Some(sound_id) {
             self.selected = None;
         }
+        if library_id != active {
+            self.engine.stop_sound(sound_id);
+        }
         self.mark_dirty();
+        self.sync_active_library();
         self.log(
             StatusKind::Info,
             format!("Moved \"{name}\" to \"{label}\""),
         );
     }
 
-    fn toolbar(&mut self, ui: &mut Ui) {        ui.allocate_ui_with_layout(
+    fn toolbar(&mut self, ui: &mut Ui) {
+        ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), 34.0),
             Layout::left_to_right(Align::Center),
             |ui| {
@@ -2361,7 +2410,6 @@ impl App {
         }
         if save {
             let mut log_line = None;
-            let mut ram_change = None;
             if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == capture.sound_id) {
                 let had_hotkey = sound.hotkey.is_some();
                 sound.hotkey = capture.current;
@@ -2373,7 +2421,6 @@ impl App {
                 } else {
                     sound.ram = false;
                 }
-                ram_change = Some((sound.id, sound.ram));
                 let label = sound
                     .hotkey
                     .map(|h| h.label())
@@ -2388,13 +2435,7 @@ impl App {
             if let Some(line) = log_line {
                 self.log(StatusKind::Info, line);
             }
-            if let Some((id, ram)) = ram_change {
-                self.playback.set_retain(id, ram);
-                if ram {
-                    self.playback.ensure_loaded(id);
-                }
-            }
-            self.sync_hotkeys();
+            self.sync_active_library();
             self.mark_dirty();
             return;
         }
@@ -2404,8 +2445,7 @@ impl App {
                 sound.hotkey_error = None;
                 sound.ram = false;
             }
-            self.playback.set_retain(capture.sound_id, false);
-            self.sync_hotkeys();
+            self.sync_active_library();
             self.mark_dirty();
             return;
         }
@@ -3629,12 +3669,13 @@ fn volume_bar(
     ui: &mut Ui,
     rect: Rect,
     id: Id,
-    mut value: f32,
+    volume: f32,
     mut on_change: impl FnMut(f32),
     compact: bool,
 ) {
     let response = ui.interact(rect, id, Sense::click_and_drag());
     let painter = ui.painter();
+    let position = volume_to_position(volume);
     let label_width = if compact { 0.0 } else { 34.0 };
     let track_left = if compact {
         rect.left() + 2.0
@@ -3662,7 +3703,7 @@ fn volume_bar(
     painter.rect_filled(track, CornerRadius::same(2), theme::field());
     let filled = Rect::from_min_max(
         track.left_top(),
-        Pos2::new(track.left() + track.width() * value.clamp(0.0, 1.0), track.bottom()),
+        Pos2::new(track.left() + track.width() * position, track.bottom()),
     );
     painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
     let knob = Pos2::new(filled.right(), track.center().y);
@@ -3671,7 +3712,7 @@ fn volume_bar(
         painter.text(
             Pos2::new(rect.right() - 2.0, rect.center().y),
             Align2::RIGHT_CENTER,
-            format!("{:.0}%", value * 100.0),
+            format!("{:.0}%", position * 100.0),
             theme::ui_font(11.0),
             theme::muted(),
         );
@@ -3680,11 +3721,13 @@ fn volume_bar(
     if response.dragged() || response.clicked() {
         if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
             let t = ((pointer.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
-            value = t;
-            on_change(value);
+            on_change(position_to_volume(t));
         }
     }
-    response.on_hover_text(format!("Volume {:.0}% - scroll to adjust", value * 100.0));
+    response.on_hover_text(format!(
+        "Volume {:.0}% - scroll to adjust",
+        position * 100.0
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -3999,6 +4042,27 @@ fn format_gain_db(db: f32) -> String {
     }
 }
 
+/// Volume sliders are logarithmic: the track runs from -60 dBFS (silent) to
+/// 0 dBFS (unity), so the position matches perceived loudness rather than raw
+/// amplitude. Stored volumes stay linear amplitude for the mixer.
+const VOLUME_RANGE_DB: f32 = 60.0;
+
+fn volume_to_position(volume: f32) -> f32 {
+    if volume <= 0.001 {
+        return 0.0;
+    }
+    let db = 20.0 * volume.log10();
+    ((db.clamp(-VOLUME_RANGE_DB, 0.0) + VOLUME_RANGE_DB) / VOLUME_RANGE_DB).clamp(0.0, 1.0)
+}
+
+fn position_to_volume(position: f32) -> f32 {
+    let position = position.clamp(0.0, 1.0);
+    if position <= 0.002 {
+        return 0.0;
+    }
+    10f32.powf((position * VOLUME_RANGE_DB - VOLUME_RANGE_DB) / 20.0)
+}
+
 fn level_x(bar: Rect, db: f32) -> f32 {
     let t = ((db.clamp(-60.0, 0.0) + 60.0) / 60.0) as f32;
     bar.left() + bar.width() * t
@@ -4008,8 +4072,7 @@ fn format_level(db: f32) -> String {
     format!("{:.0}", db.clamp(-60.0, 0.0))
 }
 
-fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
-    painter.rect_filled(bar, CornerRadius::same(3), theme::field());
+fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {    painter.rect_filled(bar, CornerRadius::same(3), theme::field());
     let zones = [
         (-60.0f32, -18.0f32, theme::meter_low()),
         (-18.0, -6.0, theme::meter_mid()),
@@ -4140,4 +4203,22 @@ fn resolve_device(
     None
 }
 
-// Extend the theme with the alpha helper name used in this file.
+#[cfg(test)]
+mod tests {
+    use super::{position_to_volume, volume_to_position};
+
+    #[test]
+    fn volume_slider_is_logarithmic() {
+        assert_eq!(volume_to_position(0.0), 0.0);
+        assert!((volume_to_position(1.0) - 1.0).abs() < 1e-6);
+        // Half amplitude is -6 dB, near the top of a -60..0 dB track.
+        assert!((volume_to_position(0.5) - 0.9).abs() < 1e-3);
+        // Halfway up the track is -30 dB.
+        assert!((position_to_volume(0.5) - 0.031_623).abs() < 1e-4);
+        assert_eq!(position_to_volume(0.0), 0.0);
+        for volume in [0.05, 0.1, 0.25, 0.5, 0.8, 1.0] {
+            let back = position_to_volume(volume_to_position(volume));
+            assert!((back - volume).abs() < 1e-4, "{volume} -> {back}");
+        }
+    }
+}

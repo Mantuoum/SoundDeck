@@ -13,15 +13,18 @@ next to the executable.
 ## Features
 
 - Drag and drop audio files (WAV, MP3, OGG, FLAC, M4A/AAC) or add them with the file dialog.
-- **Libraries/tabs** above the search bar. Add with `+`, rename or delete from a
-  tab's context menu. Sounds can be moved between libraries from a sound's
-  context menu, and the active library is remembered.
-  Hotkeys are global: a sound in a background tab still fires.
+- **Libraries/tabs** in the title bar, after the app name. Add with `+`, rename
+  or delete from a tab's context menu. Sounds can be moved between libraries from
+  a sound's context menu, and the active library is remembered.
+- **Only the active library is live**: its hotkeys are registered and only its
+  hotkey sounds stay in RAM. Switching tabs stops playback and swaps the whole
+  hotkey/RAM set. Hotkeys in background tabs never fire.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...).
 - **Dual output**: one monitor device and one cable device, with independent
-  volumes and a link button.
+  volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
+  so the track matches perceived loudness; stored gains stay linear.
 - **Master gain** in dB (`-60` to `+12 dB`, default `0 dB`) applied to both
   outputs, with a reset button (or double-click the slider).
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one bar per
