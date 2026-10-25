@@ -52,7 +52,6 @@ struct Job {
 
 #[derive(Clone, Debug, Default)]
 pub struct SoundInfo {
-    pub loaded: bool,
     pub loading: bool,
     pub error: Option<String>,
     pub missing: bool,
@@ -297,7 +296,6 @@ impl Playback {
             return SoundInfo::default();
         };
         SoundInfo {
-            loaded: entry.samples.is_some(),
             loading: entry.loading,
             error: entry.error.clone(),
             missing: entry.samples.is_none() && !entry.path.exists(),

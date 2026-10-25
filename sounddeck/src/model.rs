@@ -93,7 +93,6 @@ pub struct Config {
     pub layout: Layout,
     pub close_to_tray: bool,
     pub window_size: Option<[f32; 2]>,
-    pub window_pos: Option<[f32; 2]>,
     pub next_id: u64,
 }
 
@@ -115,7 +114,6 @@ impl Default for Config {
             layout: Layout::Grid,
             close_to_tray: true,
             window_size: None,
-            window_pos: None,
             next_id: 1,
         }
     }

@@ -203,9 +203,16 @@ impl App {
 
         let engine = Arc::new(Engine::new(
             cfg.monitor_volume,
-            cfg.cable_volume,
+            if cfg.link_volumes {
+                cfg.monitor_volume
+            } else {
+                cfg.cable_volume
+            },
             cfg.master_gain_db,
         ));
+        if cfg.link_volumes {
+            cfg.cable_volume = cfg.monitor_volume;
+        }
         let playback = Arc::new(Playback::new(engine.clone()));
 
         for sound in &sounds {
@@ -3204,7 +3211,7 @@ fn sound_context_menu(ui: &mut Ui, sound: &Sound, info: &SoundInfo, actions: &mu
     }
     if sound.hotkey.is_some() {
         ui.separator();
-        if info.loaded {
+        if sound.ram {
             if ui.button("Play from disk").clicked() {
                 actions.push(Action::ToggleRam(sound.id));
                 ui.close_menu();
@@ -3572,21 +3579,22 @@ fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enab
     } else if on {
         theme::accent()
     } else if mixed {
-        theme::alpha(theme::accent(), 95)
+        theme::alpha(theme::purple(), 90)
     } else {
         theme::card_hover()
     };
     painter.rect_filled(rect, CornerRadius::same(11), track);
+    let border = if !enabled || !(on || mixed) {
+        theme::border()
+    } else if on {
+        theme::accent()
+    } else {
+        theme::purple()
+    };
     painter.rect_stroke(
         rect,
         CornerRadius::same(11),
-        Stroke::new(1.0_f32,
-            if enabled {
-                theme::alpha(theme::accent(), 180)
-            } else {
-                theme::border()
-            },
-        ),
+        Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
     );
     let knob_x = if on {
