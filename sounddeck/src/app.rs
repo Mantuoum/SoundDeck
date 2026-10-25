@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -47,7 +46,14 @@ pub struct Sound {
     /// Only meaningful for sounds with a hotkey. Everything else always plays
     /// from disk.
     pub ram: bool,
+    pub library_id: u64,
     pub flash_until: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct Library {
+    id: u64,
+    name: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -81,9 +87,15 @@ struct CaptureState {
 }
 
 struct RenameState {
-    sound_id: u64,
+    target: RenameTarget,
     buffer: String,
     focus: bool,
+}
+
+#[derive(Clone, Copy)]
+enum RenameTarget {
+    Sound(u64),
+    Library(u64),
 }
 
 struct DragState {
@@ -107,6 +119,7 @@ enum Action {
     SetHotkey(u64),
     ClearHotkey(u64),
     ToggleRam(u64),
+    MoveSound(u64, u64),
     Reload(u64),
     Locate(u64),
     ShowInExplorer(u64),
@@ -119,10 +132,11 @@ pub struct App {
     cfg: Config,
     cfg_path: PathBuf,
     sounds: Vec<Sound>,
+    libraries: Vec<Library>,
+    active_library: u64,
     playback: Arc<Playback>,
     engine: Arc<Engine>,
     hotkeys: HotkeyService,
-    quit_flag: Arc<AtomicBool>,
     devices: Vec<DeviceInfo>,
     device_ready: [bool; 2],
     device_note: [Option<String>; 2],
@@ -148,6 +162,9 @@ pub struct App {
     last_tip: String,
     next_tip: Instant,
     last_window_size: Option<[f32; 2]>,
+    meter_db: [f32; 2],
+    meter_peak_db: [f32; 2],
+    meter_peak_at: [Instant; 2],
 }
 
 impl App {
@@ -197,9 +214,20 @@ impl App {
                 hotkey_error: None,
                 volume: sound.volume.clamp(0.0, 1.0),
                 ram,
+                library_id: sound.library_id,
                 flash_until: None,
             });
         }
+
+        let libraries: Vec<Library> = cfg
+            .libraries
+            .iter()
+            .map(|library| Library {
+                id: library.id,
+                name: library.name.clone(),
+            })
+            .collect();
+        let active_library = cfg.active_library;
 
         let engine = Arc::new(Engine::new(
             cfg.monitor_volume,
@@ -305,23 +333,22 @@ impl App {
             .map(|(rgba, w, h)| (rgba, w, h))
             .unwrap_or_else(|_| (vec![0, 0, 0, 255], 1, 1));
         let tray_icon = icon::resize_rgba(&icon_rgba.0, icon_rgba.1, icon_rgba.2, 32);
-        let quit_flag = Arc::new(AtomicBool::new(false));
         let hotkeys = HotkeyService::start(
             tray_icon,
             32,
             format!("{APP_NAME} - {} sounds", sounds.len()),
             playback.clone(),
-            quit_flag.clone(),
         );
 
         let mut app = Self {
             cfg,
             cfg_path,
             sounds,
+            libraries,
+            active_library,
             playback,
             engine,
             hotkeys,
-            quit_flag,
             devices,
             device_ready: [false, false],
             device_note: [None, None],
@@ -347,6 +374,9 @@ impl App {
             last_tip: String::new(),
             next_tip: Instant::now(),
             last_window_size: None,
+            meter_db: [-60.0; 2],
+            meter_peak_db: [-60.0; 2],
+            meter_peak_at: [Instant::now(); 2],
         };
 
         app.sync_hotkeys();
@@ -501,15 +531,9 @@ impl App {
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
-        let force_quit = self.quit_flag.swap(false, Ordering::SeqCst);
         if ctx.input(|i| i.viewport().close_requested()) {
-            if force_quit || self.quit || !self.cfg.close_to_tray || !self.tray_available {
-                self.quit = true;
-                self.save_now(ctx);
-            } else {
-                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                self.hide_to_tray(ctx);
-            }
+            self.quit = true;
+            self.save_now(ctx);
         }
     }
 
@@ -545,7 +569,7 @@ impl App {
                 Action::Rename(id) => {
                     if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                         self.renaming = Some(RenameState {
-                            sound_id: id,
+                            target: RenameTarget::Sound(id),
                             buffer: sound.name.clone(),
                             focus: true,
                         });
@@ -570,6 +594,9 @@ impl App {
                     self.mark_dirty();
                 }
                 Action::ToggleRam(id) => self.toggle_sound_ram(id),
+                Action::MoveSound(id, library_id) => {
+                    self.move_sound_to_library(id, library_id);
+                }
                 Action::Reload(id) => {
                     self.playback.reload(id, true);
                 }
@@ -806,6 +833,7 @@ impl App {
                 hotkey_error: None,
                 volume,
                 ram: false,
+                library_id: self.active_library,
                 flash_until: None,
             };
             self.playback.register(id, path, volume);
@@ -956,8 +984,18 @@ impl App {
                 hotkey: s.hotkey.map(|h| h.label()),
                 volume: s.volume,
                 ram: if s.hotkey.is_some() { Some(s.ram) } else { None },
+                library_id: s.library_id,
             })
             .collect();
+        self.cfg.libraries = self
+            .libraries
+            .iter()
+            .map(|library| model::LibraryConfig {
+                id: library.id,
+                name: library.name.clone(),
+            })
+            .collect();
+        self.cfg.active_library = self.active_library;
         self.cfg.window_size = self.last_window_size.or(self.cfg.window_size);
         self.cfg.next_id = self
             .cfg
@@ -1148,21 +1186,21 @@ impl App {
             );
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if window_button(ui, WindowButton::Close, &self.cfg, self.tray_available) {
-                    if self.cfg.close_to_tray && self.tray_available {
-                        self.hide_to_tray(ctx);
-                    } else {
-                        self.quit = true;
-                        self.save_now(ctx);
-                        ctx.send_viewport_cmd(ViewportCommand::Close);
-                    }
+                if window_button(ui, WindowButton::Close, self.tray_available) {
+                    self.quit = true;
+                    self.save_now(ctx);
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
-                if window_button(ui, WindowButton::Maximize, &self.cfg, self.tray_available) {
+                if window_button(ui, WindowButton::Maximize, self.tray_available) {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
-                if window_button(ui, WindowButton::Minimize, &self.cfg, self.tray_available) {
-                    ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                if window_button(ui, WindowButton::Minimize, self.tray_available) {
+                    if self.tray_available {
+                        self.hide_to_tray(ctx);
+                    } else {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
                 }
             });
             ui.add_space(6.0);
@@ -1340,6 +1378,10 @@ impl App {
                             "Assign a hotkey to a sound first"
                         });
                         ui.allocate_space(Vec2::new(0.0, row_height));
+                        ui.add_space(2.0);
+                        section_line(ui);
+                        ui.add_space(8.0);
+                        self.level_meter(ui);
                         ui.add_space(6.0);
                     });
             },
@@ -1442,6 +1484,74 @@ impl App {
         });
     }
 
+    /// Compact two-output peak meter with a dBFS scale.
+    fn level_meter(&self, ui: &mut Ui) {
+        let width = ui.available_width();
+        let label_w = 48.0;
+        let value_w = 28.0;
+        let bar_left = label_w;
+        let bar_right = (width - value_w).max(bar_left + 60.0);
+        let row_h = 15.0;
+        let scale_h = 13.0;
+        let (rect, _) = ui.allocate_exact_size(
+            Vec2::new(width, row_h * 2.0 + scale_h),
+            Sense::hover(),
+        );
+        let painter = ui.painter();
+
+        for (slot, label) in ["Monitor", "Cable"].iter().enumerate() {
+            let y = rect.top() + slot as f32 * row_h;
+            painter.text(
+                Pos2::new(rect.left(), y + row_h * 0.5),
+                Align2::LEFT_CENTER,
+                *label,
+                theme::ui_font(10.5),
+                theme::muted(),
+            );
+            let bar = Rect::from_min_max(
+                Pos2::new(rect.left() + bar_left, y + 3.0),
+                Pos2::new(rect.left() + bar_right, y + 11.0),
+            );
+            draw_level_bar(painter, bar, self.meter_db[slot], self.meter_peak_db[slot]);
+            painter.text(
+                Pos2::new(rect.right(), y + row_h * 0.5),
+                Align2::RIGHT_CENTER,
+                format_level(self.meter_db[slot]),
+                theme::ui_font(9.5),
+                theme::faint(),
+            );
+        }
+
+        let scale_y = rect.top() + row_h * 2.0 + 1.0;
+        for db in [-60.0, -48.0, -36.0, -24.0, -12.0, 0.0] {
+            let x = level_x(
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + bar_left, scale_y),
+                    Pos2::new(rect.left() + bar_right, scale_y),
+                ),
+                db,
+            );
+            painter.line_segment(
+                [Pos2::new(x, scale_y), Pos2::new(x, scale_y + 3.0)],
+                Stroke::new(1.0_f32, theme::alpha(theme::faint(), 120)),
+            );
+            let align = if db <= -60.0 {
+                Align2::LEFT_TOP
+            } else if db >= 0.0 {
+                Align2::RIGHT_TOP
+            } else {
+                Align2::CENTER_TOP
+            };
+            painter.text(
+                Pos2::new(x, scale_y + 3.0),
+                align,
+                format!("{}", db as i32),
+                theme::ui_font(8.5),
+                theme::faint(),
+            );
+        }
+    }
+
     fn status_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         ui.horizontal_centered(|ui| {
             let latest = self.statuses.last();
@@ -1478,6 +1588,8 @@ impl App {
     }
 
     fn main_page(&mut self, ui: &mut Ui) {
+        self.library_bar(ui);
+        ui.add_space(8.0);
         self.toolbar(ui);
         ui.add_space(6.0);
 
@@ -1546,6 +1658,7 @@ impl App {
                         SoundLayout::Grid => draw_grid(
                             ui,
                             &self.sounds,
+                            &self.libraries,
                             &filtered,
                             &infos,
                             &progress,
@@ -1559,6 +1672,7 @@ impl App {
                         SoundLayout::List => draw_list(
                             ui,
                             &self.sounds,
+                            &self.libraries,
                             &filtered,
                             &infos,
                             &progress,
@@ -1592,8 +1706,188 @@ impl App {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut Ui) {
-        ui.allocate_ui_with_layout(
+    fn library_bar(&mut self, ui: &mut Ui) {
+        let mut switch_to = None;
+        let mut rename = None;
+        let mut delete = None;
+        let mut add = false;
+
+        let tabs_width = (ui.available_width() - 34.0).max(120.0);
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(tabs_width, 28.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("library_tabs")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                for library in &self.libraries {
+                                    let active = library.id == self.active_library;
+                                    let width = library_tab_width(ui, &library.name, active);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        Vec2::new(width, 28.0),
+                                        Sense::click(),
+                                    );
+                                    paint_library_tab(
+                                        ui.painter(),
+                                        rect,
+                                        &library.name,
+                                        active,
+                                        response.hovered(),
+                                    );
+                                    if response.clicked() {
+                                        switch_to = Some(library.id);
+                                    }
+                                    let can_delete = self.libraries.len() > 1;
+                                    response.context_menu(|ui| {
+                                        if ui.button("Rename...").clicked() {
+                                            rename = Some(library.id);
+                                            ui.close_menu();
+                                        }
+                                        if can_delete
+                                            && ui
+                                                .button(
+                                                    RichText::new("Delete")
+                                                        .color(theme::red()),
+                                                )
+                                                .on_hover_text(
+                                                    "Sounds are moved to another library",
+                                                )
+                                                .clicked()
+                                        {
+                                            delete = Some(library.id);
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                },
+            );
+            if plus_button(ui) {
+                add = true;
+            }
+        });
+
+        if let Some(id) = switch_to {
+            self.switch_library(id);
+        }
+        if let Some(id) = rename {
+            if let Some(library) = self.libraries.iter().find(|l| l.id == id) {
+                self.renaming = Some(RenameState {
+                    target: RenameTarget::Library(id),
+                    buffer: library.name.clone(),
+                    focus: true,
+                });
+            }
+        }
+        if let Some(id) = delete {
+            self.delete_library(id);
+        }
+        if add {
+            self.add_library();
+        }
+    }
+
+    fn switch_library(&mut self, id: u64) {
+        if id == self.active_library || !self.libraries.iter().any(|l| l.id == id) {
+            return;
+        }
+        self.active_library = id;
+        self.search.clear();
+        self.selected = None;
+        self.mark_dirty();
+    }
+
+    fn add_library(&mut self) {
+        let id = self.libraries.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+        let name = format!("Library {}", self.libraries.len() + 1);
+        self.libraries.push(Library {
+            id,
+            name: name.clone(),
+        });
+        self.active_library = id;
+        self.search.clear();
+        self.selected = None;
+        self.mark_dirty();
+        self.renaming = Some(RenameState {
+            target: RenameTarget::Library(id),
+            buffer: name,
+            focus: true,
+        });
+    }
+
+    fn delete_library(&mut self, id: u64) {
+        if self.libraries.len() <= 1 {
+            self.log(
+                StatusKind::Warning,
+                "At least one library is required",
+            );
+            return;
+        }
+        let Some(index) = self.libraries.iter().position(|l| l.id == id) else {
+            return;
+        };
+        let removed = self.libraries.remove(index);
+        let fallback = self.libraries[0].clone();
+        let mut moved = 0usize;
+        for sound in &mut self.sounds {
+            if sound.library_id == removed.id {
+                sound.library_id = fallback.id;
+                moved += 1;
+            }
+        }
+        if self.active_library == removed.id {
+            self.active_library = fallback.id;
+            self.selected = None;
+            self.search.clear();
+        }
+        self.mark_dirty();
+        let suffix = if moved > 0 {
+            format!(
+                " - moved {moved} sound{} to \"{}\"",
+                if moved == 1 { "" } else { "s" },
+                fallback.name
+            )
+        } else {
+            String::new()
+        };
+        self.log(
+            StatusKind::Info,
+            format!("Deleted \"{}\"{suffix}", removed.name),
+        );
+    }
+
+    fn move_sound_to_library(&mut self, sound_id: u64, library_id: u64) {
+        let Some(library) = self.libraries.iter().find(|l| l.id == library_id) else {
+            return;
+        };
+        let label = library.name.clone();
+        let Some(sound) = self.sounds.iter_mut().find(|s| s.id == sound_id) else {
+            return;
+        };
+        if sound.library_id == library_id {
+            return;
+        }
+        sound.library_id = library_id;
+        let name = sound.name.clone();
+        if self.selected == Some(sound_id) {
+            self.selected = None;
+        }
+        self.mark_dirty();
+        self.log(
+            StatusKind::Info,
+            format!("Moved \"{name}\" to \"{label}\""),
+        );
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui) {        ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), 34.0),
             Layout::left_to_right(Align::Center),
             |ui| {
@@ -1667,6 +1961,7 @@ impl App {
         self.sounds
             .iter()
             .enumerate()
+            .filter(|(_, sound)| sound.library_id == self.active_library)
             .filter(|(_, sound)| {
                 needle.is_empty()
                     || sound.name.to_lowercase().contains(&needle)
@@ -1857,16 +2152,17 @@ impl App {
                         ui.add_space(14.0);
                         section_line(ui);
                         ui.add_space(8.0);
-                        section_label(ui, "BEHAVIOUR");
-                        let mut close_to_tray = self.cfg.close_to_tray;
-                        if ui
-                            .checkbox(&mut close_to_tray, "Close button hides to tray")
-                            .on_hover_text("When off, the close button quits SoundDeck.")
-                            .changed()
-                        {
-                            self.cfg.close_to_tray = close_to_tray;
-                            self.mark_dirty();
-                        }
+                        section_label(ui, "WINDOW");
+                        ui.label(
+                            RichText::new("Minimize hides to the tray. Close quits SoundDeck.")
+                                .size(11.5)
+                                .color(theme::muted()),
+                        );
+                        ui.label(
+                            RichText::new("Hotkeys keep firing while the window is in the tray.")
+                                .size(11.0)
+                                .color(theme::faint()),
+                        );
 
                         ui.add_space(14.0);
                         section_line(ui);
@@ -2122,12 +2418,18 @@ impl App {
         };
         let mut close = false;
         let mut commit = false;
+        let is_library = matches!(renaming.target, RenameTarget::Library(_));
+        let title = if is_library {
+            "Rename library"
+        } else {
+            "Rename sound"
+        };
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             close = true;
         }
 
-        egui::Window::new("Rename sound")
+        egui::Window::new(title)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
@@ -2141,7 +2443,7 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.label(RichText::new("Rename sound").font(theme::medium(20.0)).color(theme::text()));
+                ui.label(RichText::new(title).font(theme::medium(20.0)).color(theme::text()));
                 ui.add_space(8.0);
                 let response = ui.add_sized(
                     [ui.available_width(), 34.0],
@@ -2172,12 +2474,37 @@ impl App {
                 self.renaming = Some(renaming);
                 return;
             }
-            let mut old_name = None;
-            if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == renaming.sound_id) {
-                old_name = Some(std::mem::replace(&mut sound.name, name));
-            }
-            if let Some(old) = old_name {
-                self.log(StatusKind::Info, format!("Renamed \"{old}\""));
+            match renaming.target {
+                RenameTarget::Sound(id) => {
+                    let mut old_name = None;
+                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                        old_name = Some(std::mem::replace(&mut sound.name, name));
+                    }
+                    if let Some(old) = old_name {
+                        self.log(StatusKind::Info, format!("Renamed \"{old}\""));
+                    }
+                }
+                RenameTarget::Library(id) => {
+                    let duplicate = self
+                        .libraries
+                        .iter()
+                        .any(|library| library.id != id && library.name.eq_ignore_ascii_case(&name));
+                    if duplicate {
+                        self.log(
+                            StatusKind::Warning,
+                            format!("A library named \"{name}\" already exists"),
+                        );
+                        self.renaming = Some(renaming);
+                        return;
+                    }
+                    let mut old_name = None;
+                    if let Some(library) = self.libraries.iter_mut().find(|l| l.id == id) {
+                        old_name = Some(std::mem::replace(&mut library.name, name));
+                    }
+                    if let Some(old) = old_name {
+                        self.log(StatusKind::Info, format!("Renamed library \"{old}\""));
+                    }
+                }
             }
             self.mark_dirty();
             return;
@@ -2435,7 +2762,7 @@ impl App {
             if let Some(id) = self.selected {
                 if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                     self.renaming = Some(RenameState {
-                        sound_id: id,
+                        target: RenameTarget::Sound(id),
                         buffer: sound.name.clone(),
                         focus: true,
                     });
@@ -2475,7 +2802,35 @@ impl App {
         }
 
         // Keep hotkeys responsive while the window is minimized or hidden.
-        ctx.request_repaint_after(Duration::from_millis(120));
+        // Meter motion needs ~30 fps; idle or hidden stays cheap.
+        let levels = self.engine.take_levels();
+        let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.2);
+        let now = Instant::now();
+        for slot in 0..2 {
+            let target = if levels[slot] > 0.000_01 {
+                (20.0 * levels[slot].log10()).clamp(-60.0, 0.0)
+            } else {
+                -60.0
+            };
+            if target >= self.meter_db[slot] {
+                self.meter_db[slot] = target;
+            } else {
+                self.meter_db[slot] = (self.meter_db[slot] - 24.0 * dt).max(target).max(-60.0);
+            }
+            if target >= self.meter_peak_db[slot] {
+                self.meter_peak_db[slot] = target;
+                self.meter_peak_at[slot] = now;
+            } else if now.duration_since(self.meter_peak_at[slot]) > Duration::from_millis(900) {
+                self.meter_peak_db[slot] = (self.meter_peak_db[slot] - 18.0 * dt)
+                    .max(target)
+                    .max(-60.0);
+            }
+        }
+
+        let moving = levels.iter().any(|level| *level > 0.0)
+            || self.meter_db.iter().any(|db| *db > -59.5);
+        let interval = if self.hidden || !moving { 120 } else { 33 };
+        ctx.request_repaint_after(Duration::from_millis(interval));
     }
 }
 
@@ -2587,6 +2942,7 @@ impl Drop for App {
 fn draw_grid(
     ui: &mut Ui,
     sounds: &[Sound],
+    libraries: &[Library],
     filtered: &[usize],
     infos: &HashMap<u64, SoundInfo>,
     progress: &HashMap<u64, f32>,
@@ -2626,6 +2982,7 @@ fn draw_grid(
                         capture_id == Some(sound.id),
                         selected == Some(sound.id),
                         index,
+                        libraries,
                         volume_rects,
                     );
                     rects.push((index, rect));
@@ -2641,6 +2998,7 @@ fn draw_grid(
 fn draw_list(
     ui: &mut Ui,
     sounds: &[Sound],
+    libraries: &[Library],
     filtered: &[usize],
     infos: &HashMap<u64, SoundInfo>,
     progress: &HashMap<u64, f32>,
@@ -2666,6 +3024,7 @@ fn draw_list(
                 capture_id == Some(sound.id),
                 selected == Some(sound.id),
                 index,
+                libraries,
                 volume_rects,
             );
             rects.push((index, rect));
@@ -2847,6 +3206,7 @@ fn sound_card(
     capture_active: bool,
     selected: bool,
     index: usize,
+    libraries: &[Library],
     volume_rects: &mut Vec<(u64, Rect)>,
 ) -> (Rect, Vec<Action>) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
@@ -2918,7 +3278,7 @@ fn sound_card(
         actions.push(Action::DragStop);
     }
     response.context_menu(|ui| {
-        sound_context_menu(ui, sound, info, &mut actions);
+        sound_context_menu(ui, sound, info, libraries, &mut actions);
     });
 
     // Compact RAM / disk / missing chip at the top-left.
@@ -3023,6 +3383,7 @@ fn sound_row(
     capture_active: bool,
     selected: bool,
     index: usize,
+    libraries: &[Library],
     volume_rects: &mut Vec<(u64, Rect)>,
 ) -> (Rect, Vec<Action>) {
     let width = ui.available_width();
@@ -3083,7 +3444,7 @@ fn sound_row(
         actions.push(Action::DragStop);
     }
     response.context_menu(|ui| {
-        sound_context_menu(ui, sound, info, &mut actions);
+        sound_context_menu(ui, sound, info, libraries, &mut actions);
     });
 
     // Name.
@@ -3187,7 +3548,13 @@ fn sound_row(
     (rect, actions)
 }
 
-fn sound_context_menu(ui: &mut Ui, sound: &Sound, info: &SoundInfo, actions: &mut Vec<Action>) {
+fn sound_context_menu(
+    ui: &mut Ui,
+    sound: &Sound,
+    info: &SoundInfo,
+    libraries: &[Library],
+    actions: &mut Vec<Action>,
+) {
     if ui.button("Play").clicked() {
         actions.push(Action::Play(sound.id));
         ui.close_menu();
@@ -3208,6 +3575,19 @@ fn sound_context_menu(ui: &mut Ui, sound: &Sound, info: &SoundInfo, actions: &mu
     if sound.hotkey.is_some() && ui.button("Clear hotkey").clicked() {
         actions.push(Action::ClearHotkey(sound.id));
         ui.close_menu();
+    }
+    if libraries.len() > 1 {
+        ui.menu_button("Move to", |ui| {
+            for library in libraries {
+                if library.id == sound.library_id {
+                    continue;
+                }
+                if ui.button(&library.name).clicked() {
+                    actions.push(Action::MoveSound(sound.id, library.id));
+                    ui.close_menu();
+                }
+            }
+        });
     }
     if sound.hotkey.is_some() {
         ui.separator();
@@ -3310,6 +3690,100 @@ fn volume_bar(
 // ---------------------------------------------------------------------------
 // Small widgets
 // ---------------------------------------------------------------------------
+
+fn library_tab_width(ui: &Ui, name: &str, active: bool) -> f32 {
+    let font = if active {
+        theme::medium(13.0)
+    } else {
+        theme::ui_font(13.0)
+    };
+    let galley = ui.painter().layout_no_wrap(
+        name.to_owned(),
+        font,
+        theme::text(),
+    );
+    (galley.size().x + 24.0).clamp(58.0, 168.0)
+}
+
+fn paint_library_tab(
+    painter: &egui::Painter,
+    rect: Rect,
+    name: &str,
+    active: bool,
+    hovered: bool,
+) {
+    if active {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            theme::alpha(theme::accent(), 14),
+        );
+    } else if hovered {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            theme::alpha(theme::text(), 10),
+        );
+    }
+    let font = if active {
+        theme::medium(13.0)
+    } else {
+        theme::ui_font(13.0)
+    };
+    let color = if active || hovered {
+        theme::text()
+    } else {
+        theme::muted()
+    };
+    let label = theme::truncate(painter, name, font.clone(), rect.width() - 16.0);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        color,
+    );
+    if active {
+        painter.rect_filled(
+            Rect::from_min_max(
+                Pos2::new(rect.left() + 8.0, rect.bottom() - 2.0),
+                Pos2::new(rect.right() - 8.0, rect.bottom()),
+            ),
+            CornerRadius::same(1),
+            theme::accent(),
+        );
+    }
+}
+
+fn plus_button(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            theme::alpha(theme::accent(), 16),
+        );
+    }
+    let color = if response.hovered() {
+        theme::accent()
+    } else {
+        theme::muted()
+    };
+    let stroke = Stroke::new(1.4_f32, color);
+    let center = rect.center();
+    painter.line_segment(
+        [center - Vec2::new(4.5, 0.0), center + Vec2::new(4.5, 0.0)],
+        stroke,
+    );
+    painter.line_segment(
+        [center - Vec2::new(0.0, 4.5), center + Vec2::new(0.0, 4.5)],
+        stroke,
+    );
+    let clicked = response.clicked();
+    response.on_hover_text("New library");
+    clicked
+}
 
 fn accent_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
     accent_button_enabled(ui, text, size, true)
@@ -3454,12 +3928,7 @@ enum WindowButton {
     Close,
 }
 
-fn window_button(
-    ui: &mut Ui,
-    kind: WindowButton,
-    cfg: &Config,
-    tray_available: bool,
-) -> bool {
+fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 28.0), Sense::click());
     let hovered = response.hovered();
     let close = matches!(kind, WindowButton::Close);
@@ -3508,15 +3977,15 @@ fn window_button(
         }
     }
     let tooltip = match kind {
-        WindowButton::Minimize => "Minimize",
-        WindowButton::Maximize => "Maximize",
-        WindowButton::Close => {
-            if cfg.close_to_tray && tray_available {
+        WindowButton::Minimize => {
+            if tray_available {
                 "Hide to tray (hotkeys keep working)"
             } else {
-                "Quit SoundDeck"
+                "Minimize"
             }
         }
+        WindowButton::Maximize => "Maximize",
+        WindowButton::Close => "Quit SoundDeck",
     };
     let response = response.on_hover_text(tooltip);
     response.clicked()
@@ -3527,6 +3996,48 @@ fn format_gain_db(db: f32) -> String {
         "0.0 dB".to_string()
     } else {
         format!("{db:+.1} dB")
+    }
+}
+
+fn level_x(bar: Rect, db: f32) -> f32 {
+    let t = ((db.clamp(-60.0, 0.0) + 60.0) / 60.0) as f32;
+    bar.left() + bar.width() * t
+}
+
+fn format_level(db: f32) -> String {
+    format!("{:.0}", db.clamp(-60.0, 0.0))
+}
+
+fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
+    painter.rect_filled(bar, CornerRadius::same(3), theme::field());
+    let zones = [
+        (-60.0f32, -18.0f32, theme::meter_low()),
+        (-18.0, -6.0, theme::meter_mid()),
+        (-6.0, 0.0, theme::meter_high()),
+    ];
+    let level = level_x(bar, db);
+    for (low, high, color) in zones {
+        let left = level_x(bar, low);
+        let right = level_x(bar, high);
+        let zone = Rect::from_min_max(
+            Pos2::new(left, bar.top()),
+            Pos2::new(right, bar.bottom()),
+        );
+        painter.rect_filled(zone, CornerRadius::ZERO, theme::alpha(color, 34));
+        if level > left {
+            let fill = Rect::from_min_max(
+                zone.left_top(),
+                Pos2::new(level.min(right), bar.bottom()),
+            );
+            painter.rect_filled(fill, CornerRadius::ZERO, color);
+        }
+    }
+    if peak_db > -59.5 {
+        let x = level_x(bar, peak_db);
+        painter.line_segment(
+            [Pos2::new(x, bar.top() - 1.0), Pos2::new(x, bar.bottom() + 1.0)],
+            Stroke::new(1.0_f32, theme::text()),
+        );
     }
 }
 

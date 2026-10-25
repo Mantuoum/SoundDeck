@@ -1,6 +1,7 @@
 fn main() {
     // Embed the application icon so the exe stays fully portable (single file).
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=assets/app.ico");
     #[cfg(windows)]
     {
         let mut res = winres::WindowsResource::new();

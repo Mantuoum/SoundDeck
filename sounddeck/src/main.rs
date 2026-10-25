@@ -10,6 +10,43 @@ mod ui;
 
 use std::sync::Arc;
 
+/// FNV-1a hash of the executable path, used to scope the instance mutex to a
+/// single portable copy.
+#[cfg(windows)]
+fn path_hash(path: &std::path::Path) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.to_string_lossy().to_lowercase().bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Returns the named-mutex handle that keeps this process the only instance of
+/// this executable, or `None` when another instance already owns it.
+#[cfg(windows)]
+fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, SetLastError, BOOL, ERROR_ALREADY_EXISTS, WIN32_ERROR,
+    };
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let exe = std::env::current_exe().unwrap_or_default();
+    let name = HSTRING::from(format!("Local\\SoundDeck-{:016x}", path_hash(&exe)));
+
+    unsafe {
+        let _ = SetLastError(WIN32_ERROR(0));
+        let handle = CreateMutexW(None, BOOL(0), PCWSTR(name.as_ptr())).ok()?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(handle);
+            hotkeys::focus_main_window();
+            return None;
+        }
+        Some(handle)
+    }
+}
+
 fn load_icon() -> Option<Arc<eframe::egui::IconData>> {
     let (rgba, width, height) = icon::decode_png(include_bytes!("../assets/icon.png")).ok()?;
     Some(Arc::new(eframe::egui::IconData {
@@ -38,6 +75,18 @@ fn main() -> Result<(), eframe::Error> {
             }
         };
     }
+
+    // One instance per executable path. A second launch focuses the window
+    // that is already open (including one hidden in the tray) and exits.
+    let _instance = match single_instance() {
+        Some(handle) => handle,
+        None => {
+            unsafe {
+                windows::Win32::Media::timeEndPeriod(1);
+            }
+            return Ok(());
+        }
+    };
 
     let config_path = model::config_path();
     let loaded = model::load_config(&config_path);

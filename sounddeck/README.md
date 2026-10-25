@@ -7,27 +7,39 @@ next to the executable.
 ## Run
 
 - Release build: `target\release\sounddeck.exe`
-- Review copy with demo sounds: `review\SoundDeck.exe`
+- Review copy: `review\SoundDeck.exe`
 - Build yourself: `cargo build --release`
 
 ## Features
 
 - Drag and drop audio files (WAV, MP3, OGG, FLAC, M4A/AAC) or add them with the file dialog.
+- **Libraries/tabs** above the search bar. Add with `+`, rename or delete from a
+  tab's context menu. Sounds can be moved between libraries from a sound's
+  context menu, and the active library is remembered.
+  Hotkeys are global: a sound in a background tab still fires.
+- **Single active sound**: triggering a sound fades out whatever is playing
+  (including the same sound) and starts the new one.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...).
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button.
-- **Master gain** in dB (`-60 … +12 dB`, default `0 dB`) applied to both outputs.
+- **Master gain** in dB (`-60` to `+12 dB`, default `0 dB`) applied to both
+  outputs, with a reset button (or double-click the slider).
+- **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one bar per
+  output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
   - Global `Load hotkey sounds into RAM` switch.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
-- Five themes (Catppuccin Macchiato default, Mocha, Frappé, Latte, Graphite) with
+- Five themes (Catppuccin Macchiato default, Mocha, Frappe, Latte, Graphite) with
   a `#0097FF` accent. Themes are documented in `C:\My files\My Resources\themes.md`.
-- Grid and list layouts, search, drag to reorder, rename, remove with undo.
+- Grid and list layouts, search (scoped to the active library), drag to reorder,
+  rename, remove with undo.
 - Missing file detection with click-to-locate.
-- System tray, minimize to tray, activity log.
-- Settings screen (`Ctrl+,` or the Settings button) for theme, tray behaviour,
+- System tray. **Minimize hides to the tray; Close quits the app.**
+- One instance per executable path. Launching the same exe again focuses the
+  window that is already open (including one hidden in the tray).
+- Settings screen (`Ctrl+,` or the Settings button) for theme, window behaviour,
   developer info, and opening the config folder.
 
 ## Keyboard
@@ -49,6 +61,8 @@ next to the executable.
 
 - Shared-mode WASAPI at the device's mix format; internal format is 48 kHz stereo.
 - Two render streams are kept in sync from one mixer.
+- Triggers are exclusive: the previous voice gets a 5 ms fade-out while the new
+  one starts.
 - Decoded audio is cached only for hotkey sounds that are marked RAM.
 - Files without a hotkey always play from disk on demand.
 

@@ -51,6 +51,22 @@ pub enum Layout {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+pub struct LibraryConfig {
+    pub id: u64,
+    pub name: String,
+}
+
+impl Default for LibraryConfig {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SoundConfig {
     pub id: u64,
     pub name: String,
@@ -60,6 +76,9 @@ pub struct SoundConfig {
     /// Desired RAM state for sounds that have a hotkey. `None` on old configs
     /// means "inherit the global preload setting".
     pub ram: Option<bool>,
+    /// Library this sound belongs to. `0` on old configs is migrated to the
+    /// first library.
+    pub library_id: u64,
 }
 
 impl Default for SoundConfig {
@@ -71,6 +90,7 @@ impl Default for SoundConfig {
             hotkey: None,
             volume: 1.0,
             ram: None,
+            library_id: 0,
         }
     }
 }
@@ -80,6 +100,8 @@ impl Default for SoundConfig {
 pub struct Config {
     pub version: u32,
     pub sounds: Vec<SoundConfig>,
+    pub libraries: Vec<LibraryConfig>,
+    pub active_library: u64,
     pub monitor_device: Option<String>,
     pub cable_device: Option<String>,
     pub monitor_name: Option<String>,
@@ -91,7 +113,6 @@ pub struct Config {
     pub preload_hotkey_sounds: bool,
     pub theme: AppTheme,
     pub layout: Layout,
-    pub close_to_tray: bool,
     pub window_size: Option<[f32; 2]>,
     pub next_id: u64,
 }
@@ -101,6 +122,11 @@ impl Default for Config {
         Self {
             version: 1,
             sounds: Vec::new(),
+            libraries: vec![LibraryConfig {
+                id: 1,
+                name: "Main".into(),
+            }],
+            active_library: 1,
             monitor_device: None,
             cable_device: None,
             monitor_name: None,
@@ -112,7 +138,6 @@ impl Default for Config {
             preload_hotkey_sounds: true,
             theme: AppTheme::Macchiato,
             layout: Layout::Grid,
-            close_to_tray: true,
             window_size: None,
             next_id: 1,
         }
@@ -128,6 +153,38 @@ impl Config {
         if self.next_id <= max_id {
             self.next_id = max_id + 1;
         }
+
+        if self.libraries.is_empty() {
+            self.libraries.push(LibraryConfig {
+                id: 1,
+                name: "Main".into(),
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut next_library = 1u64;
+        for library in &mut self.libraries {
+            if library.id == 0 || !seen.insert(library.id) {
+                while seen.contains(&next_library) {
+                    next_library += 1;
+                }
+                library.id = next_library;
+                seen.insert(library.id);
+            }
+            next_library = next_library.max(library.id + 1);
+            if library.name.trim().is_empty() {
+                library.name = format!("Library {}", library.id);
+            }
+        }
+        let first = self.libraries[0].id;
+        for sound in &mut self.sounds {
+            if !seen.contains(&sound.library_id) {
+                sound.library_id = first;
+            }
+        }
+        if !seen.contains(&self.active_library) {
+            self.active_library = first;
+        }
+
         self.monitor_volume = self.monitor_volume.clamp(0.0, 1.0);
         self.cable_volume = self.cable_volume.clamp(0.0, 1.0);
         self.master_gain_db = self.master_gain_db.clamp(-60.0, 12.0);
@@ -180,24 +237,29 @@ pub fn load_config(path: &Path) -> LoadOutcome {
     let existed = path.exists();
     let config = if existed {
         match fs::read_to_string(path) {
-            Ok(text) => match serde_json::from_str::<Config>(&text) {
-                Ok(mut cfg) => {
-                    cfg.normalize();
-                    cfg
+            Ok(text) => {
+                // Some editors (and Windows PowerShell's `utf8`) prepend a BOM,
+                // which serde_json rejects. Treat the file as UTF-8 regardless.
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+                match serde_json::from_str::<Config>(text) {
+                    Ok(mut cfg) => {
+                        cfg.normalize();
+                        cfg
+                    }
+                    Err(err) => {
+                        let backup = path.with_extension("json.bak");
+                        let _ = fs::copy(path, &backup);
+                        warning = Some(format!(
+                            "Config was unreadable ({err}). Started fresh; old file saved as {}.",
+                            backup
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "sounddeck.json.bak".into())
+                        ));
+                        Config::default()
+                    }
                 }
-                Err(err) => {
-                    let backup = path.with_extension("json.bak");
-                    let _ = fs::copy(path, &backup);
-                    warning = Some(format!(
-                        "Config was unreadable ({err}). Started fresh; old file saved as {}.",
-                        backup
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "sounddeck.json.bak".into())
-                    ));
-                    Config::default()
-                }
-            },
+            }
             Err(err) => {
                 warning = Some(format!("Could not read config: {err}"));
                 Config::default()
@@ -282,6 +344,7 @@ mod tests {
             hotkey: Some("Alt+1".into()),
             volume: 0.8,
             ram: Some(true),
+            library_id: 1,
         });
         let json = serde_json::to_string(&cfg).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
@@ -298,6 +361,35 @@ mod tests {
         });
         cfg.normalize();
         assert_eq!(cfg.next_id, 100);
+    }
+
+    #[test]
+    fn migrates_sounds_into_first_library() {
+        let mut cfg = Config::default();
+        cfg.libraries.clear();
+        cfg.sounds.push(SoundConfig {
+            id: 1,
+            name: "Old".into(),
+            library_id: 0,
+            ..Default::default()
+        });
+        cfg.normalize();
+        assert_eq!(cfg.libraries.len(), 1);
+        assert_eq!(cfg.sounds[0].library_id, cfg.libraries[0].id);
+        assert_eq!(cfg.active_library, cfg.libraries[0].id);
+    }
+
+    #[test]
+    fn config_with_bom_still_loads() {
+        let path = std::env::temp_dir().join("sounddeck_bom_test.json");
+        let json = format!(
+            "\u{feff}{}",
+            serde_json::to_string(&Config::default()).unwrap()
+        );
+        std::fs::write(&path, json).unwrap();
+        let loaded = load_config(&path);
+        assert!(loaded.warning.is_none());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

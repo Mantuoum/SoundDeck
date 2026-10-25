@@ -2,7 +2,7 @@
 //! thread with a hidden Win32 message window.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -344,7 +344,6 @@ impl HotkeyService {
         tray_size: u32,
         tooltip: String,
         playback: Arc<crate::playback::Playback>,
-        quit_flag: Arc<AtomicBool>,
     ) -> Self {
         let (tx, rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
@@ -363,20 +362,10 @@ impl HotkeyService {
                     tray_size,
                     tooltip,
                     playback,
-                    quit_flag,
                 );
                 #[cfg(not(windows))]
                 {
-                    let _ = (
-                        rx,
-                        event_tx,
-                        tid,
-                        tray_rgba,
-                        tray_size,
-                        tooltip,
-                        playback,
-                        quit_flag,
-                    );
+                    let _ = (rx, event_tx, tid, tray_rgba, tray_size, tooltip, playback);
                 }
             })
             .ok();
@@ -440,16 +429,24 @@ impl Drop for HotkeyService {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+pub fn focus_main_window() {
+    unsafe { win::focus_main_window() }
+}
+
+#[cfg(windows)]
 mod win {
     use super::*;
     use std::collections::HashMap;
     use std::mem::size_of;
-    use windows::core::{w, PCWSTR};
+    use windows::core::{w, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+        CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, BOOL,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::System::Threading::{
+        GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
     };
@@ -459,13 +456,13 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, FindWindowW, GetCursorPos, GetMessageW, GetWindowLongPtrW, IsIconic,
-        LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW,
-        SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu, TranslateMessage,
-        CREATESTRUCTW, GWLP_USERDATA, HMENU, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG,
-        SW_RESTORE, SW_SHOW, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
+        DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowTextW,
+        GetWindowThreadProcessId, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
+        RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
+        TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HMENU, IDI_APPLICATION, MF_SEPARATOR,
+        MF_STRING, MSG, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
         WNDCLASSW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
-        WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NULL, WM_RBUTTONUP,
+        WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NULL, WM_RBUTTONUP, EnumWindows,
     };
 
     pub const WAKE_MSG: u32 = WM_APP + 2;
@@ -486,7 +483,6 @@ mod win {
         taskbar_created: u32,
         registered: Vec<i32>,
         playback: Arc<crate::playback::Playback>,
-        quit_flag: Arc<AtomicBool>,
     }
 
     unsafe impl Send for State {}
@@ -499,7 +495,6 @@ mod win {
         size: u32,
         tooltip: String,
         playback: Arc<crate::playback::Playback>,
-        quit_flag: Arc<AtomicBool>,
     ) {
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None).map(Into::into).unwrap_or_default();
@@ -540,7 +535,6 @@ mod win {
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
                 registered: Vec::new(),
                 playback,
-                quit_flag,
             });
             let state_ptr = Box::into_raw(state);
             let hwnd = match CreateWindowExW(
@@ -693,7 +687,7 @@ mod win {
                     let id = (wparam.0 & 0xFFFF) as usize;
                     match id {
                         MENU_SHOW => {
-                            show_main_window();
+                            focus_main_window();
                             let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Show));
                         }
                         MENU_STOP => {
@@ -701,7 +695,6 @@ mod win {
                             let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::StopAll));
                         }
                         MENU_QUIT => {
-                            state.quit_flag.store(true, Ordering::SeqCst);
                             close_main_window();
                             let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Quit));
                         }
@@ -820,7 +813,7 @@ mod win {
             if cmd.0 > 0 {
                 match cmd.0 as usize {
                     MENU_SHOW => {
-                        show_main_window();
+                        focus_main_window();
                         let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Show));
                     }
                     MENU_STOP => {
@@ -828,7 +821,6 @@ mod win {
                         let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::StopAll));
                     }
                     MENU_QUIT => {
-                        state.quit_flag.store(true, Ordering::SeqCst);
                         close_main_window();
                         let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Quit));
                     }
@@ -840,20 +832,79 @@ mod win {
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
     }
 
-    unsafe fn show_main_window() {
-        if let Ok(hwnd) = FindWindowW(PCWSTR::null(), w!("SoundDeck - Soundboard")) {
+    /// Find the main window that belongs to this executable.
+    unsafe fn main_window() -> HWND {
+        struct Search {
+            exe: Option<String>,
+            found: HWND,
+        }
+
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let search = &mut *(lparam.0 as *mut Search);
+            let mut title = [0u16; 64];
+            let len = GetWindowTextW(hwnd, &mut title);
+            if len == 0 {
+                return BOOL(1);
+            }
+            if String::from_utf16_lossy(&title[..len as usize]) != "SoundDeck - Soundboard" {
+                return BOOL(1);
+            }
+            let mut pid = 0u32;
+            let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return BOOL(1);
+            };
+            let mut buffer = [0u16; 1024];
+            let mut size = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+            .is_ok();
+            let _ = CloseHandle(process);
+            if !ok {
+                return BOOL(1);
+            }
+            let path = String::from_utf16_lossy(&buffer[..size as usize]);
+            if let Some(exe) = &search.exe {
+                if path.eq_ignore_ascii_case(exe) {
+                    search.found = hwnd;
+                    return BOOL(0);
+                }
+            }
+            BOOL(1)
+        }
+
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|path| path.to_string_lossy().to_string());
+        let mut search = Search {
+            exe,
+            found: HWND::default(),
+        };
+        let _ = EnumWindows(
+            Some(visit),
+            LPARAM(&mut search as *mut Search as isize),
+        );
+        search.found
+    }
+
+    /// Bring this executable's main window to the foreground from any state
+    /// (including hidden). Matching on the exe path keeps two portable copies
+    /// from focusing each other's windows.
+    pub unsafe fn focus_main_window() {
+        let hwnd = main_window();
+        if !hwnd.is_invalid() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = SetForegroundWindow(hwnd);
         }
     }
 
     unsafe fn close_main_window() {
-        if let Ok(hwnd) = FindWindowW(PCWSTR::null(), w!("SoundDeck - Soundboard")) {
-            if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-            } else {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-            }
+        let hwnd = main_window();
+        if !hwnd.is_invalid() {
             let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }

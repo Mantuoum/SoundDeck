@@ -244,6 +244,18 @@ pub fn red() -> Color32 {
     palette().red
 }
 
+// Fixed meter zones: an instrument, not a theme accent, so the levels stay
+// readable in every palette and green is never used anywhere else in the UI.
+pub fn meter_low() -> Color32 {
+    Color32::from_rgb(0x5F, 0xD3, 0x7A)
+}
+pub fn meter_mid() -> Color32 {
+    Color32::from_rgb(0xE8, 0xB8, 0x4B)
+}
+pub fn meter_high() -> Color32 {
+    Color32::from_rgb(0xE5, 0x48, 0x4D)
+}
+
 pub fn ui_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }

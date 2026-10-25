@@ -12,8 +12,6 @@ use super::wasapi;
 const MIX_CHUNK_FRAMES: usize = 240; // 5 ms
 const FADE_IN_FRAMES: f32 = 120.0; // 2.5 ms
 const FADE_OUT_FRAMES: f32 = 240.0; // 5 ms
-const MAX_VOICES: usize = 96;
-const MAX_VOICES_PER_SOUND: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
@@ -153,6 +151,8 @@ struct Mixer {
     monitor_gain: f32,
     cable_gain: f32,
     master_gain: f32,
+    /// Peak since the last UI read, per output.
+    meter: [f32; 2],
 }
 
 impl Mixer {
@@ -252,6 +252,7 @@ impl Engine {
             monitor_gain: monitor_volume.clamp(0.0, 1.0),
             cable_gain: cable_volume.clamp(0.0, 1.0),
             master_gain: db_to_gain(master_gain_db),
+            meter: [0.0; 2],
         }));
         let rings = [Arc::new(Ring::new(2.0)), Arc::new(Ring::new(2.0))];
         let (events_tx, events_rx) = unbounded();
@@ -327,18 +328,12 @@ impl Engine {
         let Ok(mut mixer) = self.mixer.lock() else {
             return;
         };
-        let same_sound = mixer
-            .voices
-            .iter()
-            .filter(|v| v.sound_id == sound_id)
-            .count();
-        if same_sound >= MAX_VOICES_PER_SOUND {
-            if let Some(pos) = mixer.voices.iter().position(|v| v.sound_id == sound_id) {
-                mixer.voices.remove(pos);
+        // Exclusive playback: fade out anything that is still playing (including
+        // a previous instance of this same sound) so triggers never stack.
+        for voice in &mut mixer.voices {
+            if voice.stop_at.is_none() {
+                voice.stop_at = Some(voice.position);
             }
-        }
-        if mixer.voices.len() >= MAX_VOICES {
-            mixer.voices.remove(0);
         }
         mixer.voices.push(Voice {
             sound_id,
@@ -375,6 +370,16 @@ impl Engine {
             .lock()
             .map(|mixer| mixer.active())
             .unwrap_or_default()
+    }
+
+    /// Peak level per output since the previous call, as linear amplitude.
+    pub fn take_levels(&self) -> [f32; 2] {
+        let Ok(mut mixer) = self.mixer.lock() else {
+            return [0.0; 2];
+        };
+        let levels = mixer.meter;
+        mixer.meter = [0.0; 2];
+        levels
     }
 
     pub fn set_master(&self, slot: Slot, volume: f32) {
@@ -440,6 +445,10 @@ fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db.clamp(-60.0, 12.0) / 20.0)
 }
 
+fn peak_of(samples: &[f32]) -> f32 {
+    samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
+}
+
 fn mixer_loop(
     mixer: Arc<Mutex<Mixer>>,
     rings: [Arc<Ring>; 2],
@@ -463,6 +472,9 @@ fn mixer_loop(
                 match mixer.lock() {
                     Ok(mut mixer) => {
                         mixer.render(&mut buffer);
+                        let peak = peak_of(&buffer);
+                        mixer.meter[0] = mixer.meter[0].max(peak * mixer.monitor_gain).min(1.0);
+                        mixer.meter[1] = mixer.meter[1].max(peak * mixer.cable_gain).min(1.0);
                         (mixer.monitor_gain, mixer.cable_gain)
                     }
                     Err(_) => break,
