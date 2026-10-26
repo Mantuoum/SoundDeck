@@ -1,0 +1,25 @@
+# Normalise text to LF in the repository. Everything here is source or docs,
+# so a single line ending avoids the "LF will be replaced by CRLF" churn that
+# otherwise shows up on every commit made from Windows.
+* text=auto
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.gitattributes text eol=lf
+*.gitignore text eol=lf
+
+# Never touch these.
+*.exe binary
+*.dll binary
+*.png binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.wav binary
+*.mp3 binary
+*.ogg binary
+*.flac binary

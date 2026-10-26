@@ -8,3 +8,11 @@ sounddeck/review/
 shot*.png
 crop*.png
 *.tmp
+
+# Reference screenshots
+References/
+
+# Build logs / scratch notes
+sounddeck/check.txt
+context.md
+plan.md

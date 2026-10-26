@@ -149,16 +149,13 @@ Windows does not expose mouse buttons through this path, and Win-key combination
 are not captured in the UI. The hook cannot see keystrokes aimed at elevated
 windows, and some security/anti-cheat tools may block keyboard hooks.
 
-## Developer placeholders
+## Credits
 
-Edit the constants near the top of `src/app.rs`:
+Made by [Mantum](https://youtube.com/@mantu_um).
 
-```rust
-const DEVELOPER_NAME: &str = "Your Name";
-const DEVELOPER_ROLE: &str = "Independent developer";
-const DEVELOPER_LINK: &str = "your-link.example";
-const DEVELOPER_BLURB: &str = "Add your bio, links, and contact details here.";
-```
+## License
+
+MIT. See [`LICENSE`](../LICENSE) at the repository root.
 
 ## Diagnostics
 
