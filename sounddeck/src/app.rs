@@ -3168,7 +3168,14 @@ impl eframe::App for App {
             .frame(
                 Frame::NONE
                     .fill(theme::panel())
-                    .inner_margin(Margin::symmetric(14, 12)),
+                    // Extra bottom padding so the Settings button never sits
+                    // flush against the status bar.
+                    .inner_margin(Margin {
+                        left: 14,
+                        right: 14,
+                        top: 12,
+                        bottom: 22,
+                    }),
             )
             .show(ctx, |ui| self.side_panel(ui));
 
