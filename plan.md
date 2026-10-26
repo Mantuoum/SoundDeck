@@ -586,7 +586,7 @@ Deploy to `review\SoundDeck.exe` after each UI-visible commit.
   remember size), loop hotkey.
 - **Settings search / persisted tab** only if the tab count grows.
 - **Developer block** still needs real name/role/link/blurb.
-- **Native UI rewrite** remains parked (section 7).
+- **Native UI rewrite** remains parked (section 8).
 
 ### 6.5 As built
 
@@ -604,12 +604,208 @@ Deploy to `review\SoundDeck.exe` after each UI-visible commit.
 
 ---
 
-## 7. Far-future: native UI rewrite (not scheduled)
+## 7. Tray behaviour and idle performance
+
+Status: **decisions resolved, ready to implement. No code changed.**
+
+### 7.1 Measured baseline
+
+Reported by the user on the current 0.2.0 build:
+
+| Scenario | CPU (Task Manager) | RAM |
+| --- | --- | --- |
+| Board visible, idle, no audio | ~3 % | ~80 MB |
+| Hidden in tray, no audio | ~8 % | ~80 MB |
+| Playing a sound / loop | negligible increase over idle | — |
+
+Task Manager percentages are of the whole CPU, so these are higher than they look on
+an 8-core machine. The hidden number is the suspicious one: hiding must be cheaper
+than showing, not almost three times more expensive. Measure before changing anything;
+the baseline above is the acceptance reference.
+
+### 7.2 Tray and minimize behaviour
+
+**New setting:** `minimize_to_tray: bool`, default **false** (taskbar). Existing
+configs without the field also get taskbar behaviour; this is a deliberate change from
+0.2.0. It lives in a new **Window** Settings tab:
+
+- Title: “Window”, subtitle: “Tray and taskbar behaviour.”
+- Group “Minimize”: row “Minimize to tray”, switch, description
+  “On: minimizing hides SoundDeck to the tray. Off: it keeps a taskbar button.”
+- Group “Tray”: read-only notes:
+  - “Double-click the icon” → “Show or hide SoundDeck.”
+  - “Right-click the icon” → “Show/Hide, Stop all, Quit.”
+
+**Minimize routing**
+
+- Custom minimize button:
+  - toggle on + tray available → `hide_to_tray`;
+  - otherwise → `ViewportCommand::Minimized(true)`.
+- OS minimize (Win+D, taskbar button, system menu):
+  - detect `viewport().minimized == Some(true)`;
+  - if toggle on + tray available + not already hidden → `hide_to_tray`;
+  - if toggle off → do nothing (stay in the taskbar).
+- `hide_to_tray` keeps saving/status behaviour, sets `hidden`, hides the viewport.
+- Showing from the tray clears `hidden`, sends `Visible(true)`, `Minimized(false)`,
+  `Focus`, requests a repaint, and resets the meters so stale peaks do not flash.
+- Close/Alt+F4 still quits; this plan does not add close-to-tray.
+
+**Tray double-click**
+
+- The tray icon sends `TrayCommand::Toggle` on `WM_LBUTTONDBLCLK`.
+- The app toggles: hidden **or minimized to the taskbar** → show/restore; visible →
+  hide to tray.
+- Right-click menu becomes **Show / Hide**, Stop all, Quit; it uses the same Toggle.
+- Single left click: **no action** (decided). This avoids the conflict where the first
+  click of a double-click shows the window and the second immediately hides it. The
+  menu covers single-click users.
+- Remove `WM_LBUTTONUP` handling; keep `WM_LBUTTONDBLCLK` and `WM_RBUTTONUP`.
+- No timers and no delayed single-click: predictable and cheap.
+
+### 7.3 CPU plan
+
+#### 7.3.1 Instrument first
+
+Add a developer `--stats` mode (stderr, every 5 s) that prints:
+
+- UI frames/second and whether the window is hidden;
+- mixer iterations and rendered chunks/second;
+- WASAPI pop count per output;
+- active voices, loop state, and the current repaint interval.
+
+Use it with Task Manager on the same machine, same window state, 60 s per sample.
+This separates UI cost from mixer/device cost and proves the fix.
+
+#### 7.3.2 Make the mixer sleep when there is no work
+
+Today `mixer_loop` wakes every 1 ms forever, even with no voices and no loop. Change:
+
+- Add `Mixer::has_work()` → `!voices.is_empty() || loop_rx.is_some()`.
+- Add a wake channel (`Sender<()>`/`Receiver<()>`) owned by `Engine`.
+- When there is no work, the mixer waits on the channel with a long timeout instead
+  of polling every millisecond.
+- `Engine::play` and `start_loop` signal the channel after inserting work.
+- On wake, reset the 5 ms schedule so it does not burst to catch up.
+- WASAPI already pads silence when its ring is empty, so an idle mixer is safe.
+- When the last voice finishes, the next loop sees no work and sleeps.
+- Tests: wake on play/loop start; no lost first chunk; idle state does not panic;
+  stop/start still works.
+
+Expected: the 1,000 Hz mixer wakeup disappears at idle. This is likely the largest
+constant CPU cost that is not the UI.
+
+#### 7.3.3 Repaint policy
+
+| State | Repaint interval | Why |
+| --- | --- | --- |
+| Audio playing (board) | 33 ms | Meter/progress motion |
+| Visible idle (board or Settings) | 1 s | Status/tooltip only; input wakes instantly |
+| Settings open, audio playing | 100 ms | No meters visible; loop card is not on screen |
+| Hidden to tray | none (long safety timer) | No UI to paint |
+
+- Add a wake path from the hotkey/tray thread to the UI: pass an `egui::Context`
+  clone (or a `Fn()` callback) into `HotkeyService`; call `request_repaint()` whenever
+  it sends a service event. Tray show/hide then lands within a frame despite the long
+  hidden timer.
+- Keep a low-frequency (5–10 s) hidden safety tick for loader events or failed saves;
+  it should cost near zero and can be removed if the wake path covers everything.
+- When hidden: skip meter smoothing and `take_levels`; do not update tray tooltips on
+  a timer. On show, reset meters.
+- Opening Settings or interacting with the window already requests a repaint via egui.
+
+#### 7.3.4 Hidden-window check
+
+If the hidden CPU remains high after the timer/wake changes, measure frames in
+`--stats`. A hidden eframe window that keeps presenting frames is the next suspect;
+test with the long timer and, if needed, explicitly stop presenting after
+`Visible(false)` and document the workaround. Do not add sleeps inside `update` as a
+substitute for a proper idle path.
+
+#### 7.3.5 If the target is still missed
+
+Profile the visible frame cost: shape count, text galleys, hover tweens, and GPU
+upload. Cache static chrome or reduce per-frame allocations only after the counters
+show the UI is the cost. The native rewrite remains a separate decision (section 8).
+
+### 7.4 RAM expectation
+
+80 MB with no sounds and no loop is likely the eframe/egui + OpenGL driver + font
+atlas baseline, not a leak. Measure private working set and compare against a bare
+eframe window before chasing it.
+
+Reasonable quick checks:
+
+- ensure theme reloads do not accumulate font atlases;
+- drop the icon RGBA after upload;
+- avoid duplicate decoded buffers (none expected at idle).
+
+There is no honest promise of a large reduction without changing the UI stack. Target:
+stay at or below the current ~80 MB; revisit a native renderer only if the user sets a
+hard memory budget.
+
+### 7.5 Acceptance
+
+- Visible idle CPU: target **≤1 % total** (down from ~3 %).
+- Hidden CPU: target **≤0.3 % total** (down from ~8 %).
+- Playing audio does not regress; no dropouts, clicks, or increased start/stop delay.
+- RAM stays ≤ ~80 MB at idle with nothing loaded.
+- Tray/minimize checklist:
+  1. fresh/default config: custom minimize and Win+D/taskbar minimize keep a taskbar
+     button;
+  2. toggle on: the same actions hide to the tray;
+  3. double-click hidden icon → show/focus; double-click visible → hide;
+  4. double-click while minimized to the taskbar → restore, not hide;
+  5. right-click Show/Hide, Stop all, Quit;
+  6. restore returns to the same tab/scroll/screen, meters reset cleanly;
+  7. hotkeys still fire while hidden; tray tooltip updates.
+- Measure with `--stats` and Task Manager, same machine, 60 s samples, before/after.
+
+### 7.6 Rollout
+
+1. `feat(ui): tray toggle and minimize-to-tray setting`
+   - config field + storage test;
+   - Window tab;
+   - Toggle tray command/menu;
+   - minimize routing, OS minimize detection, restore.
+2. `perf: idle mixer and repaint policy`
+   - `--stats`;
+   - mixer wake/sleep;
+   - repaint table + hotkey/tray wake;
+   - hidden skips;
+   - tests and measurements.
+3. Docs: README tray/setting; ARCHITECTURE thread/repaint notes; plan/context.
+
+No audio format, routing, volume, or schema changes beyond `minimize_to_tray`.
+
+### 7.7 Risks
+
+- Mixer sleep can starve the first frames if a wake is missed; test play/loop start
+  repeatedly and keep a bounded timeout as a fallback.
+- Hidden eframe rendering may not stop purely from a long timer; the stats will show
+  it, and the fallback is a documented viewport workaround, not a busy loop.
+- Tray single click changes behaviour; the menu is the fallback.
+- Detecting OS minimize while also hiding the viewport can loop if the hidden flag is
+  not checked; guard it.
+- CPU percentages vary with background load; compare medians, not single samples.
+- 80 MB may be irreducible without the native UI rewrite; do not overpromise.
+
+### 7.8 Resolved decisions
+
+- Tray single click: **no action**. Double-click toggles; the right-click menu is the
+  single-click fallback.
+- Default minimize: **taskbar**. `minimize_to_tray` defaults to `false`; turning it on
+  restores the older tray behaviour.
+- RAM: **80 MB is acceptable** if CPU drops as planned. No native rewrite pulled
+  forward for memory.
+- The toggle lives in a new **Window** tab.
+- Performance is measured first with `--stats`; the mixer/repaint changes follow.
+
+## 8. Far-future: native UI rewrite (not scheduled)
 
 Status: **parked.** No work in this plan. Revisit only after the current feature set is
 stable and the numbers below justify it.
 
-### 7.1 Why consider it
+### 8.1 Why consider it
 
 egui is immediate-mode: it rebuilds the frame and currently asks for a repaint every
 120 ms even when idle (33 ms while the meter moves). A retained-mode native UI can
@@ -622,7 +818,7 @@ Goals, in order:
 2. Lower idle CPU and memory: no constant frame rebuild, no steady repaint.
 3. Optional: drop UI animations or leave them default-off.
 
-### 7.2 Decision gate (measure before rewriting)
+### 8.2 Decision gate (measure before rewriting)
 
 Release build, review config, 960×540 and maximized:
 
@@ -643,7 +839,7 @@ Cheap egui wins to try first:
 - Default `Animate UI` off, or remove the animation layer.
 - Cache galleys and static chrome; reduce shapes per frame.
 
-### 7.3 Candidate frameworks
+### 8.3 Candidate frameworks
 
 | Option | Pros | Cons |
 | --- | --- | --- |
@@ -657,7 +853,7 @@ Recommendation if the gate is passed: prototype the board shell + one Settings t
 both **Slint** and **Win32 + Direct2D**, then pick on font/IME/DPI/tray effort and
 measured idle cost. Do not start with the full app.
 
-### 7.4 What must not change
+### 8.4 What must not change
 
 - `audio/`, `storage/`, `hotkeys.rs`, `model.rs` and the config schema are
   framework-agnostic and stay.
@@ -667,7 +863,7 @@ measured idle cost. Do not start with the full app.
   activity log, modals, settings tabs keep working.
 - Windows integration (WASAPI, `RegisterHotKey`, tray icon, `PrintWindow` QA) remains.
 
-### 7.5 Migration sketch
+### 8.5 Migration sketch
 
 1. Extract UI state and actions from `app.rs` into a framework-agnostic layer
    (`UiState`, `Action`); useful even without a rewrite.
@@ -678,7 +874,7 @@ measured idle cost. Do not start with the full app.
 5. Run old and new builds side by side for parity and performance; ship only when
    screenshots, interaction checklist, idle CPU/RAM and DPI tests pass.
 
-### 7.6 Risks
+### 8.6 Risks
 
 - Multi-week effort with a real regression surface; the current UI already works.
 - Accessibility/IME and font rendering differ per framework and need explicit testing.
