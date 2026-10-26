@@ -6,6 +6,7 @@ mod hotkeys;
 mod icon;
 mod model;
 mod playback;
+mod storage;
 mod ui;
 
 use std::sync::Arc;
@@ -88,9 +89,8 @@ fn main() -> Result<(), eframe::Error> {
         }
     };
 
-    let config_path = model::config_path();
-    let loaded = model::load_config(&config_path);
-    let saved_size = loaded.config.window_size.unwrap_or([1080.0, 700.0]);
+    let loaded = storage::load(&model::app_dir());
+    let saved_size = loaded.settings.window_size.unwrap_or([1080.0, 700.0]);
     let window_size = eframe::egui::Vec2::new(
         saved_size[0].clamp(900.0, 2600.0),
         saved_size[1].clamp(600.0, 1800.0),

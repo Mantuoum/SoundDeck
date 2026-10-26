@@ -1,8 +1,8 @@
 # SoundDeck
 
 A lightweight Windows soundboard inspired by Soundux. Native Rust + egui UI,
-real WASAPI output, no Electron, no webview. Portable: `sounddeck.json` lives
-next to the executable.
+real WASAPI output, no Electron, no webview. Portable: settings and libraries
+live in `config/` next to the executable.
 
 ## Run
 
@@ -59,6 +59,20 @@ next to the executable.
 | `Delete` | Remove selected |
 | `Space` | Play selected |
 | `F2` | Rename selected |
+
+## Config files
+
+```
+SoundDeck.exe
+config/
+  settings.json     window, devices, volumes, theme, layout, active tab
+  libraries.json    tabs and the sounds registered in each tab
+```
+
+Sounds keep their original paths; audio files are never copied. A legacy
+`sounddeck.json` is imported once on first launch and renamed to
+`sounddeck.v1.json.bak`. Each JSON file is written atomically and keeps one
+rolling `.bak`; interrupted writes are recovered on the next start.
 
 ## Audio notes
 

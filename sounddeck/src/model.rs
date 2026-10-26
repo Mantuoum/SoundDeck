@@ -1,10 +1,10 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 pub const APP_NAME: &str = "SoundDeck";
 pub const WINDOW_TITLE: &str = "SoundDeck - Soundboard";
+/// Legacy single-file config, imported once into `config/`.
 pub const CONFIG_FILE: &str = "sounddeck.json";
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "ogg", "flac", "m4a", "aac", "opus", "wma", "aif", "aiff",
@@ -13,22 +13,45 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppTheme {
-    #[default]
     Macchiato,
     Mocha,
     Frappe,
     Latte,
+    #[default]
     Graphite,
 }
 
 impl AppTheme {
     pub const ALL: [Self; 5] = [
+        Self::Graphite,
         Self::Macchiato,
         Self::Mocha,
         Self::Frappe,
         Self::Latte,
-        Self::Graphite,
     ];
+
+    /// Stable id used by `config/themes/<id>.md`.
+    #[allow(dead_code)] // consumed by the theme-file loader in the next phase
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Macchiato => "macchiato",
+            Self::Mocha => "mocha",
+            Self::Frappe => "frappe",
+            Self::Latte => "latte",
+            Self::Graphite => "graphite",
+        }
+    }
+
+    /// Unknown ids fall back to Graphite.
+    pub fn from_id(id: &str) -> Self {
+        match id.trim().to_ascii_lowercase().as_str() {
+            "macchiato" => Self::Macchiato,
+            "mocha" => Self::Mocha,
+            "frappe" | "frappé" => Self::Frappe,
+            "latte" => Self::Latte,
+            _ => Self::Graphite,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -49,151 +72,6 @@ pub enum Layout {
     List,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct LibraryConfig {
-    pub id: u64,
-    pub name: String,
-}
-
-impl Default for LibraryConfig {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            name: String::new(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SoundConfig {
-    pub id: u64,
-    pub name: String,
-    pub path: String,
-    pub hotkey: Option<String>,
-    pub volume: f32,
-    /// Desired RAM state for sounds that have a hotkey. `None` on old configs
-    /// means "inherit the global preload setting".
-    pub ram: Option<bool>,
-    /// Library this sound belongs to. `0` on old configs is migrated to the
-    /// first library.
-    pub library_id: u64,
-}
-
-impl Default for SoundConfig {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            name: String::new(),
-            path: String::new(),
-            hotkey: None,
-            volume: 1.0,
-            ram: None,
-            library_id: 0,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Config {
-    pub version: u32,
-    pub sounds: Vec<SoundConfig>,
-    pub libraries: Vec<LibraryConfig>,
-    pub active_library: u64,
-    pub monitor_device: Option<String>,
-    pub cable_device: Option<String>,
-    pub monitor_name: Option<String>,
-    pub cable_name: Option<String>,
-    pub monitor_volume: f32,
-    pub cable_volume: f32,
-    pub master_gain_db: f32,
-    pub link_volumes: bool,
-    pub preload_hotkey_sounds: bool,
-    pub theme: AppTheme,
-    pub layout: Layout,
-    pub window_size: Option<[f32; 2]>,
-    pub next_id: u64,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            sounds: Vec::new(),
-            libraries: vec![LibraryConfig {
-                id: 1,
-                name: "Main".into(),
-            }],
-            active_library: 1,
-            monitor_device: None,
-            cable_device: None,
-            monitor_name: None,
-            cable_name: None,
-            monitor_volume: 1.0,
-            cable_volume: 1.0,
-            master_gain_db: 0.0,
-            link_volumes: true,
-            preload_hotkey_sounds: true,
-            theme: AppTheme::Macchiato,
-            layout: Layout::Grid,
-            window_size: None,
-            next_id: 1,
-        }
-    }
-}
-
-impl Config {
-    pub fn normalize(&mut self) {
-        if self.next_id == 0 {
-            self.next_id = 1;
-        }
-        let max_id = self.sounds.iter().map(|s| s.id).max().unwrap_or(0);
-        if self.next_id <= max_id {
-            self.next_id = max_id + 1;
-        }
-
-        if self.libraries.is_empty() {
-            self.libraries.push(LibraryConfig {
-                id: 1,
-                name: "Main".into(),
-            });
-        }
-        let mut seen = std::collections::HashSet::new();
-        let mut next_library = 1u64;
-        for library in &mut self.libraries {
-            if library.id == 0 || !seen.insert(library.id) {
-                while seen.contains(&next_library) {
-                    next_library += 1;
-                }
-                library.id = next_library;
-                seen.insert(library.id);
-            }
-            next_library = next_library.max(library.id + 1);
-            if library.name.trim().is_empty() {
-                library.name = format!("Library {}", library.id);
-            }
-        }
-        let first = self.libraries[0].id;
-        for sound in &mut self.sounds {
-            if !seen.contains(&sound.library_id) {
-                sound.library_id = first;
-            }
-        }
-        if !seen.contains(&self.active_library) {
-            self.active_library = first;
-        }
-
-        self.monitor_volume = self.monitor_volume.clamp(0.0, 1.0);
-        self.cable_volume = self.cable_volume.clamp(0.0, 1.0);
-        self.master_gain_db = self.master_gain_db.clamp(-60.0, 12.0);
-        for sound in &mut self.sounds {
-            sound.volume = sound.volume.clamp(0.0, 2.0);
-        }
-    }
-}
-
 /// Directory the app lives in. Everything (config) is stored here: fully portable.
 pub fn app_dir() -> PathBuf {
     std::env::current_exe()
@@ -203,8 +81,8 @@ pub fn app_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-pub fn config_path() -> PathBuf {
-    app_dir().join(CONFIG_FILE)
+pub fn config_dir() -> PathBuf {
+    app_dir().join("config")
 }
 
 /// Store paths inside the app folder as relative, so the whole folder can be moved.
@@ -225,73 +103,6 @@ pub fn resolve_path(stored: &str) -> PathBuf {
     } else {
         app_dir().join(path)
     }
-}
-
-pub struct LoadOutcome {
-    pub config: Config,
-    pub warning: Option<String>,
-}
-
-pub fn load_config(path: &Path) -> LoadOutcome {
-    let mut warning = None;
-    let existed = path.exists();
-    let config = if existed {
-        match fs::read_to_string(path) {
-            Ok(text) => {
-                // Some editors (and Windows PowerShell's `utf8`) prepend a BOM,
-                // which serde_json rejects. Treat the file as UTF-8 regardless.
-                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-                match serde_json::from_str::<Config>(text) {
-                    Ok(mut cfg) => {
-                        cfg.normalize();
-                        cfg
-                    }
-                    Err(err) => {
-                        let backup = path.with_extension("json.bak");
-                        let _ = fs::copy(path, &backup);
-                        warning = Some(format!(
-                            "Config was unreadable ({err}). Started fresh; old file saved as {}.",
-                            backup
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "sounddeck.json.bak".into())
-                        ));
-                        Config::default()
-                    }
-                }
-            }
-            Err(err) => {
-                warning = Some(format!("Could not read config: {err}"));
-                Config::default()
-            }
-        }
-    } else {
-        Config::default()
-    };
-
-    LoadOutcome {
-        config,
-        warning,
-    }
-}
-
-pub fn save_config(path: &Path, config: &Config) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let json = serde_json::to_string_pretty(config)?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    // Windows: rename over an existing file works with fs::rename.
-    if let Err(first) = fs::rename(&tmp, path) {
-        // Anti-virus / indexer may briefly hold the file; retry once via copy.
-        let _ = fs::copy(&tmp, path);
-        let _ = fs::remove_file(&tmp);
-        if !path.exists() {
-            return Err(first.into());
-        }
-    }
-    Ok(())
 }
 
 pub fn is_supported_file(path: &Path) -> bool {
@@ -335,67 +146,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_config() {
-        let mut cfg = Config::default();
-        cfg.sounds.push(SoundConfig {
-            id: 7,
-            name: "Airhorn".into(),
-            path: "sounds/airhorn.mp3".into(),
-            hotkey: Some("Alt+1".into()),
-            volume: 0.8,
-            ram: Some(true),
-            library_id: 1,
-        });
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: Config = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sounds.len(), 1);
-        assert_eq!(back.sounds[0].name, "Airhorn");
-    }
-
-    #[test]
-    fn normalizes_ids() {
-        let mut cfg = Config::default();
-        cfg.sounds.push(SoundConfig {
-            id: 99,
-            ..Default::default()
-        });
-        cfg.normalize();
-        assert_eq!(cfg.next_id, 100);
-    }
-
-    #[test]
-    fn migrates_sounds_into_first_library() {
-        let mut cfg = Config::default();
-        cfg.libraries.clear();
-        cfg.sounds.push(SoundConfig {
-            id: 1,
-            name: "Old".into(),
-            library_id: 0,
-            ..Default::default()
-        });
-        cfg.normalize();
-        assert_eq!(cfg.libraries.len(), 1);
-        assert_eq!(cfg.sounds[0].library_id, cfg.libraries[0].id);
-        assert_eq!(cfg.active_library, cfg.libraries[0].id);
-    }
-
-    #[test]
-    fn config_with_bom_still_loads() {
-        let path = std::env::temp_dir().join("sounddeck_bom_test.json");
-        let json = format!(
-            "\u{feff}{}",
-            serde_json::to_string(&Config::default()).unwrap()
-        );
-        std::fs::write(&path, json).unwrap();
-        let loaded = load_config(&path);
-        assert!(loaded.warning.is_none());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
     fn duration_formatting() {
         assert_eq!(format_duration(0.0), "0:00");
         assert_eq!(format_duration(3.2), "0:03");
         assert_eq!(format_duration(75.0), "1:15");
+    }
+
+    #[test]
+    fn theme_ids_roundtrip_and_fallback() {
+        for theme in AppTheme::ALL {
+            assert_eq!(AppTheme::from_id(theme.id()), theme);
+        }
+        assert_eq!(AppTheme::from_id("does-not-exist"), AppTheme::Graphite);
+        assert_eq!(AppTheme::from_id("  LATTE "), AppTheme::Latte);
+        assert_eq!(AppTheme::default(), AppTheme::Graphite);
     }
 }

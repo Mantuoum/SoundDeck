@@ -14,10 +14,11 @@ use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
 use crate::model::{
-    self, display_name, format_bytes, format_duration, is_supported_file, save_config, AppTheme,
-    Config, Layout as SoundLayout, SoundConfig, APP_NAME, SUPPORTED_EXTENSIONS,
+    self, display_name, format_bytes, format_duration, is_supported_file, AppTheme,
+    Layout as SoundLayout, APP_NAME, SUPPORTED_EXTENSIONS,
 };
 use crate::playback::{Playback, PlaybackEvent, SoundInfo};
+use crate::storage;
 use crate::ui::theme;
 
 const CARD_HEIGHT: f32 = 112.0;
@@ -129,8 +130,7 @@ enum Action {
 }
 
 pub struct App {
-    cfg: Config,
-    cfg_path: PathBuf,
+    cfg: storage::Settings,
     sounds: Vec<Sound>,
     libraries: Vec<Library>,
     active_library: u64,
@@ -157,8 +157,12 @@ pub struct App {
     volume_rects: Vec<(u64, Rect)>,
     undo: Option<UndoDelete>,
     last_dir: Option<PathBuf>,
+    next_id: u64,
     dirty: bool,
+    save_failed: bool,
     last_save: Instant,
+    last_settings_json: String,
+    last_libraries_json: String,
     last_tip: String,
     next_tip: Instant,
     last_window_size: Option<[f32; 2]>,
@@ -170,11 +174,15 @@ pub struct App {
 impl App {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
-        loaded: model::LoadOutcome,
+        loaded: storage::Loaded,
         open_settings: bool,
     ) -> Self {
-        let cfg_path = model::config_path();
-        let mut cfg = loaded.config;
+        let storage::Loaded {
+            settings,
+            libraries: stored_libraries,
+            warnings,
+        } = loaded;
+        let mut cfg = settings;
         theme::install(&cc.egui_ctx, cfg.theme);
 
         let mut statuses = Vec::new();
@@ -186,47 +194,46 @@ impl App {
             });
         };
 
-        if let Some(warning) = &loaded.warning {
-            push_status(StatusKind::Warning, warning.clone());
+        for warning in warnings {
+            push_status(StatusKind::Warning, warning);
         }
 
         let mut sounds = Vec::new();
-        for sound in &cfg.sounds {
-            let path = model::resolve_path(&sound.path);
-            let hotkey = match sound.hotkey.as_deref().map(Hotkey::parse) {
-                Some(Ok(hk)) => Some(hk),
-                Some(Err(err)) => {
-                    push_status(
-                        StatusKind::Warning,
-                        format!("Hotkey for \"{}\" is invalid: {err}", sound.name),
-                    );
-                    None
-                }
-                None => None,
-            };
-            let ram = hotkey.is_some()
-                && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
-            sounds.push(Sound {
-                id: sound.id,
-                name: sound.name.clone(),
-                path,
-                hotkey,
-                hotkey_error: None,
-                volume: sound.volume.clamp(0.0, 1.0),
-                ram,
-                library_id: sound.library_id,
-                flash_until: None,
-            });
-        }
-
-        let libraries: Vec<Library> = cfg
-            .libraries
-            .iter()
-            .map(|library| Library {
+        let mut libraries = Vec::new();
+        for library in &stored_libraries {
+            libraries.push(Library {
                 id: library.id,
                 name: library.name.clone(),
-            })
-            .collect();
+            });
+            for sound in &library.sounds {
+                let path = model::resolve_path(&sound.path);
+                let hotkey = match sound.hotkey.as_deref().map(Hotkey::parse) {
+                    Some(Ok(hk)) => Some(hk),
+                    Some(Err(err)) => {
+                        push_status(
+                            StatusKind::Warning,
+                            format!("Hotkey for \"{}\" is invalid: {err}", sound.name),
+                        );
+                        None
+                    }
+                    None => None,
+                };
+                let ram = hotkey.is_some()
+                    && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
+                sounds.push(Sound {
+                    id: sound.id,
+                    name: sound.name.clone(),
+                    path,
+                    hotkey,
+                    hotkey_error: None,
+                    volume: sound.volume.clamp(0.0, 1.0),
+                    ram,
+                    library_id: library.id,
+                    flash_until: None,
+                });
+            }
+        }
+
         let active_library = cfg.active_library;
 
         let engine = Arc::new(Engine::new(
@@ -336,7 +343,6 @@ impl App {
 
         let mut app = Self {
             cfg,
-            cfg_path,
             sounds,
             libraries,
             active_library,
@@ -363,8 +369,12 @@ impl App {
             volume_rects: Vec::new(),
             undo: None,
             last_dir: None,
+            next_id: 1,
             dirty: false,
+            save_failed: false,
             last_save: Instant::now(),
+            last_settings_json: String::new(),
+            last_libraries_json: String::new(),
             last_tip: String::new(),
             next_tip: Instant::now(),
             last_window_size: None,
@@ -372,6 +382,12 @@ impl App {
             meter_peak_db: [-60.0; 2],
             meter_peak_at: [Instant::now(); 2],
         };
+
+        // Fingerprints so a slider move never rewrites the library file.
+        app.last_settings_json = storage::serialize_settings(&app.cfg);
+        let libraries = app.storage_libraries();
+        app.last_libraries_json = storage::serialize_libraries(&libraries);
+        app.next_id = app.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1;
 
         app.sync_active_library();
         app.log(StatusKind::Info, "Ready");
@@ -809,8 +825,7 @@ impl App {
                 continue;
             }
 
-            let id = self.cfg.next_id;
-            self.cfg.next_id += 1;
+            let id = self.next_sound_id();
             let volume = 1.0;
             let name = display_name(&path);
             let sound = Sound {
@@ -986,50 +1001,99 @@ impl App {
         self.dirty = true;
     }
 
-    /// Mirror the in-memory library into the serialisable config.
-    fn refresh_config(&mut self) {
-        self.cfg.sounds = self
-            .sounds
+    fn next_sound_id(&mut self) -> u64 {
+        let id = self.next_id.max(
+            self.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1,
+        );
+        self.next_id = id + 1;
+        id
+    }
+
+    /// Snapshot the runtime tabs/sounds into their storage form.
+    fn storage_libraries(&self) -> Vec<storage::LibraryConfig> {
+        self.libraries
             .iter()
-            .map(|s| SoundConfig {
-                id: s.id,
-                name: s.name.clone(),
-                path: model::portable_path(&s.path),
-                hotkey: s.hotkey.map(|h| h.label()),
-                volume: s.volume,
-                ram: if s.hotkey.is_some() { Some(s.ram) } else { None },
-                library_id: s.library_id,
-            })
-            .collect();
-        self.cfg.libraries = self
-            .libraries
-            .iter()
-            .map(|library| model::LibraryConfig {
+            .map(|library| storage::LibraryConfig {
                 id: library.id,
                 name: library.name.clone(),
+                sounds: self
+                    .sounds
+                    .iter()
+                    .filter(|sound| sound.library_id == library.id)
+                    .map(|sound| storage::SoundConfig {
+                        id: sound.id,
+                        name: sound.name.clone(),
+                        path: model::portable_path(&sound.path),
+                        hotkey: sound.hotkey.map(|h| h.label()),
+                        volume: sound.volume,
+                        ram: if sound.hotkey.is_some() {
+                            Some(sound.ram)
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
             })
-            .collect();
+            .collect()
+    }
+
+    /// Write only the files whose content actually changed.
+    fn persist(&mut self) -> bool {
+        if let Some(size) = self.last_window_size {
+            self.cfg.window_size = Some(size);
+        }
         self.cfg.active_library = self.active_library;
-        self.cfg.window_size = self.last_window_size.or(self.cfg.window_size);
-        self.cfg.next_id = self
-            .cfg
-            .next_id
-            .max(self.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1);
+        let base = model::app_dir();
+        let mut ok = true;
+
+        let settings_json = storage::serialize_settings(&self.cfg);
+        if settings_json != self.last_settings_json {
+            let path = storage::settings_path(&base);
+            match storage::io::write_json_atomic(&path, &settings_json) {
+                Ok(()) => self.last_settings_json = settings_json,
+                Err(err) => {
+                    ok = false;
+                    if !self.save_failed {
+                        self.save_failed = true;
+                        self.log(
+                            StatusKind::Warning,
+                            format!("Could not save config/settings.json: {err}"),
+                        );
+                    }
+                }
+            }
+        }
+
+        let libraries = self.storage_libraries();
+        let libraries_json = storage::serialize_libraries(&libraries);
+        if libraries_json != self.last_libraries_json {
+            let path = storage::libraries_path(&base);
+            match storage::io::write_json_atomic(&path, &libraries_json) {
+                Ok(()) => self.last_libraries_json = libraries_json,
+                Err(err) => {
+                    ok = false;
+                    if !self.save_failed {
+                        self.save_failed = true;
+                        self.log(
+                            StatusKind::Warning,
+                            format!("Could not save config/libraries.json: {err}"),
+                        );
+                    }
+                }
+            }
+        }
+
+        ok
     }
 
     fn save_now(&mut self, ctx: &egui::Context) {
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.last_window_size = Some([rect.width(), rect.height()]);
         }
-        self.refresh_config();
-        if let Err(err) = save_config(&self.cfg_path, &self.cfg) {
-            self.log(
-                StatusKind::Warning,
-                format!("Could not save config: {err}"),
-            );
-        } else {
+        self.last_save = Instant::now();
+        if self.persist() {
             self.dirty = false;
-            self.last_save = Instant::now();
+            self.save_failed = false;
         }
     }
 
@@ -2329,7 +2393,7 @@ impl App {
                             .clicked()
                         {
                             let _ = std::process::Command::new("explorer")
-                                .arg(model::app_dir())
+                                .arg(model::config_dir())
                                 .spawn();
                         }
                     });
@@ -3046,8 +3110,8 @@ impl Drop for App {
         if let Some(rect) = self.last_window_size {
             self.cfg.window_size = Some(rect);
         }
-        self.refresh_config();
-        let _ = save_config(&self.cfg_path, &self.cfg);
+        self.cfg.active_library = self.active_library;
+        let _ = self.persist();
     }
 }
 
