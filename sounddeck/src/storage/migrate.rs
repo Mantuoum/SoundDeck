@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use super::{save_libraries, save_settings, LibraryConfig, LibrariesFile, Loaded, Settings};
+use super::{save_libraries, save_settings, LibrariesFile, LibraryConfig, Loaded, Settings};
 use crate::model::{Layout, CONFIG_FILE};
 
 #[derive(Clone, Debug, Deserialize)]

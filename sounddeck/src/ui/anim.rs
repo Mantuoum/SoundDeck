@@ -20,8 +20,7 @@ pub fn set_os(enabled: bool) {
 }
 
 pub fn enabled() -> bool {
-    USER.load(std::sync::atomic::Ordering::Relaxed)
-        && OS.load(std::sync::atomic::Ordering::Relaxed)
+    USER.load(std::sync::atomic::Ordering::Relaxed) && OS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A value that eases toward `target`. Returns the current value.
@@ -47,9 +46,7 @@ pub fn ease_out(t: f32) -> f32 {
 /// 0 when idle, 1 when hovered; eases over ~60 ms.
 pub fn hover(ui: &egui::Ui, id: impl Hash, hovered: bool) -> f32 {
     let target = if hovered { 1.0 } else { 0.0 };
-    let value = ui
-        .ctx()
-        .animate_value_with_time(Id::new(id), target, 0.06);
+    let value = ui.ctx().animate_value_with_time(Id::new(id), target, 0.06);
     if (value - target).abs() > 0.002 {
         ui.ctx().request_repaint();
     }

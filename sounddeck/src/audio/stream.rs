@@ -142,8 +142,7 @@ struct Source {
 
 impl Source {
     fn open(path: &Path) -> Result<Self> {
-        let file =
-            File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
+        let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
         let stream = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
@@ -201,11 +200,7 @@ impl Source {
     }
 }
 
-fn decode_loop(
-    path: &Path,
-    tx: &Sender<Vec<f32>>,
-    stop: &AtomicBool,
-) -> Result<()> {
+fn decode_loop(path: &Path, tx: &Sender<Vec<f32>>, stop: &AtomicBool) -> Result<()> {
     if !path.exists() {
         bail!("File not found");
     }

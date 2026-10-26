@@ -313,11 +313,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_base(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "sounddeck-store-{}-{}",
-            std::process::id(),
-            name
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sounddeck-store-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -487,7 +484,9 @@ mod tests {
 
         let loaded = load(&base);
         assert_eq!(loaded.libraries[0].sounds[0].name, "first");
-        assert!(libraries_path(&base).with_file_name("libraries.json.corrupt").exists());
+        assert!(libraries_path(&base)
+            .with_file_name("libraries.json.corrupt")
+            .exists());
         assert!(loaded.warnings.iter().any(|w| w.contains("restored")));
     }
 
@@ -516,7 +515,10 @@ mod tests {
         let base = temp_base("bom");
         let mut settings = Settings::default();
         settings.master_gain_db = 1.0;
-        let json = format!("\u{feff}{}", serde_json::to_string_pretty(&settings).unwrap());
+        let json = format!(
+            "\u{feff}{}",
+            serde_json::to_string_pretty(&settings).unwrap()
+        );
         fs::create_dir_all(base.join("config")).unwrap();
         fs::write(settings_path(&base), json).unwrap();
 
@@ -558,7 +560,10 @@ mod tests {
 
         assert_eq!(file.libraries.len(), 2);
         assert_ne!(file.libraries[0].id, file.libraries[1].id);
-        assert_ne!(file.libraries[0].sounds[0].id, file.libraries[0].sounds[1].id);
+        assert_ne!(
+            file.libraries[0].sounds[0].id,
+            file.libraries[0].sounds[1].id
+        );
         assert!(!file.libraries[0].name.is_empty());
         assert!(!file.libraries[0].sounds[0].name.is_empty());
     }

@@ -49,7 +49,8 @@ fn find_binding(bindings: &[(Hotkey, u64)], mods: Mods, vk: u32) -> Option<u64> 
         .iter()
         .find(|(hotkey, _)| hotkey.vk == vk && hotkey.mods == mods)
         .map(|(_, id)| *id)
-}#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Hotkey {
     pub mods: Mods,
     pub vk: u32,
@@ -348,18 +349,13 @@ impl HotkeyService {
             .spawn(move || {
                 #[cfg(windows)]
                 win::run(
-                    rx,
-                    event_tx,
-                    ctx,
-                    tid,
-                    tray_rgba,
-                    tray_size,
-                    tooltip,
-                    playback,
+                    rx, event_tx, ctx, tid, tray_rgba, tray_size, tooltip, playback,
                 );
                 #[cfg(not(windows))]
                 {
-                    let _ = (rx, event_tx, ctx, tid, tray_rgba, tray_size, tooltip, playback);
+                    let _ = (
+                        rx, event_tx, ctx, tid, tray_rgba, tray_size, tooltip, playback,
+                    );
                 }
             })
             .ok();
@@ -455,7 +451,7 @@ mod win {
     use std::rc::Rc;
     use windows::core::{w, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, BOOL,
+        CloseHandle, GetLastError, BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{
@@ -469,15 +465,15 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+        DestroyWindow, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindowLongPtrW,
         GetWindowTextW, GetWindowThreadProcessId, IsIconic, LoadIconW, PostMessageW,
         PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
         SetWindowLongPtrW, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
         UnhookWindowsHookEx, CREATESTRUCTW, GWLP_USERDATA, HHOOK, HMENU, IDI_APPLICATION,
         KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WM_APP, WM_CLOSE, WM_COMMAND,
+        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
         WM_CONTEXTMENU, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NULL,
-        WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, EnumWindows,
+        WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
     };
 
     pub const WAKE_MSG: u32 = WM_APP + 2;
@@ -688,17 +684,10 @@ mod win {
         true
     }
 
-    unsafe extern "system" fn keyboard_proc(
-        code: i32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
+    unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code >= 0 {
             let msg = wparam.0 as u32;
-            if matches!(
-                msg,
-                WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
-            ) {
+            if matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
                 let vk = kb.vkCode;
                 let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -707,9 +696,7 @@ mod win {
                     if is_down {
                         if !hook.down.contains(&vk) {
                             hook.down.push(vk);
-                            if let Some(id) =
-                                find_binding(&hook.bindings, current_mods(), vk)
-                            {
+                            if let Some(id) = find_binding(&hook.bindings, current_mods(), vk) {
                                 let _ = PostMessageW(
                                     hook.hwnd,
                                     PLAY_MSG,
@@ -741,7 +728,12 @@ mod win {
         }
     }
 
-    unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe extern "system" fn wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
         let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut State;
         if msg == WM_NCCREATE {
             let create = &*(lparam.0 as *const CREATESTRUCTW);
@@ -971,10 +963,7 @@ mod win {
             exe,
             found: HWND::default(),
         };
-        let _ = EnumWindows(
-            Some(visit),
-            LPARAM(&mut search as *mut Search as isize),
-        );
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
         search.found
     }
 
@@ -1002,7 +991,9 @@ mod win {
     /// documented way to drop it without touching the window styles; failures
     /// are ignored because the worst case is a stray button, not bad audio.
     pub unsafe fn set_taskbar_tab(visible: bool) {
-        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+        };
         use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 
         let hwnd = main_window();

@@ -75,7 +75,10 @@ pub fn resize_rgba(src: &[u8], sw: u32, sh: u32, dst: u32) -> Vec<u8> {
 }
 
 #[cfg(windows)]
-pub fn hicon_from_rgba(rgba: &[u8], size: u32) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
+pub fn hicon_from_rgba(
+    rgba: &[u8],
+    size: u32,
+) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Graphics::Gdi::{

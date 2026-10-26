@@ -144,10 +144,7 @@ impl Ring {
     }
 
     pub fn buffered_frames(&self) -> usize {
-        self.queue
-            .lock()
-            .map(|q| q.len() / CHANNELS)
-            .unwrap_or(0)
+        self.queue.lock().map(|q| q.len() / CHANNELS).unwrap_or(0)
     }
 }
 
@@ -393,7 +390,10 @@ impl Engine {
             _ => false,
         };
         if same_id {
-            let name = desired[0].as_ref().map(|r| r.name.clone()).unwrap_or_default();
+            let name = desired[0]
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
             let _ = self.events_tx.send(AudioEvent::Warning(format!(
                 "\"{name}\" is selected for both Monitor and Cable. Using it once."
             )));
@@ -521,7 +521,11 @@ impl Engine {
         };
         drop(rx);
 
-        let stream = self.loop_stream.lock().ok().and_then(|mut slot| slot.take());
+        let stream = self
+            .loop_stream
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
         if let Some(stream) = stream {
             stream.stop();
         }
@@ -818,16 +822,13 @@ mod loop_tests {
             loop_on_monitor: true,
             loop_on_cable: true,
         };
-        tx.send(vec![0.8f32; MIX_CHUNK_FRAMES * CHANNELS])
-            .unwrap();
+        tx.send(vec![0.8f32; MIX_CHUNK_FRAMES * CHANNELS]).unwrap();
 
         let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         mixer.render(&mut monitor, &mut cable);
         for out in [&monitor, &cable] {
-            assert!(out
-                .iter()
-                .all(|sample| (*sample - 0.2).abs() < 1e-6));
+            assert!(out.iter().all(|sample| (*sample - 0.2).abs() < 1e-6));
         }
     }
 
@@ -846,16 +847,13 @@ mod loop_tests {
             loop_on_monitor: true,
             loop_on_cable: true,
         };
-        tx.send(vec![0.25f32; MIX_CHUNK_FRAMES * CHANNELS])
-            .unwrap();
+        tx.send(vec![0.25f32; MIX_CHUNK_FRAMES * CHANNELS]).unwrap();
 
         let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         mixer.render(&mut monitor, &mut cable);
         for out in [&monitor, &cable] {
-            assert!(out
-                .iter()
-                .all(|sample| (*sample - 0.125).abs() < 1e-6));
+            assert!(out.iter().all(|sample| (*sample - 0.125).abs() < 1e-6));
         }
 
         // Channel drained: silence, not a stop.
@@ -882,21 +880,17 @@ mod loop_tests {
             loop_on_monitor: false,
             loop_on_cable: true,
         };
-        tx.send(vec![0.4f32; MIX_CHUNK_FRAMES * CHANNELS])
-            .unwrap();
+        tx.send(vec![0.4f32; MIX_CHUNK_FRAMES * CHANNELS]).unwrap();
 
         let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
         mixer.render(&mut monitor, &mut cable);
         assert!(monitor.iter().all(|sample| *sample == 0.0));
-        assert!(cable
-            .iter()
-            .all(|sample| (*sample - 0.4).abs() < 1e-6));
+        assert!(cable.iter().all(|sample| (*sample - 0.4).abs() < 1e-6));
 
         // Both outputs off: the loop is still consumed, but silent.
         mixer.loop_on_cable = false;
-        tx.send(vec![0.4f32; MIX_CHUNK_FRAMES * CHANNELS])
-            .unwrap();
+        tx.send(vec![0.4f32; MIX_CHUNK_FRAMES * CHANNELS]).unwrap();
         monitor.fill(0.0);
         cable.fill(0.0);
         mixer.render(&mut monitor, &mut cable);

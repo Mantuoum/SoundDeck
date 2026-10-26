@@ -64,10 +64,7 @@ pub fn parse(id: &str, text: &str, fallback: &Palette) -> ParsedTheme {
         }
         let key = cells[0].trim_matches('`').trim().to_ascii_lowercase();
         let value = cells[1].trim_matches('`').trim();
-        if key.is_empty()
-            || key == "token"
-            || key.chars().all(|ch| ch == '-' || ch == ':')
-        {
+        if key.is_empty() || key == "token" || key.chars().all(|ch| ch == '-' || ch == ':') {
             continue;
         }
         saw_token = true;
@@ -179,21 +176,13 @@ pub fn parse(id: &str, text: &str, fallback: &Palette) -> ParsedTheme {
                 "amber",
                 &mut warnings,
             ),
-            "red" => set_color(
-                &mut palette.red,
-                fallback.red,
-                value,
-                "red",
-                &mut warnings,
-            ),
+            "red" => set_color(&mut palette.red, fallback.red, value, "red", &mut warnings),
             other => warnings.push(format!("themes: unknown token \"{other}\" ignored")),
         }
     }
 
     if !saw_token {
-        warnings.push(format!(
-            "themes: \"{id}.md\" has no tokens; using Graphite"
-        ));
+        warnings.push(format!("themes: \"{id}.md\" has no tokens; using Graphite"));
     }
 
     // Derive the tinted accent surface unless the file provides it explicitly,

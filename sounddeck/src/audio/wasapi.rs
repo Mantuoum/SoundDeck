@@ -7,6 +7,7 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::Sender;
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Foundation::BOOL;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
@@ -15,11 +16,10 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
-    STGM_READ,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    COINIT_MULTITHREADED, STGM_READ,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
-use windows::Win32::Foundation::BOOL;
 
 use super::decode::SAMPLE_RATE;
 use super::engine::{AudioEvent, Ring, Slot};
@@ -85,9 +85,12 @@ fn err(e: windows::core::Error) -> String {
 }
 
 unsafe fn enumerate_inner() -> Result<DeviceList, String> {
-    let enumerator: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None::<&windows::core::IUnknown>, CLSCTX_ALL)
-            .map_err(err)?;
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+        &MMDeviceEnumerator,
+        None::<&windows::core::IUnknown>,
+        CLSCTX_ALL,
+    )
+    .map_err(err)?;
     let collection = enumerator
         .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
         .map_err(err)?;
@@ -180,8 +183,7 @@ unsafe fn parse_format(raw: *const WAVEFORMATEX) -> Result<Format, String> {
         }
         let ext = &*(raw as *const WAVEFORMATEXTENSIBLE);
         let subformat = std::ptr::read_unaligned(std::ptr::addr_of!(ext.SubFormat));
-        let float_guid =
-            GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
+        let float_guid = GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
         let pcm_guid = GUID::from_u128(0x0000_0001_0000_0010_8000_00aa_0038_9b71);
         if subformat == float_guid {
             tag = WAVE_FORMAT_IEEE_FLOAT;
@@ -239,7 +241,14 @@ pub fn spawn_render(
         .spawn(move || {
             crate::audio::raise_thread_priority();
             let _consumer = ConsumerGuard(consumer_ring.clone());
-            match render_loop(&device_id, &device_name, slot, &consumer_ring, &events, &stop) {
+            match render_loop(
+                &device_id,
+                &device_name,
+                slot,
+                &consumer_ring,
+                &events,
+                &stop,
+            ) {
                 Ok(()) => {
                     if !stop.load(Ordering::SeqCst) {
                         let _ = events.send(AudioEvent::Stopped {
@@ -282,9 +291,12 @@ fn render_loop(
     let _com = ComGuard::new()?;
 
     unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None::<&windows::core::IUnknown>, CLSCTX_ALL)
-                .map_err(err)?;
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(
+            &MMDeviceEnumerator,
+            None::<&windows::core::IUnknown>,
+            CLSCTX_ALL,
+        )
+        .map_err(err)?;
         let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
         let device = enumerator
             .GetDevice(PCWSTR(wide.as_ptr()))
@@ -464,10 +476,12 @@ unsafe fn write_output(format: &Format, stereo: &[f32], frames: usize, dst: *mut
             match format.kind {
                 SampleKind::F32 => (target as *mut f32).write_unaligned(value),
                 SampleKind::F64 => (target as *mut f64).write_unaligned(value as f64),
-                SampleKind::I16 => (target as *mut i16)
-                    .write_unaligned((value * i16::MAX as f32) as i16),
-                SampleKind::I32 => (target as *mut i32)
-                    .write_unaligned((value as f64 * i32::MAX as f64) as i32),
+                SampleKind::I16 => {
+                    (target as *mut i16).write_unaligned((value * i16::MAX as f32) as i16)
+                }
+                SampleKind::I32 => {
+                    (target as *mut i32).write_unaligned((value as f64 * i32::MAX as f64) as i32)
+                }
                 SampleKind::I24 => {
                     let sample = (value as f64 * 8_388_607.0) as i32;
                     let bytes = sample.to_le_bytes();

@@ -50,12 +50,7 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [
-        Self::Playback,
-        Self::Appearance,
-        Self::Window,
-        Self::About,
-    ];
+    const ALL: [Self; 4] = [Self::Playback, Self::Appearance, Self::Window, Self::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -253,9 +248,7 @@ impl App {
         for warning in theme::install(&cc.egui_ctx, &cfg.theme) {
             push_status(StatusKind::Warning, warning);
         }
-        let theme_was_corrected = !theme::available()
-            .iter()
-            .any(|(id, _)| id == &cfg.theme);
+        let theme_was_corrected = !theme::available().iter().any(|(id, _)| id == &cfg.theme);
         if theme_was_corrected {
             cfg.theme = "graphite".to_string();
             theme::set_theme("graphite");
@@ -280,8 +273,7 @@ impl App {
                     }
                     None => None,
                 };
-                let ram = hotkey.is_some()
-                    && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
+                let ram = hotkey.is_some() && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
                 sounds.push(Sound {
                     id: sound.id,
                     name: sound.name.clone(),
@@ -649,10 +641,7 @@ impl App {
         // receiving frames, so events still flow and the idle timer applies.
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         crate::hotkeys::set_taskbar_tab(false);
-        self.log(
-            StatusKind::Info,
-            "Minimized to tray - hotkeys still work",
-        );
+        self.log(StatusKind::Info, "Minimized to tray - hotkeys still work");
     }
 
     /// Hides to the tray only when the window actually becomes minimized.
@@ -773,10 +762,7 @@ impl App {
                                 from: index,
                                 size,
                                 name: sound.name.clone(),
-                                hotkey: sound
-                                    .hotkey
-                                    .map(|h| h.label())
-                                    .unwrap_or_default(),
+                                hotkey: sound.hotkey.map(|h| h.label()).unwrap_or_default(),
                             });
                         }
                     }
@@ -822,10 +808,7 @@ impl App {
             self.selected = None;
         }
         let label = sound.name.clone();
-        self.undo = Some(UndoDelete {
-            sound,
-            index,
-        });
+        self.undo = Some(UndoDelete { sound, index });
         self.sync_hotkeys();
         self.mark_dirty();
         self.log(
@@ -1092,12 +1075,18 @@ impl App {
                     "Added {added} sound{}{}{}",
                     if added == 1 { "" } else { "s" },
                     if skipped > 0 {
-                        format!(" - skipped {skipped} duplicate{}", if skipped == 1 { "" } else { "s" })
+                        format!(
+                            " - skipped {skipped} duplicate{}",
+                            if skipped == 1 { "" } else { "s" }
+                        )
                     } else {
                         String::new()
                     },
                     if unsupported > 0 {
-                        format!(" - ignored {unsupported} unsupported file{}", if unsupported == 1 { "" } else { "s" })
+                        format!(
+                            " - ignored {unsupported} unsupported file{}",
+                            if unsupported == 1 { "" } else { "s" }
+                        )
                     } else {
                         String::new()
                     }
@@ -1106,7 +1095,10 @@ impl App {
         } else if skipped > 0 {
             self.log(
                 StatusKind::Warning,
-                format!("Already in your library ({skipped} duplicate{})", if skipped == 1 { "" } else { "s" }),
+                format!(
+                    "Already in your library ({skipped} duplicate{})",
+                    if skipped == 1 { "" } else { "s" }
+                ),
             );
         } else if unsupported > 0 {
             self.log(
@@ -1202,9 +1194,7 @@ impl App {
 
     fn find_conflict(&self, hotkey: Hotkey, except_id: u64) -> Option<&Sound> {
         self.sounds.iter().find(|s| {
-            s.id != except_id
-                && s.library_id == self.active_library
-                && s.hotkey == Some(hotkey)
+            s.id != except_id && s.library_id == self.active_library && s.hotkey == Some(hotkey)
         })
     }
 
@@ -1238,9 +1228,9 @@ impl App {
     }
 
     fn next_sound_id(&mut self) -> u64 {
-        let id = self.next_id.max(
-            self.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1,
-        );
+        let id = self
+            .next_id
+            .max(self.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1);
         self.next_id = id + 1;
         id
     }
@@ -1357,14 +1347,20 @@ impl App {
         match wasapi::list_devices() {
             Ok(list) => {
                 self.devices = list.devices;
-                self.cfg.monitor_device =
-                    resolve_device(&self.devices, self.cfg.monitor_device.as_deref(), self.cfg.monitor_name.as_deref())
-                        .map(|d| d.id)
-                        .or_else(|| self.cfg.monitor_device.clone());
-                self.cfg.cable_device =
-                    resolve_device(&self.devices, self.cfg.cable_device.as_deref(), self.cfg.cable_name.as_deref())
-                        .map(|d| d.id)
-                        .or_else(|| self.cfg.cable_device.clone());
+                self.cfg.monitor_device = resolve_device(
+                    &self.devices,
+                    self.cfg.monitor_device.as_deref(),
+                    self.cfg.monitor_name.as_deref(),
+                )
+                .map(|d| d.id)
+                .or_else(|| self.cfg.monitor_device.clone());
+                self.cfg.cable_device = resolve_device(
+                    &self.devices,
+                    self.cfg.cable_device.as_deref(),
+                    self.cfg.cable_name.as_deref(),
+                )
+                .map(|d| d.id)
+                .or_else(|| self.cfg.cable_device.clone());
                 self.apply_routes();
                 self.log(
                     StatusKind::Info,
@@ -1432,20 +1428,32 @@ impl App {
                 .iter()
                 .find(|d| &d.id == id)
                 .cloned()
-                .or_else(|| Some(DeviceInfo {
-                    id: id.clone(),
-                    name: self.cfg.monitor_name.clone().unwrap_or_else(|| "Device".into()),
-                }))
+                .or_else(|| {
+                    Some(DeviceInfo {
+                        id: id.clone(),
+                        name: self
+                            .cfg
+                            .monitor_name
+                            .clone()
+                            .unwrap_or_else(|| "Device".into()),
+                    })
+                })
         });
         let cable = self.cfg.cable_device.as_ref().and_then(|id| {
             self.devices
                 .iter()
                 .find(|d| &d.id == id)
                 .cloned()
-                .or_else(|| Some(DeviceInfo {
-                    id: id.clone(),
-                    name: self.cfg.cable_name.clone().unwrap_or_else(|| "Cable".into()),
-                }))
+                .or_else(|| {
+                    Some(DeviceInfo {
+                        id: id.clone(),
+                        name: self
+                            .cfg
+                            .cable_name
+                            .clone()
+                            .unwrap_or_else(|| "Cable".into()),
+                    })
+                })
         });
         self.engine.set_routes(
             monitor.map(|d| DeviceRoute {
@@ -1490,11 +1498,7 @@ impl App {
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     if self.show_settings {
-                        ui.label(
-                            RichText::new("Settings")
-                                .size(13.0)
-                                .color(theme::muted()),
-                        );
+                        ui.label(RichText::new("Settings").size(13.0).color(theme::muted()));
                     } else {
                         self.library_bar(ui, tabs_width);
                     }
@@ -1583,7 +1587,8 @@ impl App {
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Monitor);
 
-                        ui.add_space(2.0 * gap);                        let link_rect = ui
+                        ui.add_space(2.0 * gap);
+                        let link_rect = ui
                             .allocate_exact_size(
                                 Vec2::new(ui.available_width(), 24.0),
                                 Sense::hover(),
@@ -1691,10 +1696,8 @@ impl App {
 
     /// Pill-shaped Box/List segmented control.
     fn layout_selector(&mut self, ui: &mut Ui) {
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), 30.0),
-            Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
         let painter = ui.painter();
         painter.rect(
             rect,
@@ -1720,20 +1723,23 @@ impl App {
             Pos2::new(inner.left() + smear * half, inner.top()),
             Vec2::new(half, inner.height()),
         );
-        painter.rect_filled(smear_pill, CornerRadius::same(theme::RADIUS_SM), theme::alpha(theme::accent(), 70));
+        painter.rect_filled(
+            smear_pill,
+            CornerRadius::same(theme::RADIUS_SM),
+            theme::alpha(theme::accent(), 70),
+        );
         painter.rect_filled(pill, CornerRadius::same(theme::RADIUS_SM), theme::accent());
 
-        for (index, layout) in [SoundLayout::Grid, SoundLayout::List].into_iter().enumerate() {
+        for (index, layout) in [SoundLayout::Grid, SoundLayout::List]
+            .into_iter()
+            .enumerate()
+        {
             let segment = Rect::from_min_size(
                 Pos2::new(inner.left() + index as f32 * half, inner.top()),
                 Vec2::new(half, inner.height()),
             );
             let active = self.cfg.layout == layout;
-            let response = ui.interact(
-                segment,
-                Id::new(("layout_segment", index)),
-                Sense::click(),
-            );
+            let response = ui.interact(segment, Id::new(("layout_segment", index)), Sense::click());
             if !active && response.hovered() {
                 painter.rect_filled(
                     segment,
@@ -1744,11 +1750,7 @@ impl App {
             let color = if active {
                 Color32::WHITE
             } else {
-                let hover = anim::hover(
-                    ui,
-                    Id::new(("layout_hover", index)),
-                    response.hovered(),
-                );
+                let hover = anim::hover(ui, Id::new(("layout_hover", index)), response.hovered());
                 let base = theme::muted();
                 theme::mix(base, theme::text(), hover * 0.4)
             };
@@ -1882,10 +1884,8 @@ impl App {
         let playable = has_file && error.is_none();
         let retry = has_file && error.is_some();
         let height = if compact { 44.0 } else { 84.0 };
-        let (rect, card_response) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), height),
-            Sense::hover(),
-        );
+        let (rect, card_response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let hover = anim::hover(ui, Id::new("loop_card"), ui.rect_contains_pointer(rect));
         let painter = ui.painter();
 
@@ -1912,7 +1912,10 @@ impl App {
 
         let (transport_rect, pick_rect) = if compact {
             (
-                Rect::from_min_size(Pos2::new(rect.left() + 7.0, rect.top() + 2.0), Vec2::splat(22.0)),
+                Rect::from_min_size(
+                    Pos2::new(rect.left() + 7.0, rect.top() + 2.0),
+                    Vec2::splat(22.0),
+                ),
                 Rect::from_min_size(
                     Pos2::new(rect.right() - 23.0, rect.top() + 5.0),
                     Vec2::splat(16.0),
@@ -2014,7 +2017,11 @@ impl App {
         );
 
         // FILE / LOOP badge.
-        let name_left = if compact { rect.left() + 62.0 } else { rect.left() + 52.0 };
+        let name_left = if compact {
+            rect.left() + 62.0
+        } else {
+            rect.left() + 52.0
+        };
         let name_right = pick_rect.left() - 6.0;
         if compact {
             painter.text(
@@ -2157,10 +2164,8 @@ impl App {
         let row_h = 15.0;
         // The dB scale is the first thing to go on short windows.
         let scale_h = if compact { 0.0 } else { 13.0 };
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(width, row_h * 2.0 + scale_h),
-            Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(width, row_h * 2.0 + scale_h), Sense::hover());
         let painter = ui.painter();
 
         for (slot, label) in ["Monitor", "Cable"].iter().enumerate() {
@@ -2218,16 +2223,10 @@ impl App {
             let latest = self.statuses.last();
             let (kind, text) = match latest {
                 Some(entry) => (entry.kind, entry.text.clone()),
-                None => (
-                    StatusKind::Info,
-                    "Ready".to_string(),
-                ),
+                None => (StatusKind::Info, "Ready".to_string()),
             };
             status_dot(ui, kind.color());
-            ui.add(
-                egui::Label::new(RichText::new(text).size(12.5).color(kind.color()))
-                    .truncate(),
-            );
+            ui.add(egui::Label::new(RichText::new(text).size(12.5).color(kind.color())).truncate());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if tiny_button(ui, "Activity log").clicked() {
                     self.show_log = true;
@@ -2286,10 +2285,11 @@ impl App {
         let allow_drag = self.search.trim().is_empty();
         let capture_id = self.capture.as_ref().map(|c| c.sound_id);
 
-        if self.sounds.is_empty() || !self
-            .sounds
-            .iter()
-            .any(|sound| sound.library_id == self.active_library)
+        if self.sounds.is_empty()
+            || !self
+                .sounds
+                .iter()
+                .any(|sound| sound.library_id == self.active_library)
         {
             self.empty_state(ui);
         } else if filtered.is_empty() {
@@ -2363,9 +2363,7 @@ impl App {
                 |ui| {
                     egui::ScrollArea::horizontal()
                         .id_salt("library_tabs")
-                        .scroll_bar_visibility(
-                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                        )
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .auto_shrink([true, true])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -2400,10 +2398,7 @@ impl App {
                                         }
                                         if can_delete
                                             && ui
-                                                .button(
-                                                    RichText::new("Delete")
-                                                        .color(theme::red()),
-                                                )
+                                                .button(RichText::new("Delete").color(theme::red()))
                                                 .on_hover_text(
                                                     "Sounds are moved to another library",
                                                 )
@@ -2488,10 +2483,7 @@ impl App {
 
     fn delete_library(&mut self, id: u64) {
         if self.libraries.len() <= 1 {
-            self.log(
-                StatusKind::Warning,
-                "At least one library is required",
-            );
+            self.log(StatusKind::Warning, "At least one library is required");
             return;
         }
         let Some(index) = self.libraries.iter().position(|l| l.id == id) else {
@@ -2551,10 +2543,7 @@ impl App {
         }
         self.mark_dirty();
         self.sync_active_library();
-        self.log(
-            StatusKind::Info,
-            format!("Moved \"{name}\" to \"{label}\""),
-        );
+        self.log(StatusKind::Info, format!("Moved \"{name}\" to \"{label}\""));
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -2600,9 +2589,7 @@ impl App {
                 let state = self.ram_summary();
                 let (label, color, enabled) = match state {
                     None => ("No hotkeys".to_string(), theme::faint(), false),
-                    Some(RamState::On) => {
-                        ("Hotkey sounds: RAM".to_string(), theme::accent(), true)
-                    }
+                    Some(RamState::On) => ("Hotkey sounds: RAM".to_string(), theme::accent(), true),
                     Some(RamState::Off) => {
                         ("Hotkey sounds: DISK".to_string(), theme::muted(), true)
                     }
@@ -2610,14 +2597,15 @@ impl App {
                         ("Hotkey sounds: MIXED".to_string(), theme::purple(), true)
                     }
                 };
-                let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(pill_width, 28.0),
-                    Sense::hover(),
-                );
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(pill_width, 28.0), Sense::hover());
                 let response = ui.interact(
                     rect,
                     Id::new("ram_status_pill"),
-                    if enabled { Sense::click() } else { Sense::hover() },
+                    if enabled {
+                        Sense::click()
+                    } else {
+                        Sense::hover()
+                    },
                 );
                 let painter = ui.painter();
                 painter.rect(
@@ -2682,7 +2670,8 @@ impl App {
             painter.rect_stroke(
                 rect,
                 CornerRadius::same(theme::RADIUS_XL),
-                Stroke::new(1.0_f32,
+                Stroke::new(
+                    1.0_f32,
                     if response.hovered() {
                         theme::alpha(theme::accent(), 160)
                     } else {
@@ -2769,7 +2758,11 @@ impl App {
         ui.add_space((ui.available_height() - footer_height).max(8.0));
         settings_rule(ui);
         ui.add_space(6.0);
-        if settings_nav_item(ui, SettingsTab::About, self.settings_tab == SettingsTab::About) {
+        if settings_nav_item(
+            ui,
+            SettingsTab::About,
+            self.settings_tab == SettingsTab::About,
+        ) {
             self.select_settings_tab(SettingsTab::About, ui.ctx());
         }
     }
@@ -2817,12 +2810,7 @@ impl App {
             let mut enabled = self.cfg.loop_enabled;
             let mut toggled = false;
             settings_row(ui, "Enabled", 80.0, |ui| {
-                toggled = settings_switch(
-                    ui,
-                    Id::new("settings_loop_enabled"),
-                    &mut enabled,
-                    true,
-                );
+                toggled = settings_switch(ui, Id::new("settings_loop_enabled"), &mut enabled, true);
             });
             if toggled {
                 self.set_loop_enabled(enabled);
@@ -2838,19 +2826,13 @@ impl App {
                 let mut monitor = self.cfg.loop_on_monitor;
                 let mut monitor_changed = false;
                 settings_row(ui, "Monitor", 80.0, |ui| {
-                    monitor_changed = settings_switch(
-                        ui,
-                        Id::new("settings_loop_monitor"),
-                        &mut monitor,
-                        true,
-                    );
+                    monitor_changed =
+                        settings_switch(ui, Id::new("settings_loop_monitor"), &mut monitor, true);
                 });
                 if monitor_changed {
                     self.cfg.loop_on_monitor = monitor;
-                    self.engine.set_loop_outputs(
-                        self.cfg.loop_on_monitor,
-                        self.cfg.loop_on_cable,
-                    );
+                    self.engine
+                        .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
                     self.mark_dirty();
                 }
 
@@ -2858,19 +2840,13 @@ impl App {
                 let mut cable = self.cfg.loop_on_cable;
                 let mut cable_changed = false;
                 settings_row(ui, "Cable", 80.0, |ui| {
-                    cable_changed = settings_switch(
-                        ui,
-                        Id::new("settings_loop_cable"),
-                        &mut cable,
-                        true,
-                    );
+                    cable_changed =
+                        settings_switch(ui, Id::new("settings_loop_cable"), &mut cable, true);
                 });
                 if cable_changed {
                     self.cfg.loop_on_cable = cable;
-                    self.engine.set_loop_outputs(
-                        self.cfg.loop_on_monitor,
-                        self.cfg.loop_on_cable,
-                    );
+                    self.engine
+                        .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
                     self.mark_dirty();
                 }
             });
@@ -3010,12 +2986,7 @@ impl App {
             let mut show_gain = self.cfg.show_gain_slider;
             let mut changed = false;
             settings_row(ui, "Show gain", 80.0, |ui| {
-                changed = settings_switch(
-                    ui,
-                    Id::new("settings_show_gain"),
-                    &mut show_gain,
-                    true,
-                );
+                changed = settings_switch(ui, Id::new("settings_show_gain"), &mut show_gain, true);
             });
             if changed {
                 self.cfg.show_gain_slider = show_gain;
@@ -3164,15 +3135,13 @@ impl App {
         }
 
         let sound_name = self.sound_name(capture.sound_id);
-        let conflict = capture
-            .current
-            .and_then(|hk| self.find_conflict(hk, capture.sound_id).map(|s| s.name.clone()));
+        let conflict = capture.current.and_then(|hk| {
+            self.find_conflict(hk, capture.sound_id)
+                .map(|s| s.name.clone())
+        });
 
         let modal_area = egui::Modal::default_area(Id::new("capture_modal"))
-            .anchor(
-                Align2::CENTER_CENTER,
-                Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0),
-            );
+            .anchor(Align2::CENTER_CENTER, Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0));
         let modal = egui::Modal::new(Id::new("capture_modal"))
             .area(modal_area)
             .backdrop_color(Color32::TRANSPARENT)
@@ -3193,12 +3162,14 @@ impl App {
                 );
                 ui.add_space(12.0);
 
-                let box_rect = Rect::from_min_size(
-                    ui.cursor().min,
-                    Vec2::new(ui.available_width(), 96.0),
-                );
+                let box_rect =
+                    Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 96.0));
                 let painter = ui.painter();
-                painter.rect_filled(box_rect, CornerRadius::same(theme::RADIUS_MD), theme::field());
+                painter.rect_filled(
+                    box_rect,
+                    CornerRadius::same(theme::RADIUS_MD),
+                    theme::field(),
+                );
                 painter.rect_stroke(
                     box_rect,
                     CornerRadius::same(theme::RADIUS_MD),
@@ -3385,10 +3356,9 @@ impl App {
                     }
                 }
                 RenameTarget::Library(id) => {
-                    let duplicate = self
-                        .libraries
-                        .iter()
-                        .any(|library| library.id != id && library.name.eq_ignore_ascii_case(&name));
+                    let duplicate = self.libraries.iter().any(|library| {
+                        library.id != id && library.name.eq_ignore_ascii_case(&name)
+                    });
                     if duplicate {
                         self.log(
                             StatusKind::Warning,
@@ -3458,18 +3428,18 @@ impl App {
                         for (kind, when, text) in entries.iter() {
                             ui.horizontal_top(|ui| {
                                 status_dot(ui, kind.color());
-                                ui.label(
-                                    RichText::new(text)
-                                        .size(12.5)
-                                        .color(if *kind == StatusKind::Error {
-                                            theme::red()
-                                        } else {
-                                            theme::text()
-                                        }),
-                                );
+                                ui.label(RichText::new(text).size(12.5).color(
+                                    if *kind == StatusKind::Error {
+                                        theme::red()
+                                    } else {
+                                        theme::text()
+                                    },
+                                ));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.label(
-                                        RichText::new(when.clone()).size(10.0).color(theme::faint()),
+                                        RichText::new(when.clone())
+                                            .size(10.0)
+                                            .color(theme::faint()),
                                     );
                                 });
                             });
@@ -3780,7 +3750,10 @@ impl App {
             || self.meter_db.iter().any(|db| *db > -59.5)
             || self.meter_peak_db.iter().any(|db| *db > -59.5);
 
-        match (self.show_settings && !flashing, moving || flashing || fading) {
+        match (
+            self.show_settings && !flashing,
+            moving || flashing || fading,
+        ) {
             (_, false) => IDLE,
             (true, true) => SETTINGS_AUDIO,
             (false, true) => ANIM,
@@ -3826,7 +3799,10 @@ impl App {
         let tip = if playing > 0 {
             format!("{APP_NAME} - {playing} playing - {loaded} in RAM")
         } else {
-            format!("{APP_NAME} - {} sounds - {loaded} in RAM", self.sounds.len())
+            format!(
+                "{APP_NAME} - {} sounds - {loaded} in RAM",
+                self.sounds.len()
+            )
         };
         if tip != self.last_tip {
             self.hotkeys.set_tooltip(tip.clone());
@@ -3898,16 +3874,12 @@ impl eframe::App for App {
             egui::SidePanel::left("settings_rail")
                 .resizable(false)
                 .exact_width(200.0)
-                .frame(
-                    Frame::NONE
-                        .fill(theme::panel_deep())
-                        .inner_margin(Margin {
-                            left: 14,
-                            right: 14,
-                            top: 14,
-                            bottom: 16,
-                        }),
-                )
+                .frame(Frame::NONE.fill(theme::panel_deep()).inner_margin(Margin {
+                    left: 14,
+                    right: 14,
+                    top: 14,
+                    bottom: 16,
+                }))
                 .show(ctx, |ui| self.settings_rail(ui))
         } else {
             egui::SidePanel::right("sidebar")
@@ -3931,10 +3903,7 @@ impl eframe::App for App {
         // Separator between the rail and the content. Clamp it to the area
         // between the title bar and the status bar so it never bleeds into the
         // status strip (which is drawn on top of the panel's layer).
-        let divider = egui::Rangef::new(
-            titlebar_rect.bottom() + 1.0,
-            status_rect.top(),
-        );
+        let divider = egui::Rangef::new(titlebar_rect.bottom() + 1.0, status_rect.top());
         let edge = if self.show_settings {
             side.response.rect.right()
         } else {
@@ -3950,18 +3919,26 @@ impl eframe::App for App {
                     bottom: 14,
                 }))
                 .show(ctx, |ui| {
-                    ui.painter()
-                        .with_clip_rect(screen)
-                        .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
+                    ui.painter().with_clip_rect(screen).vline(
+                        edge,
+                        divider,
+                        Stroke::new(1.0_f32, theme::border()),
+                    );
                     self.settings_content(ctx, ui);
                 });
         } else {
             egui::CentralPanel::default()
-                .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin::symmetric(14, 10)))
+                .frame(
+                    Frame::NONE
+                        .fill(theme::bg())
+                        .inner_margin(Margin::symmetric(14, 10)),
+                )
                 .show(ctx, |ui| {
-                    ui.painter()
-                        .with_clip_rect(screen)
-                        .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
+                    ui.painter().with_clip_rect(screen).vline(
+                        edge,
+                        divider,
+                        Stroke::new(1.0_f32, theme::border()),
+                    );
                     self.main_page(ui);
                 });
         }
@@ -4039,12 +4016,7 @@ fn settings_group(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) 
     ui.add_space(14.0);
 }
 
-fn settings_row(
-    ui: &mut Ui,
-    title: &str,
-    control_width: f32,
-    add_control: impl FnOnce(&mut Ui),
-) {
+fn settings_row(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
     let width = ui.available_width();
     if width < 620.0 {
         ui.vertical(|ui| {
@@ -4127,10 +4099,8 @@ fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool
 }
 
 fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 34.0),
-        Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
     let hover = anim::hover(
         ui,
         Id::new(("settings_nav", tab.title())),
@@ -4180,10 +4150,8 @@ fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
 }
 
 fn settings_back(ui: &mut Ui) -> bool {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 26.0),
-        Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
     let hover = anim::hover(ui, Id::new("settings_back"), response.hovered());
     let painter = ui.painter();
     if hover > 0.01 {
@@ -4200,14 +4168,8 @@ fn settings_back(ui: &mut Ui) -> bool {
     };
     let stroke = Stroke::new(1.4_f32, color);
     let center = rect.left_center() + Vec2::new(9.0, 0.0);
-    painter.line_segment(
-        [center + Vec2::new(4.0, -4.0), center],
-        stroke,
-    );
-    painter.line_segment(
-        [center, center + Vec2::new(4.0, 4.0)],
-        stroke,
-    );
+    painter.line_segment([center + Vec2::new(4.0, -4.0), center], stroke);
+    painter.line_segment([center, center + Vec2::new(4.0, 4.0)], stroke);
     painter.text(
         rect.left_center() + Vec2::new(22.0, 0.0),
         Align2::LEFT_CENTER,
@@ -4220,12 +4182,7 @@ fn settings_back(ui: &mut Ui) -> bool {
         .clicked()
 }
 
-fn paint_settings_icon(
-    painter: &egui::Painter,
-    rect: Rect,
-    tab: SettingsTab,
-    color: Color32,
-) {
+fn paint_settings_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, color: Color32) {
     let center = rect.center();
     match tab {
         SettingsTab::Playback => paint_play_icon(painter, rect, color),
@@ -4259,10 +4216,7 @@ fn paint_settings_icon(
             painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
             painter.circle_filled(center + Vec2::new(0.0, -2.6), 1.0, color);
             painter.line_segment(
-                [
-                    center + Vec2::new(0.0, -0.6),
-                    center + Vec2::new(0.0, 3.8),
-                ],
+                [center + Vec2::new(0.0, -0.6), center + Vec2::new(0.0, 3.8)],
                 Stroke::new(1.4_f32, color),
             );
         }
@@ -4287,8 +4241,8 @@ fn draw_grid(
     // (or hides behind) the sidebar.
     let width = (ui.available_width() - 9.0).max(180.0);
     let columns = (((width + spacing) / 238.0).floor() as usize).clamp(1, 6);
-    let card_width = ((width - spacing * (columns.saturating_sub(1)) as f32) / columns as f32)
-        .max(170.0);
+    let card_width =
+        ((width - spacing * (columns.saturating_sub(1)) as f32) / columns as f32).max(170.0);
 
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -4367,10 +4321,8 @@ fn draw_list(
 }
 
 fn centered_modal_area(id: Id) -> egui::Area {
-    egui::Modal::default_area(id).anchor(
-        Align2::CENTER_CENTER,
-        Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0),
-    )
+    egui::Modal::default_area(id)
+        .anchor(Align2::CENTER_CENTER, Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0))
 }
 
 fn modal_header(ui: &mut Ui, title: &str, id: Id, close: &mut bool) {
@@ -4416,17 +4368,11 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
     // Both diagonals; the press squeezes them slightly toward the centre.
     let arm = 4.0 - press * 0.6;
     painter.line_segment(
-        [
-            center + Vec2::new(-arm, -arm),
-            center + Vec2::new(arm, arm),
-        ],
+        [center + Vec2::new(-arm, -arm), center + Vec2::new(arm, arm)],
         stroke,
     );
     painter.line_segment(
-        [
-            center + Vec2::new(arm, -arm),
-            center + Vec2::new(-arm, arm),
-        ],
+        [center + Vec2::new(arm, -arm), center + Vec2::new(-arm, arm)],
         stroke,
     );
     response
@@ -4464,7 +4410,11 @@ fn hotkey_pill(
     let (label, color) = match sound.hotkey {
         Some(hotkey) => (
             hotkey.label(),
-            if has_error { theme::red() } else { theme::text() },
+            if has_error {
+                theme::red()
+            } else {
+                theme::text()
+            },
         ),
         None => ("Set hotkey".to_string(), theme::faint()),
     };
@@ -4650,8 +4600,7 @@ fn sound_card(
         .unwrap_or(false);
 
     let hover = anim::hover(ui, Id::new(("card_hover", sound.id)), response.hovered());
-    let (fill, border, width) =
-        sound_surface(hover, ram_active, playing, missing, selected, flash);
+    let (fill, border, width) = sound_surface(hover, ram_active, playing, missing, selected, flash);
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_LG),
@@ -4719,13 +4668,22 @@ fn sound_card(
         rect.left_top() + Vec2::new(13.0, 30.0),
         Pos2::new(rect.right() - 38.0, rect.top() + 68.0),
     );
-    let name = theme::truncate(&painter, &sound.name, theme::medium(17.0), name_rect.width());
+    let name = theme::truncate(
+        &painter,
+        &sound.name,
+        theme::medium(17.0),
+        name_rect.width(),
+    );
     painter.text(
         name_rect.left_center(),
         Align2::LEFT_CENTER,
         name,
         theme::medium(17.0),
-        if missing { theme::mix(theme::text(), theme::red(), 0.4) } else { theme::text() },
+        if missing {
+            theme::mix(theme::text(), theme::red(), 0.4)
+        } else {
+            theme::text()
+        },
     );
 
     // Hotkey pill.
@@ -4772,7 +4730,8 @@ fn sound_card(
     if response.double_clicked() {
         actions.push(Action::Rename(sound.id));
     }
-    response.on_hover_text(sound.path.display().to_string())
+    response
+        .on_hover_text(sound.path.display().to_string())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
 
     (rect, actions)
@@ -4790,18 +4749,21 @@ fn sound_row(
     libraries: &[Library],
 ) -> (Rect, Vec<Action>) {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click_and_drag());
     let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
     let ram_active = has_hotkey && sound.ram;
     let missing = is_missing(info);
     let playing = progress.is_some();
-    let flash = sound.flash_until.map(|t| t > Instant::now()).unwrap_or(false);
+    let flash = sound
+        .flash_until
+        .map(|t| t > Instant::now())
+        .unwrap_or(false);
 
     let hover = anim::hover(ui, Id::new(("row_hover", sound.id)), response.hovered());
-    let (fill, border, width) =
-        sound_surface(hover, ram_active, playing, missing, selected, flash);
+    let (fill, border, width) = sound_surface(hover, ram_active, playing, missing, selected, flash);
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_MD),
@@ -4836,18 +4798,24 @@ fn sound_row(
     // instead of floating as a short bar in a maximized window.
     let name_rect = Rect::from_min_max(
         rect.left_center() + Vec2::new(16.0, -14.0),
-        Pos2::new(
-            rect.left() + rect.width() * 0.38,
-            rect.center().y + 14.0,
-        ),
+        Pos2::new(rect.left() + rect.width() * 0.38, rect.center().y + 14.0),
     );
-    let name = theme::truncate(&painter, &sound.name, theme::medium(15.0), name_rect.width());
+    let name = theme::truncate(
+        &painter,
+        &sound.name,
+        theme::medium(15.0),
+        name_rect.width(),
+    );
     painter.text(
         name_rect.left_center(),
         Align2::LEFT_CENTER,
         name,
         theme::medium(15.0),
-        if missing { theme::mix(theme::text(), theme::red(), 0.4) } else { theme::text() },
+        if missing {
+            theme::mix(theme::text(), theme::red(), 0.4)
+        } else {
+            theme::text()
+        },
     );
 
     let pill_rect = Rect::from_center_size(
@@ -4891,7 +4859,12 @@ fn sound_row(
         Pos2::new(rect.right() - 18.0, rect.center().y),
         Vec2::new(26.0, 26.0),
     );
-    let close = close_button(ui, &painter, close_rect, ui.id().with(("rowclose", sound.id)));
+    let close = close_button(
+        ui,
+        &painter,
+        close_rect,
+        ui.id().with(("rowclose", sound.id)),
+    );
     if close.clicked() {
         actions.push(Action::Remove(sound.id));
     }
@@ -4931,7 +4904,8 @@ fn sound_row(
         Some(error) => error.clone(),
         None => sound.path.display().to_string(),
     };
-    response.on_hover_text(tooltip)
+    response
+        .on_hover_text(tooltip)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
 
     (rect, actions)
@@ -5024,21 +4998,13 @@ fn library_tab_width(ui: &Ui, name: &str, active: bool) -> f32 {
     } else {
         theme::ui_font(13.0)
     };
-    let galley = ui.painter().layout_no_wrap(
-        name.to_owned(),
-        font,
-        theme::text(),
-    );
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), font, theme::text());
     (galley.size().x + 24.0).clamp(58.0, 168.0)
 }
 
-fn paint_library_tab(
-    painter: &egui::Painter,
-    rect: Rect,
-    name: &str,
-    active: bool,
-    hover: f32,
-) {
+fn paint_library_tab(painter: &egui::Painter, rect: Rect, name: &str, active: bool, hover: f32) {
     if active {
         painter.rect_filled(
             rect,
@@ -5063,13 +5029,7 @@ fn paint_library_tab(
         theme::mix(theme::muted(), theme::text(), hover * 0.4)
     };
     let label = theme::truncate(painter, name, font.clone(), rect.width() - 16.0);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        label,
-        font,
-        color,
-    );
+    painter.text(rect.center(), Align2::CENTER_CENTER, label, font, color);
     if active {
         painter.rect_filled(
             Rect::from_min_max(
@@ -5148,8 +5108,13 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     } else {
         theme::field()
     })
-    .stroke(Stroke::new(1.0_f32,
-        if enabled { theme::accent() } else { theme::border() },
+    .stroke(Stroke::new(
+        1.0_f32,
+        if enabled {
+            theme::accent()
+        } else {
+            theme::border()
+        },
     ))
     .corner_radius(theme::RADIUS_MD);
     let mut response = ui.add_sized(size, button);
@@ -5161,7 +5126,12 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
         Id::new(("accent", text, size.x as i32, size.y as i32)),
         response.is_pointer_button_down_on(),
     );
-    press_overlay(ui.painter(), response.rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
+    press_overlay(
+        ui.painter(),
+        response.rect.shrink2(Vec2::new(2.0, 2.0)),
+        theme::RADIUS_MD,
+        press,
+    );
     response
 }
 
@@ -5178,26 +5148,31 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
         Id::new(("ghost", text, size.x as i32, size.y as i32)),
         response.is_pointer_button_down_on(),
     );
-    press_overlay(ui.painter(), response.rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
+    press_overlay(
+        ui.painter(),
+        response.rect.shrink2(Vec2::new(2.0, 2.0)),
+        theme::RADIUS_MD,
+        press,
+    );
     response
 }
 
 fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
-    let response = ui.add(
-        Button::new(RichText::new(text).size(11.5).color(theme::muted()))
-            .frame(false),
+    let response =
+        ui.add(Button::new(RichText::new(text).size(11.5).color(theme::muted())).frame(false));
+    let press = anim::press(
+        ui,
+        Id::new(("tiny", text)),
+        response.is_pointer_button_down_on(),
     );
-    let press = anim::press(ui, Id::new(("tiny", text)), response.is_pointer_button_down_on());
     press_overlay(ui.painter(), response.rect, theme::RADIUS_SM, press);
     response
 }
 
 fn section_line(ui: &mut Ui) {
-    let rect = Rect::from_min_size(
-        ui.cursor().min,
-        Vec2::new(ui.available_width(), 1.0),
-    );
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, theme::border_soft());
+    let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 1.0));
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, theme::border_soft());
     ui.allocate_space(rect.size());
 }
 
@@ -5223,7 +5198,11 @@ fn paint_logo(painter: &egui::Painter, rect: Rect) {
                 Vec2::new(2.8, *height),
             ),
             CornerRadius::same(1),
-            if i == 1 { theme::accent() } else { theme::text() },
+            if i == 1 {
+                theme::accent()
+            } else {
+                theme::text()
+            },
         );
     }
 }
@@ -5258,7 +5237,8 @@ fn paint_link_row(ui: &mut Ui, rect: Rect, linked: bool) {
         } else {
             theme::field()
         },
-        Stroke::new(1.0_f32,
+        Stroke::new(
+            1.0_f32,
             if linked {
                 theme::accent()
             } else if hovered {
@@ -5272,7 +5252,11 @@ fn paint_link_row(ui: &mut Ui, rect: Rect, linked: bool) {
     theme::chain_icon(
         painter,
         button.shrink(8.0),
-        if linked { theme::accent() } else { theme::muted() },
+        if linked {
+            theme::accent()
+        } else {
+            theme::muted()
+        },
         linked,
     );
 }
@@ -5304,7 +5288,12 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
         Id::new(("window_button", kind as i32)),
         response.is_pointer_button_down_on(),
     );
-    press_overlay(ui.painter(), rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
+    press_overlay(
+        ui.painter(),
+        rect.shrink2(Vec2::new(2.0, 2.0)),
+        theme::RADIUS_MD,
+        press,
+    );
     let color = if close && hovered {
         theme::red()
     } else if hovered {
@@ -5317,7 +5306,10 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
     match kind {
         WindowButton::Minimize => {
             ui.painter().line_segment(
-                [Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x + 5.0, c.y + 4.0)],
+                [
+                    Pos2::new(c.x - 5.0, c.y + 4.0),
+                    Pos2::new(c.x + 5.0, c.y + 4.0),
+                ],
                 stroke,
             );
         }
@@ -5330,14 +5322,10 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
             );
         }
         WindowButton::Close => {
-            ui.painter().line_segment(
-                [c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)],
-                stroke,
-            );
-            ui.painter().line_segment(
-                [c + Vec2::new(4.5, -4.5), c + Vec2::new(-4.5, 4.5)],
-                stroke,
-            );
+            ui.painter()
+                .line_segment([c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)], stroke);
+            ui.painter()
+                .line_segment([c + Vec2::new(4.5, -4.5), c + Vec2::new(-4.5, 4.5)], stroke);
         }
     }
     let tooltip = match kind {
@@ -5368,7 +5356,6 @@ fn level_x(bar: Rect, db: f32) -> f32 {
     bar.left() + bar.width() * t
 }
 
-
 fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
     painter.rect_filled(bar, CornerRadius::same(2), theme::field());
     let zones = [
@@ -5380,23 +5367,21 @@ fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
     for (low, high, color) in zones {
         let left = level_x(bar, low);
         let right = level_x(bar, high);
-        let zone = Rect::from_min_max(
-            Pos2::new(left, bar.top()),
-            Pos2::new(right, bar.bottom()),
-        );
+        let zone = Rect::from_min_max(Pos2::new(left, bar.top()), Pos2::new(right, bar.bottom()));
         painter.rect_filled(zone, CornerRadius::ZERO, theme::alpha(color, 34));
         if level > left {
-            let fill = Rect::from_min_max(
-                zone.left_top(),
-                Pos2::new(level.min(right), bar.bottom()),
-            );
+            let fill =
+                Rect::from_min_max(zone.left_top(), Pos2::new(level.min(right), bar.bottom()));
             painter.rect_filled(fill, CornerRadius::ZERO, color);
         }
     }
     if peak_db > -59.5 {
         let x = level_x(bar, peak_db);
         painter.line_segment(
-            [Pos2::new(x, bar.top() - 1.0), Pos2::new(x, bar.bottom() + 1.0)],
+            [
+                Pos2::new(x, bar.top() - 1.0),
+                Pos2::new(x, bar.bottom() + 1.0),
+            ],
             Stroke::new(1.0_f32, theme::text()),
         );
     }
@@ -5485,7 +5470,11 @@ fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enab
     painter.circle_filled(
         Pos2::new(knob_x, rect.center().y),
         8.0,
-        if enabled { theme::text() } else { theme::faint() },
+        if enabled {
+            theme::text()
+        } else {
+            theme::faint()
+        },
     );
 }
 

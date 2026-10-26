@@ -184,10 +184,7 @@ fn run_diag() -> Result<(), String> {
     println!(
         "Monitor: {}\nCable:   {}",
         monitor.name,
-        cable
-            .as_ref()
-            .map(|d| d.name.as_str())
-            .unwrap_or("<none>")
+        cable.as_ref().map(|d| d.name.as_str()).unwrap_or("<none>")
     );
 
     let engine = Arc::new(Engine::new(1.0, 0.7, 0.0));
@@ -210,9 +207,7 @@ fn run_diag() -> Result<(), String> {
     let file = std::env::args()
         .nth(2)
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            model::app_dir().join("test_sounds").join("airhorn.wav")
-        });
+        .unwrap_or_else(|| model::app_dir().join("test_sounds").join("airhorn.wav"));
     if file.exists() {
         println!("Decoding {}", file.display());
         let audio = decode_file(&file).map_err(|e| format!("{e:#}"))?;

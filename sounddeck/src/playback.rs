@@ -317,13 +317,7 @@ impl Playback {
         events
     }
 
-    fn enqueue(
-        &self,
-        entry: &mut Playable,
-        id: u64,
-        retain: bool,
-        verbose: bool,
-    ) -> Option<Job> {
+    fn enqueue(&self, entry: &mut Playable, id: u64, retain: bool, verbose: bool) -> Option<Job> {
         entry.loading = true;
         Some(Job {
             id,

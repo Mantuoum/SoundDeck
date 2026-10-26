@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter,
-    Pos2, Rect, Stroke, StrokeKind, Vec2,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2,
+    Rect, Stroke, StrokeKind, Vec2,
 };
 
 use super::theme_color::blend;
@@ -177,7 +177,6 @@ pub fn medium(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(UI_FONT_MEDIUM.into()))
 }
 
-
 fn themes_dir() -> PathBuf {
     crate::model::config_dir().join("themes")
 }
@@ -201,10 +200,7 @@ fn seed_defaults(dir: &Path, warnings: &mut Vec<String>) {
         return;
     }
     if let Err(err) = fs::create_dir_all(dir) {
-        warnings.push(format!(
-            "themes: could not create {}: {err}",
-            dir.display()
-        ));
+        warnings.push(format!("themes: could not create {}: {err}", dir.display()));
         return;
     }
     for (id, name, palette) in theme_defaults::all() {
@@ -213,10 +209,7 @@ fn seed_defaults(dir: &Path, warnings: &mut Vec<String>) {
             continue;
         }
         if let Err(err) = fs::write(&path, theme_file::template(name, &palette)) {
-            warnings.push(format!(
-                "themes: could not write {}: {err}",
-                path.display()
-            ));
+            warnings.push(format!("themes: could not write {}: {err}", path.display()));
         }
     }
 }
@@ -257,10 +250,7 @@ pub fn reload() -> Vec<String> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) => {
-                warnings.push(format!(
-                    "themes: could not read {}: {err}",
-                    path.display()
-                ));
+                warnings.push(format!("themes: could not read {}: {err}", path.display()));
                 continue;
             }
         };
@@ -501,4 +491,3 @@ pub fn truncate(painter: &Painter, text: &str, font: FontId, max_width: f32) -> 
         chars[..low].iter().collect::<String>() + "..."
     }
 }
-

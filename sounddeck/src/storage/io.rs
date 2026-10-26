@@ -65,9 +65,7 @@ pub fn load_json<T: DeserializeOwned + Default>(
 
     if let Ok(value) = parse::<T>(&tmp) {
         match fs::rename(&tmp, path) {
-            Ok(()) => warnings.push(format!(
-                "{label} recovered from an interrupted save."
-            )),
+            Ok(()) => warnings.push(format!("{label} recovered from an interrupted save.")),
             Err(_) => {
                 // Leave the temp file in place; it is still valid if we need it.
                 return value;

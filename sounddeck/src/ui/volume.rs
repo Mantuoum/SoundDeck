@@ -85,7 +85,11 @@ pub fn bar(
     );
     painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
     let knob = Pos2::new(filled.right(), track.center().y);
-    painter.circle_filled(knob, if response.hovered() { 5.0 } else { 4.0 }, theme::text());
+    painter.circle_filled(
+        knob,
+        if response.hovered() { 5.0 } else { 4.0 },
+        theme::text(),
+    );
     if !compact {
         painter.text(
             Pos2::new(rect.right() - 2.0, rect.center().y),
