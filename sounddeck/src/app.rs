@@ -29,19 +29,20 @@ const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
 
-const DEVELOPER_NAME: &str = "Your Name";
-const DEVELOPER_ROLE: &str = "Independent developer";
-const DEVELOPER_LINK: &str = "your-link.example";
-const DEVELOPER_BLURB: &str = "Add your bio, links, and contact details here.";
+const DEVELOPER_NAME: &str = "Mantum";
 
-/// Placeholder name that means "not filled in yet"; the credit line stays
-/// hidden until it is replaced.
-const DEVELOPER_PLACEHOLDER: &str = "Your Name";
+/// Personal links shown under the credit line in About. Entries with an empty
+/// URL are skipped, so nothing renders until the URL is real.
+const DEVELOPER_LINKS: &[(&str, &str)] = &[
+    ("YouTube", "https://youtube.com/@mantu_um"),
+    // Set to `https://github.com/<username>` once the repository exists.
+    ("GitHub", ""),
+];
 
-/// About -> Links. Add a label and an `https://` URL here and the group appears;
-/// entries with an empty URL are skipped, so there are never dead links on
-/// screen. Support goes first when it exists.
-const ABOUT_LINKS: &[(&str, &str)] = &[("Support", ""), ("Website", ""), ("Source code", "")];
+/// About -> project links. Same rule: empty URLs are skipped.
+const ABOUT_LINKS: &[(&str, &str)] = &[("Support", ""), ("Releases", ""), ("Source code", "")];
+
+const LICENSE_NAME: &str = "MIT";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RamState {
@@ -1688,14 +1689,9 @@ impl App {
                 if !compact {
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new(DEVELOPER_LINK)
-                            .size(10.0)
-                            .color(theme::faint()),
-                    );
-                    ui.label(
                         RichText::new(format!("Developed by {DEVELOPER_NAME}"))
-                            .size(11.0)
-                            .color(theme::muted()),
+                            .size(10.5)
+                            .color(theme::faint()),
                     );
                     ui.add_space(2.0);
                 }
@@ -3039,6 +3035,12 @@ impl App {
                             .spawn();
                     }
                 });
+                settings_divider(ui);
+                settings_row(ui, "License", 200.0, |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(LICENSE_NAME).size(11.5).color(theme::muted()));
+                    });
+                });
             });
 
             let links: Vec<(&str, &str)> = ABOUT_LINKS
@@ -3061,43 +3063,20 @@ impl App {
                 });
             }
 
-            // No credit until the placeholders are replaced, rather than showing
-            // "Your Name" and a dead link.
-            if DEVELOPER_NAME != DEVELOPER_PLACEHOLDER {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(DEVELOPER_NAME)
-                            .size(11.5)
-                            .color(theme::muted()),
-                    );
-                    ui.label(RichText::new("·").size(11.5).color(theme::faint()));
-                    ui.label(
-                        RichText::new(DEVELOPER_ROLE)
-                            .size(11.5)
-                            .color(theme::faint()),
-                    );
-                });
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(DEVELOPER_BLURB)
+                    RichText::new(format!("Made by {DEVELOPER_NAME}"))
                         .size(10.5)
                         .color(theme::faint()),
                 );
-                if !DEVELOPER_LINK.is_empty() {
-                    let link = ui.add(
-                        egui::Label::new(
-                            RichText::new(DEVELOPER_LINK)
-                                .size(10.5)
-                                .color(theme::accent()),
-                        )
-                        .sense(Sense::click()),
-                    );
-                    if link.clicked() {
-                        open_url(DEVELOPER_LINK);
+                for (label, url) in DEVELOPER_LINKS.iter().filter(|(_, url)| !url.is_empty()) {
+                    ui.label(RichText::new("·").size(10.5).color(theme::faint()));
+                    if link_label(ui, label, url) {
+                        open_url(url);
                     }
-                    link.on_hover_cursor(egui::CursorIcon::PointingHand);
                 }
-            }
+            });
         });
     }
 
@@ -4118,6 +4097,18 @@ fn settings_divider(ui: &mut Ui) {
     ui.add_space(7.0);
     settings_rule(ui);
     ui.add_space(7.0);
+}
+
+/// A muted text link. Returns true when clicked.
+fn link_label(ui: &mut Ui, text: &str, url: &str) -> bool {
+    let response = ui.add(
+        egui::Label::new(RichText::new(text).size(10.5).color(theme::muted()))
+            .sense(Sense::click()),
+    );
+    let response = response
+        .on_hover_text(url)
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.clicked()
 }
 
 /// Opens an http(s) URL in the default browser. Anything else is ignored so a
