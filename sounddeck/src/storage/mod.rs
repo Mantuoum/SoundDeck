@@ -69,7 +69,7 @@ impl Settings {
         }
         self.monitor_volume = self.monitor_volume.clamp(0.0, 1.0);
         self.cable_volume = self.cable_volume.clamp(0.0, 1.0);
-        self.master_gain_db = self.master_gain_db.clamp(-60.0, 12.0);
+        self.master_gain_db = self.master_gain_db.clamp(0.0, 12.0);
     }
 }
 
@@ -309,7 +309,7 @@ mod tests {
         let base = temp_base("roundtrip");
         let mut settings = Settings::default();
         settings.active_library = 2;
-        settings.master_gain_db = -3.5;
+        settings.master_gain_db = 3.5;
         settings.animate_ui = false;
 
         let libraries = vec![
@@ -330,7 +330,7 @@ mod tests {
 
         let loaded = load(&base);
         assert_eq!(loaded.settings.active_library, 2);
-        assert_eq!(loaded.settings.master_gain_db, -3.5);
+        assert_eq!(loaded.settings.master_gain_db, 3.5);
         assert!(!loaded.settings.animate_ui);
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
@@ -432,13 +432,13 @@ mod tests {
     fn tolerates_bom_and_keeps_one_backup() {
         let base = temp_base("bom");
         let mut settings = Settings::default();
-        settings.master_gain_db = -1.0;
+        settings.master_gain_db = 1.0;
         let json = format!("\u{feff}{}", serde_json::to_string_pretty(&settings).unwrap());
         fs::create_dir_all(base.join("config")).unwrap();
         fs::write(settings_path(&base), json).unwrap();
 
         let loaded = load(&base);
-        assert_eq!(loaded.settings.master_gain_db, -1.0);
+        assert_eq!(loaded.settings.master_gain_db, 1.0);
         let tmp = settings_path(&base).with_file_name("settings.json.tmp");
         assert!(!tmp.exists());
     }

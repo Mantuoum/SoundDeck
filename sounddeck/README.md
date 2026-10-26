@@ -25,7 +25,7 @@ live in `config/` next to the executable.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.
-- **Master gain** in dB (`-60` to `+12 dB`, default `0 dB`) applied to both
+- **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
   outputs, with a reset button (or double-click the slider).
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one bar per
   output, zone colours, and a peak-hold marker.

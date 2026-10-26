@@ -1378,17 +1378,17 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
                             ui.spacing_mut().slider_width =
-                                (ui.available_width() - 84.0).max(70.0);
+                                (ui.available_width() - 70.0).max(70.0);
                             let response = ui.add(
-                                egui::Slider::new(&mut gain_db, -60.0..=12.0)
+                                egui::Slider::new(&mut gain_db, 0.0..=12.0)
                                     .step_by(0.5)
                                     .show_value(false)
                                     .trailing_fill(true),
                             );
-                            let mut reset = response.double_clicked();
+                            let reset = response.secondary_clicked();
                             let changed = response.changed();
                             response.on_hover_text(
-                                "Master gain - both outputs. Double-click to reset.",
+                                "Master gain - both outputs. Right-click to reset.",
                             );
                             ui.label(
                                 RichText::new(format_gain_db(gain_db))
@@ -1396,7 +1396,6 @@ impl App {
                                     .color(theme::muted())
                                     .monospace(),
                             );
-                            reset |= reset_button(ui, gain_db.abs() > 0.05);
                             if reset {
                                 gain_db = 0.0;
                             }
@@ -2143,13 +2142,23 @@ impl App {
             |ui| {
                 let pill_width = 164.0;
                 let search_width = (ui.available_width() - pill_width - 10.0).max(160.0);
-                let response = ui.add_sized(
-                    [search_width, 32.0],
-                    TextEdit::singleline(&mut self.search)
-                        .hint_text("Search sounds...")
-                        .text_color(theme::text())
-                        .vertical_align(Align::Center),
-                );
+                let response = ui
+                    .scope(|ui| {
+                        // Match the RAM pill: fields and pills share one radius.
+                        let radius = CornerRadius::same(theme::RADIUS_XL);
+                        let widgets = &mut ui.visuals_mut().widgets;
+                        widgets.inactive.corner_radius = radius;
+                        widgets.hovered.corner_radius = radius;
+                        widgets.active.corner_radius = radius;
+                        ui.add_sized(
+                            [search_width, 32.0],
+                            TextEdit::singleline(&mut self.search)
+                                .hint_text("Search sounds...")
+                                .text_color(theme::text())
+                                .vertical_align(Align::Center),
+                        )
+                    })
+                    .inner;
                 if self.focus_search {
                     response.request_focus();
                     self.focus_search = false;
@@ -4357,7 +4366,7 @@ fn format_gain_db(db: f32) -> String {
     if db.abs() < 0.05 {
         "0.0 dB".to_string()
     } else {
-        format!("{db:+.1} dB")
+        format!("{db:.1} dB")
     }
 }
 
@@ -4445,28 +4454,6 @@ fn paint_rotate_icon(painter: &egui::Painter, rect: Rect, color: Color32, clockw
 }
 
 /// Small circular-arrow button. Returns true when clicked while `active`.
-fn reset_button(ui: &mut Ui, active: bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-    let color = if !active {
-        theme::faint()
-    } else if response.hovered() {
-        theme::accent()
-    } else {
-        theme::muted()
-    };
-    if active && response.hovered() {
-        ui.painter().rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), 16),
-        );
-    }
-    paint_rotate_icon(ui.painter(), rect.shrink(2.0), color, false);
-    let clicked = response.clicked() && active;
-    response.on_hover_text("Reset gain to 0.0 dB");
-    clicked
-}
-
 fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enabled: bool) {
     let track = if !enabled {
         theme::field()
