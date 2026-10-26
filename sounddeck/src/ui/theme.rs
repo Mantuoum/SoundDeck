@@ -14,6 +14,18 @@ use super::theme_file;
 pub const UI_FONT: &str = "satoshi";
 pub const UI_FONT_MEDIUM: &str = "satoshi-medium";
 
+/// Corner-radius scale. Every rounded surface in the app picks one of these
+/// so controls, cards and popups stay visually consistent.
+///
+/// - `SM`: nested inside a control (segmented pill, tiny badges)
+/// - `MD`: every interactive control (buttons, fields, combos, chips, pills)
+/// - `LG`: cards, drag ghosts, inner panels
+/// - `XL`: modals, popups, the settings card
+pub const RADIUS_SM: u8 = 5;
+pub const RADIUS_MD: u8 = 8;
+pub const RADIUS_LG: u8 = 12;
+pub const RADIUS_XL: u8 = 14;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub is_light: bool,
@@ -332,8 +344,8 @@ pub fn apply_style(ctx: &egui::Context) {
     visuals.extreme_bg_color = p.field;
     visuals.override_text_color = Some(p.text);
     visuals.window_stroke = Stroke::new(1.0_f32, p.border);
-    visuals.window_corner_radius = CornerRadius::same(12);
-    visuals.menu_corner_radius = CornerRadius::same(8);
+    visuals.window_corner_radius = CornerRadius::same(RADIUS_LG);
+    visuals.menu_corner_radius = CornerRadius::same(RADIUS_MD);
     visuals.selection.bg_fill = alpha(p.accent, if p.is_light { 46 } else { 70 });
     visuals.selection.stroke = Stroke::new(1.0_f32, p.accent);
     visuals.hyperlink_color = p.accent;
@@ -344,25 +356,25 @@ pub fn apply_style(ctx: &egui::Context) {
     visuals.widgets.noninteractive.weak_bg_fill = p.panel;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.border_soft);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.muted);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(RADIUS_MD);
 
     visuals.widgets.inactive.bg_fill = p.card;
     visuals.widgets.inactive.weak_bg_fill = p.card;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(RADIUS_MD);
 
     visuals.widgets.hovered.bg_fill = p.card_hover;
     visuals.widgets.hovered.weak_bg_fill = p.card_hover;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.accent);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(RADIUS_MD);
 
     visuals.widgets.active.bg_fill = p.accent_soft;
     visuals.widgets.active.weak_bg_fill = p.accent_soft;
     visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text);
-    visuals.widgets.active.corner_radius = CornerRadius::same(8);
+    visuals.widgets.active.corner_radius = CornerRadius::same(RADIUS_MD);
 
     visuals.widgets.open.bg_fill = p.card_hover;
     visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, p.border);

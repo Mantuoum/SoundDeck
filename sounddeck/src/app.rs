@@ -1450,7 +1450,7 @@ impl App {
                             if refresh.hovered() {
                                 painter.rect_filled(
                                     refresh_rect,
-                                    CornerRadius::same(6),
+                                    CornerRadius::same(theme::RADIUS_MD),
                                     theme::alpha(theme::accent(), 16),
                                 );
                             }
@@ -1533,7 +1533,7 @@ impl App {
         let painter = ui.painter();
         painter.rect(
             rect,
-            CornerRadius::same(15),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::field(),
             Stroke::new(1.0_f32, theme::border_soft()),
             StrokeKind::Inside,
@@ -1555,8 +1555,8 @@ impl App {
             Pos2::new(inner.left() + smear * half, inner.top()),
             Vec2::new(half, inner.height()),
         );
-        painter.rect_filled(smear_pill, CornerRadius::same(12), theme::alpha(theme::accent(), 70));
-        painter.rect_filled(pill, CornerRadius::same(12), theme::accent());
+        painter.rect_filled(smear_pill, CornerRadius::same(theme::RADIUS_SM), theme::alpha(theme::accent(), 70));
+        painter.rect_filled(pill, CornerRadius::same(theme::RADIUS_SM), theme::accent());
 
         for (index, layout) in [SoundLayout::Grid, SoundLayout::List].into_iter().enumerate() {
             let segment = Rect::from_min_size(
@@ -1572,7 +1572,7 @@ impl App {
             if !active && response.hovered() {
                 painter.rect_filled(
                     segment,
-                    CornerRadius::same(12),
+                    CornerRadius::same(theme::RADIUS_SM),
                     theme::alpha(theme::text(), 10),
                 );
             }
@@ -2188,7 +2188,7 @@ impl App {
                 let painter = ui.painter();
                 painter.rect(
                     rect,
-                    CornerRadius::same(14),
+                    CornerRadius::same(theme::RADIUS_XL),
                     theme::alpha(color, 16),
                     Stroke::new(1.0_f32, theme::alpha(color, 70)),
                     StrokeKind::Inside,
@@ -2242,12 +2242,12 @@ impl App {
             let painter = ui.painter();
             painter.rect_filled(
                 rect,
-                CornerRadius::same(14),
+                CornerRadius::same(theme::RADIUS_XL),
                 theme::alpha(theme::card(), 55),
             );
             painter.rect_stroke(
                 rect,
-                CornerRadius::same(14),
+                CornerRadius::same(theme::RADIUS_XL),
                 Stroke::new(1.0_f32,
                     if response.hovered() {
                         theme::alpha(theme::accent(), 160)
@@ -2336,7 +2336,7 @@ impl App {
                 Frame::NONE
                     .fill(theme::panel())
                     .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(14)
+                    .corner_radius(theme::RADIUS_XL)
                     .inner_margin(Margin::same(20)),
             )
             .show(ctx, |ui| {
@@ -2353,7 +2353,7 @@ impl App {
                         if response.hovered() {
                             ui.painter().rect_filled(
                                 rect,
-                                CornerRadius::same(6),
+                                CornerRadius::same(theme::RADIUS_MD),
                                 theme::alpha(theme::red(), 26),
                             );
                         }
@@ -2578,7 +2578,7 @@ impl App {
                 Frame::NONE
                     .fill(theme::panel())
                     .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(14)
+                    .corner_radius(theme::RADIUS_XL)
                     .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| {
@@ -2614,10 +2614,10 @@ impl App {
                     Vec2::new(ui.available_width(), 96.0),
                 );
                 let painter = ui.painter();
-                painter.rect_filled(box_rect, CornerRadius::same(8), theme::field());
+                painter.rect_filled(box_rect, CornerRadius::same(theme::RADIUS_MD), theme::field());
                 painter.rect_stroke(
                     box_rect,
-                    CornerRadius::same(8),
+                    CornerRadius::same(theme::RADIUS_MD),
                     Stroke::new(1.0_f32, theme::border()),
                     StrokeKind::Inside,
                 );
@@ -2746,7 +2746,7 @@ impl App {
                 Frame::NONE
                     .fill(theme::panel())
                     .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(14)
+                    .corner_radius(theme::RADIUS_XL)
                     .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| {
@@ -2850,7 +2850,7 @@ impl App {
                 Frame::NONE
                     .fill(theme::panel())
                     .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(12)
+                    .corner_radius(theme::RADIUS_XL)
                     .inner_margin(Margin::same(12)),
             )
             .show(ctx, |ui| {
@@ -2903,7 +2903,7 @@ impl App {
         let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("drag_ghost")));
         painter.rect(
             rect,
-            CornerRadius::same(8),
+            CornerRadius::same(theme::RADIUS_LG),
             theme::alpha(theme::card_hover(), 235),
             Stroke::new(1.0_f32, theme::accent()),
             StrokeKind::Inside,
@@ -2936,7 +2936,7 @@ impl App {
         painter.rect_filled(screen, CornerRadius::ZERO, theme::alpha(theme::bg(), 220));
         painter.rect_stroke(
             screen.shrink(18.0),
-            CornerRadius::same(8),
+            CornerRadius::same(theme::RADIUS_XL),
             Stroke::new(2.0_f32, theme::accent()),
             StrokeKind::Inside,
         );
@@ -3348,7 +3348,7 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
     if hovered {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::red(), 26),
         );
     }
@@ -3356,7 +3356,7 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
     if press > 0.01 {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 45.0) as u8),
         );
     }
@@ -3410,7 +3410,7 @@ fn hotkey_pill(
     };
     painter.rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::RADIUS_MD),
         theme::mix(theme::field(), theme::alpha(theme::accent(), 20), hover),
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
@@ -3419,7 +3419,7 @@ fn hotkey_pill(
     if press > 0.01 {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -3475,7 +3475,7 @@ fn ram_chip(
     let hover = anim::hover(ui, id, chip.hovered());
     painter.rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::RADIUS_MD),
         theme::alpha(color, (10.0 + 10.0 * hover) as u8),
         Stroke::new(1.0_f32, theme::alpha(color, 60)),
         StrokeKind::Inside,
@@ -3484,7 +3484,7 @@ fn ram_chip(
     if press > 0.01 {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -3583,7 +3583,7 @@ fn sound_card(
     };
     painter.rect(
         rect,
-        CornerRadius::same(8),
+        CornerRadius::same(theme::RADIUS_LG),
         fill,
         Stroke::new(if selected || flash { 1.5_f32 } else { 1.0_f32 }, border),
         StrokeKind::Inside,
@@ -3591,7 +3591,7 @@ fn sound_card(
     if flash {
         painter.rect(
             rect,
-            CornerRadius::same(8),
+            CornerRadius::same(theme::RADIUS_LG),
             theme::alpha(theme::accent(), 18),
             Stroke::NONE,
             StrokeKind::Inside,
@@ -3759,7 +3759,7 @@ fn sound_row(
     };
     painter.rect(
         rect,
-        CornerRadius::same(8),
+        CornerRadius::same(theme::RADIUS_MD),
         fill,
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
@@ -4061,13 +4061,13 @@ fn paint_library_tab(
     if active {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::accent(), 14),
         );
     } else if hover > 0.01 {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::text(), (10.0 * hover) as u8),
         );
     }
@@ -4136,7 +4136,7 @@ fn plus_button(ui: &mut Ui) -> bool {
     if hovered {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::accent(), 16),
         );
     }
@@ -4144,7 +4144,7 @@ fn plus_button(ui: &mut Ui) -> bool {
     if press > 0.01 {
         painter.rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -4186,7 +4186,7 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     .stroke(Stroke::new(1.0_f32,
         if enabled { theme::accent() } else { theme::border() },
     ))
-    .corner_radius(8);
+    .corner_radius(theme::RADIUS_MD);
     let mut response = ui.add_sized(size, button);
     if !enabled {
         response = response.on_disabled_hover_text("Not available");
@@ -4199,7 +4199,7 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     if press > 0.01 {
         ui.painter().rect_filled(
             response.rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(8),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -4212,7 +4212,7 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
         Button::new(RichText::new(text).size(13.5).color(theme::text()))
             .fill(theme::card())
             .stroke(Stroke::new(1.0_f32, theme::border()))
-            .corner_radius(8),
+            .corner_radius(theme::RADIUS_MD),
     );
     let press = anim::press(
         ui,
@@ -4222,7 +4222,7 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
     if press > 0.01 {
         ui.painter().rect_filled(
             response.rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(8),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -4238,7 +4238,7 @@ fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
     if press > 0.01 {
         ui.painter().rect_filled(
             response.rect,
-            CornerRadius::same(4),
+            CornerRadius::same(theme::RADIUS_SM),
             theme::alpha(theme::bg(), (press * 30.0) as u8),
         );
     }
@@ -4271,7 +4271,7 @@ fn status_dot(ui: &mut Ui, color: Color32) {
 fn paint_logo(painter: &egui::Painter, rect: Rect) {
     painter.rect(
         rect,
-        CornerRadius::same(6),
+        CornerRadius::same(theme::RADIUS_MD),
         theme::alpha(theme::accent(), 28),
         Stroke::new(1.0_f32, theme::accent()),
         StrokeKind::Inside,
@@ -4284,7 +4284,7 @@ fn paint_logo(painter: &egui::Painter, rect: Rect) {
                 Pos2::new(base.x + i as f32 * 4.6, base.y - height),
                 Vec2::new(2.8, *height),
             ),
-            CornerRadius::same(2),
+            CornerRadius::same(1),
             if i == 1 { theme::accent() } else { theme::text() },
         );
     }
@@ -4314,7 +4314,7 @@ fn paint_link_row(ui: &mut Ui, rect: Rect, linked: bool) {
         .unwrap_or(false);
     painter.rect(
         button,
-        CornerRadius::same(8),
+        CornerRadius::same(theme::RADIUS_MD),
         if linked {
             theme::alpha(theme::accent(), 24)
         } else {
@@ -4353,7 +4353,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
     if hovered {
         ui.painter().rect_filled(
             rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             if close {
                 theme::alpha(theme::red(), 50)
             } else {
@@ -4369,7 +4369,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
     if press > 0.01 {
         ui.painter().rect_filled(
             rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::bg(), (press * 40.0) as u8),
         );
     }
@@ -4392,7 +4392,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
         WindowButton::Maximize => {
             ui.painter().rect_stroke(
                 Rect::from_center_size(c, Vec2::new(10.0, 10.0)),
-                CornerRadius::same(2),
+                CornerRadius::same(1),
                 stroke,
                 StrokeKind::Inside,
             );
@@ -4461,7 +4461,8 @@ fn format_level(db: f32) -> String {
     format!("{:.0}", db.clamp(-60.0, 0.0))
 }
 
-fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {    painter.rect_filled(bar, CornerRadius::same(2), theme::field());
+fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
+    painter.rect_filled(bar, CornerRadius::same(2), theme::field());
     let zones = [
         (-60.0f32, -18.0f32, theme::meter_low()),
         (-18.0, -6.0, theme::meter_mid()),
@@ -4526,7 +4527,7 @@ fn reset_button(ui: &mut Ui, active: bool) -> bool {
     if active && response.hovered() {
         ui.painter().rect_filled(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(theme::RADIUS_MD),
             theme::alpha(theme::accent(), 16),
         );
     }
@@ -4546,7 +4547,7 @@ fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enab
     } else {
         theme::card_hover()
     };
-    painter.rect_filled(rect, CornerRadius::same(10), track);
+    painter.rect_filled(rect, CornerRadius::same(11), track);
     let border = if !enabled || !(on || mixed) {
         theme::border()
     } else if on {
@@ -4556,7 +4557,7 @@ fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enab
     };
     painter.rect_stroke(
         rect,
-        CornerRadius::same(10),
+        CornerRadius::same(11),
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
     );
