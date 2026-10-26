@@ -606,7 +606,26 @@ Deploy to `review\SoundDeck.exe` after each UI-visible commit.
 
 ## 7. Tray behaviour and idle performance
 
-Status: **decisions resolved, ready to implement. No code changed.**
+Status: **implemented and measured (0.2.0).** Tray toggling, minimize routing,
+`--stats`, the parked mixer and the repaint policy are shipped. One correction to
+the plan below: hiding must **not** use `ViewportCommand::Visible(false)`.
+
+### 7.0 Measured result (same machine, 60 s medians, release build)
+
+| Scenario | Before | After |
+| --- | --- | --- |
+| Visible idle, no audio | 34.6 % of one core | **0.56 %** |
+| Visible idle, Task Manager total (12 threads) | ~2.9 % | **0.05 %** |
+| Hidden in tray | ~100 % of one core (~8 % total) | **0.8-1.3 % of one core (0.07-0.11 %)** |
+| UI frames while idle | 60/s | **1/s** (0.65 ms per frame) |
+| Mixer wakeups while idle | ~1000/s | **20/s** |
+| Private working set | 81.2 MB | **74.5 MB** |
+
+Why `Visible(false)` was wrong: winit stops delivering paint events to a hidden
+HWND, eframe stays in `ControlFlow::Poll` and spins at a full core, and `update`
+never runs - so tray events are never drained and the window can never be
+restored. That was the tray bug and the 8 % at the same time. Hiding is now
+"minimize + remove the taskbar button"; the idle timer then applies normally.
 
 ### 7.1 Measured baseline
 

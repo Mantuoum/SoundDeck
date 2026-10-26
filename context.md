@@ -6,14 +6,20 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `001164e fix(ui): draw the sidebar divider below overlays`.
+- Last commit: `e7186fd perf: idle repaint policy, parked mixer, tray restore fix`.
 - Working tree: clean except untracked `.agents/` and the existing `.gitignore` edit.
-- Tests: 41 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
+- Tests: 45 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
-- Latency/meter, loop + volume + per-output routing, Settings, tray toggle/minimize,
-  sidebar gain visibility, Settings trim, pass-through hotkeys, leaner modals and the
-  divider-layer fix are shipped. The idle CPU/repaint pass remains.
+- Shipped: latency/meter, loop + volume + per-output routing, Settings, tray
+  toggle/minimize, sidebar gain visibility, Settings trim, pass-through hotkeys,
+  leaner modals, the divider-layer fix, and the idle CPU pass.
+- Idle numbers now: 0.56 % of one core visible, 0.8-1.3 % hidden, 1 frame/s, mixer
+  20 wakeups/s, private working set 74.5 MB. See `plan.md` §7.0.
+- The tray hide path must stay "minimize + DeleteTab". `ViewportCommand::Visible(false)`
+  stops paint delivery, leaves eframe in `ControlFlow::Poll` at a full core and
+  freezes tray events - that was both the tray bug and the hidden CPU.
+- Next: the consistency/refactor pass (review findings), then re-measure.
 
 ## Source of truth
 

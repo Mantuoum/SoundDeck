@@ -323,8 +323,28 @@ if late, and pushes to each `Ring` only when that output has a consumer.
    Otherwise: board sidebar (right) + main page.
 6. Draw window chrome, drop overlay (board only), drag ghost, and modals.
 
-`tick` also debounces saves, updates the meters, and schedules the next repaint
-(33 ms while audio is moving, 120 ms idle/hidden).
+`tick` also debounces saves, updates the meters, and hands the frame pacing to
+`repaint_interval()`: 33 ms while audio is moving, 100 ms with Settings open during
+audio, and 1 s when idle. `handle_actions` only requests an extra frame when it
+actually did something.
+
+### Idle and hidden behaviour
+
+A hidden window is *minimized*, not hidden with `Visible(false)`. With the latter,
+winit stops delivering paints, eframe stays in `ControlFlow::Poll` and burns a full
+core while `update` never runs, so tray events are never drained and the window can
+never be restored. Minimizing keeps the frame loop alive and lets the idle timer do
+its job. While `hidden`, `update` skips the whole paint pass and runs `hidden_tick`
+only (loop state, save debounce, tray tooltip).
+
+`ITaskbarList::DeleteTab` removes the taskbar button while parked in the tray and
+`AddTab` restores it. The OS-minimize detector reacts to a transition only, with a
+400 ms guard after a restore, because a level check re-hid the window immediately.
+
+`--stats` writes one line every 5 s to `%TEMP%\sounddeck-stats.log`: fps, frame
+time, repaint interval, mixer wakeups, ring underruns and loop state. The process
+runs at below-normal priority; the mixer and render threads raise themselves to
+above-normal so audio still meets its deadlines.
 
 ### Board
 
@@ -336,8 +356,10 @@ if late, and pushes to each `Ring` only when that output has a consumer.
   results states, drop handling.
 - **Cards/rows:** name, hotkey pill, RAM chip, missing state, volume bar, progress
   line, context menu (play, locate, reveal, move, rename, remove).
-- **Actions:** UI pushes `Action` values; `handle_actions` is the single place that
-  mutates playback or opens dialogs. This keeps painting separate from side effects.
+- **Actions:** cards/rows and the library bar push `Action` values; `handle_actions`
+  drains one buffer per frame. Singleton chrome (sidebar, title bar, status bar,
+  Settings, tray) mutates directly - wrapping a single `ComboBox` in an event gains
+  nothing.
 - **Selection/search/drag:** search filters name/path; drag reorders or moves between
   libraries; Delete/undo uses a one-slot `UndoDelete`.
 
