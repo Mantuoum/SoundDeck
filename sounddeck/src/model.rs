@@ -12,60 +12,6 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AppTheme {
-    Macchiato,
-    Mocha,
-    Frappe,
-    Latte,
-    #[default]
-    Graphite,
-}
-
-impl AppTheme {
-    pub const ALL: [Self; 5] = [
-        Self::Graphite,
-        Self::Macchiato,
-        Self::Mocha,
-        Self::Frappe,
-        Self::Latte,
-    ];
-
-    /// Stable id used by `config/themes/<id>.md`.
-    #[allow(dead_code)] // consumed by the theme-file loader in the next phase
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::Macchiato => "macchiato",
-            Self::Mocha => "mocha",
-            Self::Frappe => "frappe",
-            Self::Latte => "latte",
-            Self::Graphite => "graphite",
-        }
-    }
-
-    /// Unknown ids fall back to Graphite.
-    pub fn from_id(id: &str) -> Self {
-        match id.trim().to_ascii_lowercase().as_str() {
-            "macchiato" => Self::Macchiato,
-            "mocha" => Self::Mocha,
-            "frappe" | "frappé" => Self::Frappe,
-            "latte" => Self::Latte,
-            _ => Self::Graphite,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Macchiato => "Catppuccin Macchiato",
-            Self::Mocha => "Catppuccin Mocha",
-            Self::Frappe => "Catppuccin Frappe",
-            Self::Latte => "Catppuccin Latte",
-            Self::Graphite => "Graphite",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Layout {
     #[default]
     Grid,
@@ -150,15 +96,5 @@ mod tests {
         assert_eq!(format_duration(0.0), "0:00");
         assert_eq!(format_duration(3.2), "0:03");
         assert_eq!(format_duration(75.0), "1:15");
-    }
-
-    #[test]
-    fn theme_ids_roundtrip_and_fallback() {
-        for theme in AppTheme::ALL {
-            assert_eq!(AppTheme::from_id(theme.id()), theme);
-        }
-        assert_eq!(AppTheme::from_id("does-not-exist"), AppTheme::Graphite);
-        assert_eq!(AppTheme::from_id("  LATTE "), AppTheme::Latte);
-        assert_eq!(AppTheme::default(), AppTheme::Graphite);
     }
 }

@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use super::{save_libraries, save_settings, LibraryConfig, LibrariesFile, Loaded, Settings};
-use crate::model::{AppTheme, Layout, CONFIG_FILE};
+use crate::model::{Layout, CONFIG_FILE};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
@@ -177,7 +177,12 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
     let settings = Settings {
         version: super::SETTINGS_VERSION,
         active_library,
-        theme: AppTheme::from_id(legacy.theme.as_deref().unwrap_or("graphite")),
+        theme: legacy
+            .theme
+            .as_deref()
+            .map(|theme| theme.trim().to_ascii_lowercase())
+            .filter(|theme| !theme.is_empty())
+            .unwrap_or_else(|| "graphite".to_string()),
         layout: match legacy.layout.as_deref() {
             Some("list") => Layout::List,
             _ => Layout::Grid,

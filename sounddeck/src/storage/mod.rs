@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{AppTheme, Layout};
+use crate::model::Layout;
 
 pub const SETTINGS_VERSION: u32 = 2;
 pub const LIBRARIES_VERSION: u32 = 2;
@@ -22,7 +22,7 @@ pub const LIBRARIES_VERSION: u32 = 2;
 pub struct Settings {
     pub version: u32,
     pub active_library: u64,
-    pub theme: AppTheme,
+    pub theme: String,
     pub layout: Layout,
     pub monitor_device: Option<String>,
     pub cable_device: Option<String>,
@@ -44,7 +44,7 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             active_library: 1,
-            theme: AppTheme::Graphite,
+            theme: "graphite".to_string(),
             layout: Layout::Grid,
             monitor_device: None,
             cable_device: None,
@@ -369,7 +369,7 @@ mod tests {
         assert_eq!(loaded.libraries[0].sounds.len(), 2);
         assert_eq!(loaded.libraries[1].sounds.len(), 0);
         assert_eq!(loaded.settings.active_library, 2);
-        assert_eq!(loaded.settings.theme, AppTheme::Macchiato);
+        assert_eq!(loaded.settings.theme, "macchiato");
         assert_eq!(loaded.settings.layout, Layout::List);
         assert!(!loaded.settings.link_volumes);
 

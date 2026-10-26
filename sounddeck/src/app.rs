@@ -14,8 +14,8 @@ use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
 use crate::model::{
-    self, display_name, format_bytes, format_duration, is_supported_file, AppTheme,
-    Layout as SoundLayout, APP_NAME, SUPPORTED_EXTENSIONS,
+    self, display_name, format_bytes, format_duration, is_supported_file, Layout as SoundLayout,
+    APP_NAME, SUPPORTED_EXTENSIONS,
 };
 use crate::playback::{Playback, PlaybackEvent, SoundInfo};
 use crate::storage;
@@ -183,8 +183,6 @@ impl App {
             warnings,
         } = loaded;
         let mut cfg = settings;
-        theme::install(&cc.egui_ctx, cfg.theme);
-
         let mut statuses = Vec::new();
         let mut push_status = |kind: StatusKind, text: String| {
             statuses.push(StatusEntry {
@@ -198,6 +196,17 @@ impl App {
             push_status(StatusKind::Warning, warning);
         }
 
+        // Themes are read from config/themes/*.md before anything is drawn.
+        for warning in theme::install(&cc.egui_ctx, &cfg.theme) {
+            push_status(StatusKind::Warning, warning);
+        }
+        let theme_was_corrected = !theme::available()
+            .iter()
+            .any(|(id, _)| id == &cfg.theme);
+        if theme_was_corrected {
+            cfg.theme = "graphite".to_string();
+            theme::set_theme("graphite");
+        }
         let mut sounds = Vec::new();
         let mut libraries = Vec::new();
         for library in &stored_libraries {
@@ -370,7 +379,7 @@ impl App {
             undo: None,
             last_dir: None,
             next_id: 1,
-            dirty: false,
+            dirty: theme_was_corrected,
             save_failed: false,
             last_save: Instant::now(),
             last_settings_json: String::new(),
@@ -2313,46 +2322,53 @@ impl App {
                     .show(ui, |ui| {
                         section_label(ui, "APPEARANCE");
                         ui.add_space(4.0);
-                        let mut selected_theme = self.cfg.theme;
+                        let mut selected_theme = self.cfg.theme.clone();
+                        let current_name = theme::available()
+                            .iter()
+                            .find(|(id, _)| id == &selected_theme)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| selected_theme.clone());
                         ComboBox::from_id_salt("settings_theme")
                             .width(ui.available_width())
-                            .selected_text(selected_theme.label())
+                            .selected_text(current_name)
                             .show_ui(ui, |ui| {
-                                for option in AppTheme::ALL {
+                                for (id, name) in theme::available() {
                                     if ui
-                                        .selectable_label(
-                                            selected_theme == option,
-                                            option.label(),
-                                        )
+                                        .selectable_label(selected_theme == id, name)
                                         .clicked()
                                     {
-                                        selected_theme = option;
+                                        selected_theme = id;
                                         ui.close_menu();
                                     }
                                 }
                             });
                         if selected_theme != self.cfg.theme {
                             self.cfg.theme = selected_theme;
-                            theme::set_theme(selected_theme);
+                            theme::set_theme(&self.cfg.theme);
                             theme::apply_style(ctx);
                             self.mark_dirty();
                             ctx.request_repaint();
                         }
 
-                        ui.add_space(14.0);
-                        section_line(ui);
-                        ui.add_space(8.0);
-                        section_label(ui, "WINDOW");
-                        ui.label(
-                            RichText::new("Minimize hides to the tray. Close quits SoundDeck.")
-                                .size(11.5)
-                                .color(theme::muted()),
-                        );
-                        ui.label(
-                            RichText::new("Hotkeys keep firing while the window is in the tray.")
-                                .size(11.0)
-                                .color(theme::faint()),
-                        );
+                        ui.add_space(4.0);
+                        if ghost_button(ui, "Reload themes", Vec2::new(150.0, 26.0))
+                            .on_hover_text("Re-read config/themes/*.md")
+                            .clicked()
+                        {
+                            for warning in theme::reload() {
+                                self.log(StatusKind::Warning, warning);
+                            }
+                            if !theme::available()
+                                .iter()
+                                .any(|(id, _)| id == &self.cfg.theme)
+                            {
+                                self.cfg.theme = "graphite".to_string();
+                            }
+                            theme::set_theme(&self.cfg.theme);
+                            theme::apply_style(ctx);
+                            self.mark_dirty();
+                            ctx.request_repaint();
+                        }
 
                         ui.add_space(14.0);
                         section_line(ui);

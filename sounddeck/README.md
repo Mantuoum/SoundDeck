@@ -34,8 +34,10 @@ live in `config/` next to the executable.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
-- Five themes (Catppuccin Macchiato default, Mocha, Frappe, Latte, Graphite) with
-  a `#0097FF` accent. Themes are documented in `C:\My files\My Resources\themes.md`.
+- Themes are editable Markdown files in `config/themes/`. Graphite is the default
+  and the fallback for any missing token; every colour (including the accent) can
+  be overridden per theme. Use **Reload themes** in Settings after editing.
+  The shipped palettes use a `#0097FF` accent.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.
 - Missing file detection with click-to-locate.
@@ -67,6 +69,7 @@ SoundDeck.exe
 config/
   settings.json     window, devices, volumes, theme, layout, active tab
   libraries.json    tabs and the sounds registered in each tab
+  themes/           one Markdown palette per theme
 ```
 
 Sounds keep their original paths; audio files are never copied. A legacy
