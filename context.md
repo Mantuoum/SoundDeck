@@ -6,14 +6,14 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `9751631 fix(ui): keep the hotkey modal above the sidebar`.
+- Last commit: `001164e fix(ui): draw the sidebar divider below overlays`.
 - Working tree: clean except untracked `.agents/` and the existing `.gitignore` edit.
 - Tests: 41 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
 - Latency/meter, loop + volume + per-output routing, Settings, tray toggle/minimize,
-  sidebar gain visibility, Settings trim, pass-through hotkeys, and the capture-modal
-  layer fix are shipped. The idle CPU/repaint pass remains.
+  sidebar gain visibility, Settings trim, pass-through hotkeys, leaner modals and the
+  divider-layer fix are shipped. The idle CPU/repaint pass remains.
 
 ## Source of truth
 
