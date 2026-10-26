@@ -151,7 +151,8 @@ windows, and some security/anti-cheat tools may block keyboard hooks.
 
 ## Credits
 
-Made by [Mantum](https://youtube.com/@mantu_um).
+Made by [Mantum](https://youtube.com/@mantu_um) —
+[GitHub](https://github.com/mantuoum).
 
 ## License
 

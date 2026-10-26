@@ -35,12 +35,15 @@ const DEVELOPER_NAME: &str = "Mantum";
 /// URL are skipped, so nothing renders until the URL is real.
 const DEVELOPER_LINKS: &[(&str, &str)] = &[
     ("YouTube", "https://youtube.com/@mantu_um"),
-    // Set to `https://github.com/<username>` once the repository exists.
-    ("GitHub", ""),
+    ("GitHub", "https://github.com/mantuoum"),
 ];
 
-/// About -> project links. Same rule: empty URLs are skipped.
-const ABOUT_LINKS: &[(&str, &str)] = &[("Support", ""), ("Releases", ""), ("Source code", "")];
+/// About -> project links. These assume the repository is called `SoundDeck`;
+/// change the URLs (and `Cargo.toml`) if it ends up with another name.
+const ABOUT_LINKS: &[(&str, &str)] = &[
+    ("Support", "https://github.com/mantuoum/SoundDeck/issues"),
+    ("Releases", "https://github.com/mantuoum/SoundDeck/releases"),
+];
 
 const LICENSE_NAME: &str = "MIT";
 
@@ -3043,22 +3046,13 @@ impl App {
                 });
             });
 
-            let links: Vec<(&str, &str)> = ABOUT_LINKS
-                .iter()
-                .copied()
-                .filter(|(_, url)| !url.is_empty())
-                .collect();
-            if !links.is_empty() {
-                settings_group(ui, "Links", |ui| {
-                    for (index, (label, url)) in links.iter().enumerate() {
-                        if index > 0 {
-                            settings_divider(ui);
-                        }
-                        settings_row(ui, label, 200.0, |ui| {
-                            if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
-                                open_url(url);
-                            }
-                        });
+            // Project links live in the same card: a second group of two rows
+            // pushes the credit line off a 540 px window.
+            for (label, url) in ABOUT_LINKS.iter().filter(|(_, url)| !url.is_empty()) {
+                settings_divider(ui);
+                settings_row(ui, label, 200.0, |ui| {
+                    if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
+                        open_url(url);
                     }
                 });
             }
