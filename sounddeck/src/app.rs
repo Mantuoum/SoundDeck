@@ -1690,9 +1690,8 @@ impl App {
     fn level_meter(&self, ui: &mut Ui, compact: bool) {
         let width = ui.available_width();
         let label_w = 48.0;
-        let value_w = 28.0;
         let bar_left = label_w;
-        let bar_right = (width - value_w).max(bar_left + 60.0);
+        let bar_right = width;
         let row_h = 15.0;
         // The dB scale is the first thing to go on short windows.
         let scale_h = if compact { 0.0 } else { 13.0 };
@@ -1716,13 +1715,6 @@ impl App {
                 Pos2::new(rect.left() + bar_right, y + 11.0),
             );
             draw_level_bar(painter, bar, self.meter_db[slot], self.meter_peak_db[slot]);
-            painter.text(
-                Pos2::new(rect.right(), y + row_h * 0.5),
-                Align2::RIGHT_CENTER,
-                format_level(self.meter_db[slot]),
-                theme::ui_font(9.5),
-                theme::faint(),
-            );
         }
 
         if compact {
@@ -2140,8 +2132,12 @@ impl App {
             Vec2::new(ui.available_width(), 34.0),
             Layout::left_to_right(Align::Center),
             |ui| {
+                // Zero item spacing so the widths add up exactly and the pill
+                // ends flush with the search field's right edge.
+                ui.spacing_mut().item_spacing.x = 0.0;
                 let pill_width = 164.0;
-                let search_width = (ui.available_width() - pill_width - 10.0).max(160.0);
+                let gap = 10.0;
+                let search_width = (ui.available_width() - pill_width - gap).max(160.0);
                 let response = ui
                     .scope(|ui| {
                         // Match the RAM pill: fields and pills share one radius.
@@ -2154,6 +2150,12 @@ impl App {
                             [search_width, 32.0],
                             TextEdit::singleline(&mut self.search)
                                 .hint_text("Search sounds...")
+                                .margin(Margin {
+                                    left: 12,
+                                    right: 10,
+                                    top: 2,
+                                    bottom: 2,
+                                })
                                 .text_color(theme::text())
                                 .vertical_align(Align::Center),
                         )
@@ -2164,7 +2166,7 @@ impl App {
                     self.focus_search = false;
                 }
 
-                ui.add_space(10.0);
+                ui.add_space(gap);
                 let state = self.ram_summary();
                 let (label, color, enabled) = match state {
                     None => ("No hotkeys".to_string(), theme::faint(), false),
@@ -4403,9 +4405,6 @@ fn level_x(bar: Rect, db: f32) -> f32 {
     bar.left() + bar.width() * t
 }
 
-fn format_level(db: f32) -> String {
-    format!("{:.0}", db.clamp(-60.0, 0.0))
-}
 
 fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
     painter.rect_filled(bar, CornerRadius::same(2), theme::field());
