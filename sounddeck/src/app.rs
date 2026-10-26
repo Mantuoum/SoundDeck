@@ -22,6 +22,7 @@ use crate::playback::{Playback, PlaybackEvent, SoundInfo};
 use crate::storage;
 use crate::ui::anim;
 use crate::ui::theme;
+use crate::ui::volume;
 
 const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
@@ -156,7 +157,6 @@ pub struct App {
     drag: Option<DragState>,
     card_rects: Vec<(usize, Rect)>,
     row_rects: Vec<(usize, Rect)>,
-    volume_rects: Vec<(u64, Rect)>,
     undo: Option<UndoDelete>,
     last_dir: Option<PathBuf>,
     next_id: u64,
@@ -390,7 +390,6 @@ impl App {
             drag: None,
             card_rects: Vec::new(),
             row_rects: Vec::new(),
-            volume_rects: Vec::new(),
             undo: None,
             last_dir: None,
             next_id: 1,
@@ -1788,7 +1787,7 @@ impl App {
     }
 
     fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
-        let mut position = volume_to_position(self.slot_volume(slot));
+        let mut position = volume::to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
             theme::speaker_icon(ui.painter(), icon_rect, theme::muted());
@@ -1802,13 +1801,13 @@ impl App {
                 .changed();
             ui.add_space(6.0);
             ui.label(
-                RichText::new(format!("{:>3.0}%", position * 100.0))
+                RichText::new(volume::percent_text(position))
                     .size(11.0)
                     .color(theme::muted())
                     .monospace(),
             );
             if changed {
-                self.set_slot_volume(slot, position_to_volume(position));
+                self.set_slot_volume(slot, volume::from_position(position));
             }
         });
     }
@@ -2056,7 +2055,7 @@ impl App {
                 Pos2::new(rect.right() - 8.0, rect.top() + 79.0),
             )
         };
-        volume_bar(
+        volume::bar(
             ui,
             volume_rect,
             Id::new("loop_volume"),
@@ -2228,37 +2227,8 @@ impl App {
         let mut actions = Vec::new();
         let mut rects: Vec<(usize, Rect)> = Vec::new();
         let mut rows: Vec<(usize, Rect)> = Vec::new();
-        let mut volume_rects: Vec<(u64, Rect)> = Vec::new();
         let allow_drag = self.search.trim().is_empty();
         let capture_id = self.capture.as_ref().map(|c| c.sound_id);
-
-        // Wheel over a volume bar changes that sound's volume instead of
-        // scrolling the library. The bar rects come from the previous frame.
-        if let Some(pointer) = ui.ctx().pointer_hover_pos() {
-            let raw_scroll = ui.ctx().input(|i| i.raw_scroll_delta.y);
-            if let Some((id, _)) = self
-                .volume_rects
-                .iter()
-                .find(|(_, rect)| rect.contains(pointer))
-                .copied()
-            {
-                if raw_scroll.abs() > 0.01 {
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        let position = (volume_to_position(sound.volume)
-                            + 0.03 * raw_scroll.signum())
-                        .clamp(0.0, 1.0);
-                        sound.volume = position_to_volume(position);
-                        let volume = sound.volume;
-                        self.playback.set_volume(id, volume);
-                        self.mark_dirty();
-                    }
-                    ui.ctx().input_mut(|i| {
-                        i.raw_scroll_delta = Vec2::ZERO;
-                        i.smooth_scroll_delta = Vec2::ZERO;
-                    });
-                }
-            }
-        }
 
         if self.sounds.is_empty() || !self
             .sounds
@@ -2286,7 +2256,6 @@ impl App {
                             capture_id,
                             self.selected,
                             &mut rects,
-                            &mut volume_rects,
                             &mut actions,
                         ),
                         SoundLayout::List => draw_list(
@@ -2300,7 +2269,6 @@ impl App {
                             capture_id,
                             self.selected,
                             &mut rows,
-                            &mut volume_rects,
                             &mut actions,
                         ),
                     }
@@ -2310,7 +2278,6 @@ impl App {
 
         self.card_rects = rects;
         self.row_rects = rows;
-        self.volume_rects = volume_rects;
         self.handle_actions(actions, ui.ctx());
 
         // Drop files overlay is drawn in update(); this only consumes the drop.
@@ -3689,7 +3656,6 @@ fn draw_grid(
     capture_id: Option<u64>,
     selected: Option<u64>,
     rects: &mut Vec<(usize, Rect)>,
-    volume_rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
     let spacing = 10.0;
@@ -3722,7 +3688,6 @@ fn draw_grid(
                         selected == Some(sound.id),
                         index,
                         libraries,
-                        volume_rects,
                     );
                     rects.push((index, rect));
                     actions.extend(card_actions);
@@ -3745,7 +3710,6 @@ fn draw_list(
     capture_id: Option<u64>,
     selected: Option<u64>,
     rects: &mut Vec<(usize, Rect)>,
-    volume_rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
     ui.scope(|ui| {
@@ -3764,7 +3728,6 @@ fn draw_list(
                 selected == Some(sound.id),
                 index,
                 libraries,
-                volume_rects,
             );
             rects.push((index, rect));
             actions.extend(row_actions);
@@ -4017,7 +3980,6 @@ fn sound_card(
     selected: bool,
     index: usize,
     libraries: &[Library],
-    volume_rects: &mut Vec<(u64, Rect)>,
 ) -> (Rect, Vec<Action>) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut actions = Vec::new();
@@ -4133,8 +4095,7 @@ fn sound_card(
         Pos2::new(pill_rect.right() + 10.0, rect.bottom() - 34.0),
         Pos2::new(rect.right() - 12.0, rect.bottom() - 10.0),
     );
-    volume_rects.push((sound.id, slider_rect));
-    volume_bar(
+    volume::bar(
         ui,
         slider_rect,
         ui.id().with(("cardvol", sound.id)),
@@ -4171,7 +4132,6 @@ fn sound_row(
     selected: bool,
     index: usize,
     libraries: &[Library],
-    volume_rects: &mut Vec<(u64, Rect)>,
 ) -> (Rect, Vec<Action>) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click_and_drag());
@@ -4288,8 +4248,7 @@ fn sound_row(
             Pos2::new(center_x, rect.center().y),
             Vec2::new(slider_width, 22.0),
         );
-        volume_rects.push((sound.id, volume_rect));
-        volume_bar(
+        volume::bar(
             ui,
             volume_rect,
             ui.id().with(("rowvol", sound.id)),
@@ -4395,71 +4354,6 @@ fn sound_context_menu(
         actions.push(Action::Remove(sound.id));
         ui.close_menu();
     }
-}
-
-fn volume_bar(
-    ui: &mut Ui,
-    rect: Rect,
-    id: Id,
-    volume: f32,
-    mut on_change: impl FnMut(f32),
-    compact: bool,
-) {
-    let response = ui.interact(rect, id, Sense::click_and_drag());
-    let painter = ui.painter();
-    let position = volume_to_position(volume);
-    let label_width = if compact { 0.0 } else { 34.0 };
-    let track_left = if compact {
-        rect.left() + 2.0
-    } else {
-        let speaker_size = 14.0;
-        let speaker_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + speaker_size * 0.5, rect.center().y),
-            Vec2::splat(speaker_size),
-        );
-        theme::speaker_icon(
-            painter,
-            speaker_rect,
-            if response.hovered() {
-                theme::muted()
-            } else {
-                theme::faint()
-            },
-        );
-        speaker_rect.right() + 8.0
-    };
-    let track = Rect::from_min_max(
-        Pos2::new(track_left, rect.center().y - 2.0),
-        Pos2::new(rect.right() - label_width - 8.0, rect.center().y + 2.0),
-    );
-    painter.rect_filled(track, CornerRadius::same(2), theme::field());
-    let filled = Rect::from_min_max(
-        track.left_top(),
-        Pos2::new(track.left() + track.width() * position, track.bottom()),
-    );
-    painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
-    let knob = Pos2::new(filled.right(), track.center().y);
-    painter.circle_filled(knob, if response.hovered() { 5.0 } else { 4.0 }, theme::text());
-    if !compact {
-        painter.text(
-            Pos2::new(rect.right() - 2.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            format!("{:.0}%", position * 100.0),
-            theme::ui_font(11.0),
-            theme::muted(),
-        );
-    }
-
-    if response.dragged() || response.clicked() {
-        if let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) {
-            let t = ((pointer.x - track.left()) / track.width().max(1.0)).clamp(0.0, 1.0);
-            on_change(position_to_volume(t));
-        }
-    }
-    response.on_hover_text(format!(
-        "Volume {:.0}% - scroll to adjust",
-        position * 100.0
-    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -4820,27 +4714,6 @@ fn format_gain_db(db: f32) -> String {
     }
 }
 
-/// Volume sliders are logarithmic: the track runs from -60 dBFS (silent) to
-/// 0 dBFS (unity), so the position matches perceived loudness rather than raw
-/// amplitude. Stored volumes stay linear amplitude for the mixer.
-const VOLUME_RANGE_DB: f32 = 60.0;
-
-fn volume_to_position(volume: f32) -> f32 {
-    if volume <= 0.001 {
-        return 0.0;
-    }
-    let db = 20.0 * volume.log10();
-    ((db.clamp(-VOLUME_RANGE_DB, 0.0) + VOLUME_RANGE_DB) / VOLUME_RANGE_DB).clamp(0.0, 1.0)
-}
-
-fn position_to_volume(position: f32) -> f32 {
-    let position = position.clamp(0.0, 1.0);
-    if position <= 0.002 {
-        return 0.0;
-    }
-    10f32.powf((position * VOLUME_RANGE_DB - VOLUME_RANGE_DB) / 20.0)
-}
-
 fn level_x(bar: Rect, db: f32) -> f32 {
     let t = ((db.clamp(-60.0, 0.0) + 60.0) / 60.0) as f32;
     bar.left() + bar.width() * t
@@ -5007,20 +4880,5 @@ fn resolve_device(
 
 #[cfg(test)]
 mod tests {
-    use super::{position_to_volume, volume_to_position};
-
-    #[test]
-    fn volume_slider_is_logarithmic() {
-        assert_eq!(volume_to_position(0.0), 0.0);
-        assert!((volume_to_position(1.0) - 1.0).abs() < 1e-6);
-        // Half amplitude is -6 dB, near the top of a -60..0 dB track.
-        assert!((volume_to_position(0.5) - 0.9).abs() < 1e-3);
-        // Halfway up the track is -30 dB.
-        assert!((position_to_volume(0.5) - 0.031_623).abs() < 1e-4);
-        assert_eq!(position_to_volume(0.0), 0.0);
-        for volume in [0.05, 0.1, 0.25, 0.5, 0.8, 1.0] {
-            let back = position_to_volume(volume_to_position(volume));
-            assert!((back - volume).abs() < 1e-4, "{volume} -> {back}");
-        }
-    }
+    // Volume curve coverage lives in `ui::volume::tests`.
 }
