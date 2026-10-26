@@ -1,6 +1,8 @@
 # SoundDeck — Audio Latency, Consistent Volumes, Full-window Settings
 
-Status: **plan for approval. No code changed.**
+Status: **implemented.** Audio/latency in `220fb11`, loop + volume in `eadb63e`,
+volume consistency in `cb8c9af`, Settings in `30ecb6d`, developer guide in this commit.
+The sections below are the specification that was executed; 6.5 records the deltas.
 
 Four pieces of work, in order:
 
@@ -585,6 +587,20 @@ Deploy to `review\SoundDeck.exe` after each UI-visible commit.
 - **Settings search / persisted tab** only if the tab count grows.
 - **Developer block** still needs real name/role/link/blurb.
 - **Native UI rewrite** remains parked (section 7).
+
+### 6.5 As built
+
+- Output ring is 0.15 s and metering is consumer-side (`Ring::take_peak`); the
+  mixer-side meter is gone.
+- Loop stream keeps 16 chunks and three states; start is optimistic; errors surface
+  from the decoder.
+- `loop_volume` is stored in settings and applied in the mixer; the loop card grew to
+  44/84 px and Settings has a matching row.
+- `ui/volume.rs` owns the curve/bar; the old `volume_rects` scroll plumbing is gone.
+- Settings is a 200 px rail plus a 780 px-capped content column; About is pinned in
+  the rail; version is `0.2.0`, read from Cargo.
+- `sounddeck/ARCHITECTURE.md` is the developer guide; README stays the user manual.
+- Tests: 38.
 
 ---
 

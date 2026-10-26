@@ -6,16 +6,13 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `1e8dc72 docs: retire shipped phase specs, record the looping track`.
-- Working tree: `plan.md` rewritten for audio latency, loop simplification + volume,
-  volume consistency, full-window Settings, and developer docs (uncommitted);
-  `context.md` updated. Untracked `References/`.
-- Tests: 33 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
+- Last commit: `30ecb6d feat(ui): full-window tabbed Settings`.
+- Working tree: `ARCHITECTURE.md` plus the plan/context updates for the docs commit.
+- Tests: 38 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
-- Storage, per-file themes, motion, the UI polish batch, and the looping track are
-  shipped. The next pass is the latency/meter fix, then loop simplification, volume
-  consistency, Settings, and `ARCHITECTURE.md`.
+- Latency/meter, loop simplification + volume, volume consistency, and the full-window
+  Settings screen are shipped. The developer guide is written.
 
 ## Source of truth
 
@@ -77,11 +74,8 @@ docs or reports.
 
 ## Next steps
 
-1. Implement `plan.md` in its rollout order:
-   - consumer-side metering + 0.15 s output ring,
-   - simplify the loop stream (3 states, 16-chunk buffer) + `loop_volume`,
-   - one volume curve/behaviour (keep current visuals),
-   - full-window tabbed Settings,
-   - `ARCHITECTURE.md` written against the final code.
-2. Deploy after each UI-visible commit and verify latency by ear.
+1. User QA: confirm the meter/sound alignment, loop start/stop feel, and the Settings
+   layout at 960×540 and maximized.
+2. Address visual feedback; keep `ARCHITECTURE.md` current with any behaviour change.
 3. Replace the developer placeholders once the user supplies name, role, link and blurb.
+4. Optional/far-future: native UI rewrite behind the measurement gate in `plan.md` §7.

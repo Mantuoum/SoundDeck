@@ -159,6 +159,11 @@ const DEVELOPER_BLURB: &str = "Add your bio, links, and contact details here.";
 Enumerates output devices, opens the monitor/cable streams, decodes the file,
 plays it, and prints progress plus WASAPI events.
 
+## Developers
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the module map, audio pipeline, storage
+rules, concurrency invariants and “where to change what” notes.
+
 ## Third-party
 
 - Catppuccin palettes (MIT) with a custom `#0097FF` accent.
