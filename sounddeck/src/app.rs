@@ -1546,10 +1546,16 @@ impl App {
             1.0
         };
         let pos = anim::tween(ui, Id::new("layout_pill"), target, 0.09);
+        let smear = anim::tween(ui, Id::new("layout_pill_smear"), target, 0.16);
         let pill = Rect::from_min_size(
             Pos2::new(inner.left() + pos * half, inner.top()),
             Vec2::new(half, inner.height()),
         );
+        let smear_pill = Rect::from_min_size(
+            Pos2::new(inner.left() + smear * half, inner.top()),
+            Vec2::new(half, inner.height()),
+        );
+        painter.rect_filled(smear_pill, CornerRadius::same(12), theme::alpha(theme::accent(), 70));
         painter.rect_filled(pill, CornerRadius::same(12), theme::accent());
 
         for (index, layout) in [SoundLayout::Grid, SoundLayout::List].into_iter().enumerate() {
@@ -1675,6 +1681,7 @@ impl App {
                         .trailing_fill(true),
                 )
                 .changed();
+            ui.add_space(6.0);
             ui.label(
                 RichText::new(format!("{:>3.0}%", position * 100.0))
                     .size(11.0)
@@ -3790,13 +3797,13 @@ fn sound_row(
     );
 
     // Controls on the right: chip, hotkey pill and close.
-    let pill_width = if has_hotkey { 94.0 } else { 102.0 };
+    let pill_width = if has_hotkey { 110.0 } else { 118.0 };
     let indicator_width = if has_hotkey || missing { 70.0 } else { 0.0 };
     let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
 
     let pill_rect = Rect::from_center_size(
         Pos2::new(rect.right() - 42.0 - pill_width * 0.5, rect.center().y),
-        Vec2::new(pill_width, 26.0),
+        Vec2::new(pill_width, 30.0),
     );
     if hotkey_pill(
         ui,
@@ -3805,7 +3812,7 @@ fn sound_row(
         ui.id().with(("rowhotkey", sound.id)),
         sound,
         capture_active,
-        13.0,
+        13.5,
     ) {
         actions.push(Action::SetHotkey(sound.id));
     }
@@ -3815,7 +3822,7 @@ fn sound_row(
             pill_rect.left() - 8.0 - (indicator_width - 8.0) * 0.5,
             rect.center().y,
         ),
-        Vec2::new(indicator_width - 8.0, 26.0),
+        Vec2::new(indicator_width - 8.0, 28.0),
     );
     if indicator_width > 0.0 {
         if let Some(action) = ram_chip(
@@ -3825,7 +3832,7 @@ fn sound_row(
             ui.id().with(("rowram", sound.id)),
             sound,
             info,
-            10.5,
+            11.0,
         ) {
             actions.push(action);
         }
@@ -3994,7 +4001,7 @@ fn volume_bar(
     };
     let track = Rect::from_min_max(
         Pos2::new(track_left, rect.center().y - 2.0),
-        Pos2::new(rect.right() - label_width - 2.0, rect.center().y + 2.0),
+        Pos2::new(rect.right() - label_width - 8.0, rect.center().y + 2.0),
     );
     painter.rect_filled(track, CornerRadius::same(2), theme::field());
     let filled = Rect::from_min_max(
