@@ -1447,21 +1447,13 @@ impl App {
                                 Id::new("refresh_devices_inline"),
                                 Sense::click(),
                             );
-                            if refresh.hovered() {
-                                painter.rect_filled(
-                                    refresh_rect,
-                                    CornerRadius::same(theme::RADIUS_MD),
-                                    theme::alpha(theme::accent(), 16),
-                                );
-                            }
+                            let refresh_hover =
+                                anim::hover(ui, Id::new("refresh_hover"), refresh.hovered());
+                            icon_hover(&painter, refresh_rect, refresh_hover);
                             paint_rotate_icon(
                                 &painter,
                                 refresh_rect,
-                                if refresh.hovered() {
-                                    theme::accent()
-                                } else {
-                                    theme::muted()
-                                },
+                                theme::mix(theme::muted(), theme::accent(), refresh_hover),
                                 true,
                             );
                             if refresh.clicked() {
@@ -1669,7 +1661,8 @@ impl App {
         }
     }
 
-    fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {        let mut position = volume_to_position(self.slot_volume(slot));
+    fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
+        let mut position = volume_to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
             theme::speaker_icon(ui.painter(), icon_rect, theme::muted());
@@ -2348,30 +2341,9 @@ impl App {
                             .color(theme::text()),
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
-                        if response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                CornerRadius::same(theme::RADIUS_MD),
-                                theme::alpha(theme::red(), 26),
-                            );
-                        }
-                        let color = if response.hovered() {
-                            theme::red()
-                        } else {
-                            theme::muted()
-                        };
-                        let c = rect.center();
-                        let stroke = Stroke::new(1.4_f32, color);
-                        ui.painter().line_segment(
-                            [c + Vec2::new(-4.5, -4.5), c + Vec2::new(4.5, 4.5)],
-                            stroke,
-                        );
-                        ui.painter().line_segment(
-                            [c + Vec2::new(4.5, -4.5), c + Vec2::new(-4.5, 4.5)],
-                            stroke,
-                        );
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                        let painter = ui.painter().clone();
+                        let response = close_button(ui, &painter, rect, Id::new("settings_close"));
                         if response.clicked() {
                             close = true;
                         }
@@ -3353,13 +3325,7 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
         );
     }
     let press = anim::press(ui, id, response.is_pointer_button_down_on());
-    if press > 0.01 {
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 45.0) as u8),
-        );
-    }
+    press_overlay(painter, rect, theme::RADIUS_MD, press);
     let stroke = Stroke::new(
         1.4_f32,
         if hovered {
@@ -3416,13 +3382,7 @@ fn hotkey_pill(
         StrokeKind::Inside,
     );
     let press = anim::press(ui, id, pill.is_pointer_button_down_on());
-    if press > 0.01 {
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
+    press_overlay(painter, rect, theme::RADIUS_MD, press);
     let (label, color) = match sound.hotkey {
         Some(hotkey) => (
             hotkey.label(),
@@ -3456,7 +3416,7 @@ fn ram_chip(
     info: &SoundInfo,
     font_size: f32,
 ) -> Option<Action> {
-    let missing = info.error.is_some() && !info.loading || info.missing;
+    let missing = is_missing(info);
     let has_hotkey = sound.hotkey.is_some();
     if !has_hotkey && !missing {
         return None;
@@ -3481,13 +3441,7 @@ fn ram_chip(
         StrokeKind::Inside,
     );
     let press = anim::press(ui, id, chip.is_pointer_button_down_on());
-    if press > 0.01 {
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
+    press_overlay(painter, rect, theme::RADIUS_MD, press);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -3511,6 +3465,70 @@ fn ram_chip(
     } else {
         Action::ToggleRam(sound.id)
     })
+}
+
+/// Accent wash for icon-only buttons, driven by an already-tweened hover value.
+fn icon_hover(painter: &egui::Painter, rect: Rect, t: f32) {
+    if t > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::accent(), (16.0 * t) as u8),
+        );
+    }
+}
+
+/// A sound is missing when the file could not be loaded or the path lookup
+/// failed. Kept in one place so cards, rows and chips agree.
+fn is_missing(info: &SoundInfo) -> bool {
+    (info.error.is_some() && !info.loading) || info.missing
+}
+/// Darken a control while it is held. One alpha for every button so press
+/// feedback feels identical across the app.
+fn press_overlay(painter: &egui::Painter, rect: Rect, radius: u8, press: f32) {
+    if press <= 0.01 {
+        return;
+    }
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(radius),
+        theme::alpha(theme::bg(), (press * 40.0) as u8),
+    );
+}
+
+/// Shared fill/border for a sound card or row.
+fn sound_surface(
+    hover: f32,
+    ram_active: bool,
+    playing: bool,
+    missing: bool,
+    selected: bool,
+    flash: bool,
+) -> (Color32, Color32, f32) {
+    let mut fill = theme::card();
+    if ram_active {
+        fill = theme::mix(fill, theme::purple(), 0.06);
+    }
+    if playing {
+        fill = theme::mix(fill, theme::accent(), 0.10);
+    }
+    if missing {
+        fill = theme::mix(fill, theme::red(), 0.09);
+    }
+    if hover > 0.0 {
+        fill = theme::mix(fill, theme::text(), 0.03 * hover);
+    }
+    let border = if flash || playing || selected {
+        theme::accent()
+    } else if missing {
+        theme::red()
+    } else if ram_active {
+        theme::alpha(theme::purple(), 105)
+    } else {
+        theme::border()
+    };
+    let width = if selected || flash { 1.5 } else { 1.0 };
+    (fill, border, width)
 }
 
 fn play_progress(painter: &egui::Painter, track: Rect, progress: f32, alpha: u8) {
@@ -3548,44 +3566,20 @@ fn sound_card(
     let has_hotkey = sound.hotkey.is_some();
     let ram_active = has_hotkey && sound.ram;
     let playing = progress.is_some();
-    let missing = info.error.is_some() && !info.loading || info.missing;
+    let missing = is_missing(info);
     let flash = sound
         .flash_until
         .map(|t| t > Instant::now())
         .unwrap_or(false);
 
-    let mut fill = theme::card();
-    if ram_active {
-        fill = theme::mix(fill, theme::purple(), 0.06);
-    }
-    if playing {
-        fill = theme::mix(fill, theme::accent(), 0.10);
-    }
-    if missing {
-        fill = theme::mix(fill, theme::red(), 0.10);
-    }
     let hover = anim::hover(ui, Id::new(("card_hover", sound.id)), response.hovered());
-    if hover > 0.0 {
-        fill = theme::mix(fill, theme::text(), 0.03 * hover);
-    }
-    let border = if flash {
-        theme::accent()
-    } else if playing {
-        theme::accent()
-    } else if missing {
-        theme::red()
-    } else if selected {
-        theme::accent()
-    } else if ram_active {
-        theme::alpha(theme::purple(), 110)
-    } else {
-        theme::border()
-    };
+    let (fill, border, width) =
+        sound_surface(hover, ram_active, playing, missing, selected, flash);
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_LG),
         fill,
-        Stroke::new(if selected || flash { 1.5_f32 } else { 1.0_f32 }, border),
+        Stroke::new(width, border),
         StrokeKind::Inside,
     );
     if flash {
@@ -3726,42 +3720,18 @@ fn sound_row(
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
     let ram_active = has_hotkey && sound.ram;
-    let missing = info.error.is_some() && !info.loading || info.missing;
+    let missing = is_missing(info);
     let playing = progress.is_some();
     let flash = sound.flash_until.map(|t| t > Instant::now()).unwrap_or(false);
 
-    let mut fill = theme::card();
-    if ram_active {
-        fill = theme::mix(fill, theme::purple(), 0.06);
-    }
-    if playing {
-        fill = theme::mix(fill, theme::accent(), 0.10);
-    }
-    if missing {
-        fill = theme::mix(fill, theme::red(), 0.08);
-    }
     let hover = anim::hover(ui, Id::new(("row_hover", sound.id)), response.hovered());
-    if hover > 0.0 {
-        fill = theme::mix(fill, theme::text(), 0.03 * hover);
-    }
-    let border = if flash {
-        theme::accent()
-    } else if playing {
-        theme::accent()
-    } else if missing {
-        theme::red()
-    } else if selected {
-        theme::accent()
-    } else if ram_active {
-        theme::alpha(theme::purple(), 100)
-    } else {
-        theme::border_soft()
-    };
+    let (fill, border, width) =
+        sound_surface(hover, ram_active, playing, missing, selected, flash);
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_MD),
         fill,
-        Stroke::new(1.0_f32, border),
+        Stroke::new(width, border),
         StrokeKind::Inside,
     );
 
@@ -4132,27 +4102,11 @@ fn paint_list_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
 fn plus_button(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
     let painter = ui.painter();
-    let hovered = response.hovered();
-    if hovered {
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), 16),
-        );
-    }
+    let hover = anim::hover(ui, Id::new("plus_hover"), response.hovered());
+    icon_hover(painter, rect, hover);
     let press = anim::press(ui, Id::new("plus"), response.is_pointer_button_down_on());
-    if press > 0.01 {
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
-    let color = if hovered {
-        theme::accent()
-    } else {
-        theme::muted()
-    };
+    press_overlay(painter, rect, theme::RADIUS_MD, press);
+    let color = theme::mix(theme::muted(), theme::accent(), hover);
     let stroke = Stroke::new(1.4_f32, color);
     let center = rect.center();
     painter.line_segment(
@@ -4196,13 +4150,7 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
         Id::new(("accent", text, size.x as i32, size.y as i32)),
         response.is_pointer_button_down_on(),
     );
-    if press > 0.01 {
-        ui.painter().rect_filled(
-            response.rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
+    press_overlay(ui.painter(), response.rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
     response
 }
 
@@ -4219,13 +4167,7 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
         Id::new(("ghost", text, size.x as i32, size.y as i32)),
         response.is_pointer_button_down_on(),
     );
-    if press > 0.01 {
-        ui.painter().rect_filled(
-            response.rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
+    press_overlay(ui.painter(), response.rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
     response
 }
 
@@ -4235,13 +4177,7 @@ fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
             .frame(false),
     );
     let press = anim::press(ui, Id::new(("tiny", text)), response.is_pointer_button_down_on());
-    if press > 0.01 {
-        ui.painter().rect_filled(
-            response.rect,
-            CornerRadius::same(theme::RADIUS_SM),
-            theme::alpha(theme::bg(), (press * 30.0) as u8),
-        );
-    }
+    press_overlay(ui.painter(), response.rect, theme::RADIUS_SM, press);
     response
 }
 
@@ -4366,13 +4302,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
         Id::new(("window_button", kind as i32)),
         response.is_pointer_button_down_on(),
     );
-    if press > 0.01 {
-        ui.painter().rect_filled(
-            rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::bg(), (press * 40.0) as u8),
-        );
-    }
+    press_overlay(ui.painter(), rect.shrink2(Vec2::new(2.0, 2.0)), theme::RADIUS_MD, press);
     let color = if close && hovered {
         theme::red()
     } else if hovered {
