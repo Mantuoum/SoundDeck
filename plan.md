@@ -1,518 +1,671 @@
-# SoundDeck — Looping Track
+# SoundDeck — Audio Latency, Consistent Volumes, Full-window Settings
 
-Status: storage, per-file themes, motion, and the UI polish batch are shipped. The
-looping track shipped in `cd22482`; `context.md` tracks the live state.
+Status: **plan for approval. No code changed.**
 
-## Shipped baseline (reference, do not redo)
+Four pieces of work, in order:
 
-These decisions are already in the code. They constrain new work but need no
-re-implementation.
+1. Make the level meters match what is actually heard, and cut the oversized output
+   queue that delays every start/stop.
+2. Simplify the loop's streaming path and give it its own volume.
+3. Unify the volume maths and behaviour without changing how anything looks.
+4. Replace the settings modal with a full-window, tabbed Settings view.
 
-**Config**
+Developer documentation is a fifth deliverable, written **after** these refactors so it
+describes the final code. The far-future native UI rewrite stays parked at the end.
 
-- Layout:
-  ```
-  SoundDeck.exe
-  config/
-    settings.json
-    libraries.json
-    themes/*.md
-  ```
-- JSON for machine data, one Markdown file per theme. Audio paths are references,
-  stored as given or exe-relative (`model::portable_path`), never copied.
-- Atomic writes, one rolling `.bak` per config file, `.tmp` swept at startup, BOM
-  tolerated on read and never written.
-- Schema clamps: volumes `0..1`, master gain `0..12 dB`. Sounds cap at 20 minutes and
-  decode to 48 kHz stereo; the loop is the exception (streamed, no cap).
-- Runtime settings: active tab, theme id, layout, device ids/names, volumes, gain,
-  link volumes, hotkey RAM preload, `animate_ui`. `window_size` is parsed and ignored;
-  the window always opens at 960×540.
-
-**Themes**
-
-- `config/themes/<id>.md`; Graphite is the default and the per-token fallback.
-- Tokens: `bg`, `panel`, `panel_deep`, `card`, `card_hover`, `field`, `border`,
-  `border_soft`, `text`, `muted`, `faint`, `accent`, `purple`, `amber`, `red`
-  (plus optional `accent_soft`).
-- Theme reload is manual only. Accent is freely overridable.
-
-**Visual system**
-
-- Radii: `SM=5` (segmented pill, chips), `MD=8` (controls, rows), `LG=12` (cards),
-  `XL=14` (modals, popups, capsule search).
-- Spacing uses the existing helpers (`sound_surface`, `section_line`, `ghost_button`,
-  `accent_button`, `icon_hover`); new UI follows them instead of bespoke painting.
-- Motion: 60–90 ms ease-out, no bounce, gated by `animate_ui` AND the Windows flag.
-
-**Verification**
-
-- 21 tests green; release build deployed to `sounddeck\review\SoundDeck.exe`.
-
-## Non-goals
-
-- No database. JSON + atomic writes is the durability model.
-- No audio copying or media library management.
-- No playback, hotkey or RAM behaviour changes **other than the opt-in looping track**,
-  which is streamed, unhooked from the hotkey registry, and exempt from exclusive
-  playback.
-- No live filesystem watcher for themes.
-- No playlists, per-loop routing, or seeking within the loop.
-
----
-## 1. Looping track
-
-Status: **shipped** in `cd22482`. See 1.15 for the as-built notes and the two layout
-deviations.
-
-### 1.1 Goal and scope
-
-One background track, looped forever, independent of the sound grid.
-
-In scope:
-
-- One file, picked by the user, referenced in place. Never copied, never renamed.
-- Streamed from disk, so any length works (a 2-hour set is fine).
-- Play / Stop only. No seek, no progress bar, no hotkey, no per-track volume.
-- Hidden until enabled in Settings, so the default sidebar is unchanged.
-- Follows Monitor + Cable routing, both slot volumes, and master gain.
-- Plays underneath sound effects. Exempt from exclusive playback, `Stop all`, and
-  library switching.
-
-Out of scope:
-
-- Playlists, crossfading between tracks, more than one loop slot, shuffle/repeat modes
-  other than "repeat one".
-- Per-loop device routing or a separate loop fader.
-- Resuming at the last position: every Play starts at frame 0.
-- Putting the loop into `libraries.json`, search results, the grid, the hotkey registry,
-  or the RAM preload set.
-- Drag-and-drop onto the loop card (the existing grid drop path is unchanged).
-
-### 1.2 Locked decisions
+## Locked decisions
 
 | Topic | Decision |
 | --- | --- |
-| Length / memory | **Stream from disk.** No duration cap; constant ~0.5 MB buffer |
-| Routing | Follow Monitor + Cable; no extra fader |
-| Interaction with sounds | Play underneath, no ducking; both directions exempt |
-| Scope | Global: survives tab switches and `Stop all` |
-| Launch state | Remember `loop_path`; always start stopped |
-| Placement | Sidebar card under the meters; only rendered when enabled |
-| Bad file | Keep the path, show the error, offer Locate; never silently clear |
-| Start/stop | Instant, no fade (accepted click risk) |
+| Loop playback | Keep streaming; no RAM preload, no length cap |
+| Decode buffer | Shrink the decode-ahead channel to ~0.34 s |
+| Output queue | Shrink each mixer ring from 2.0 s to **0.15 s** |
+| Metering | Measure peaks where WASAPI consumes samples, not where the mixer produces |
+| Loop UI states | `Idle`, `Playing`, `Error` only; no Buffering, no Underrun |
+| Loop volume | New `loop_volume` (`0..1`, default `1.0`), independent of Monitor/Cable |
+| Volume consistency | Same maths, clamping, formatting and interaction rules; **no visual redesign** |
+| Settings surface | Full-window view inside the existing window (not a modal, not a new window) |
+| Settings nav | Left rail: Playback, Audio, Appearance, About |
+| Window size | Still opens at 960×540; settings uses all of it; resize/maximize works |
+| Settings save | Immediate, no Save/Cancel; rail footer says changes save automatically |
+| Settings back | “Back to soundboard” in the rail, plus `Esc` and `Ctrl+,` |
+| Title bar | Library tabs hidden; muted “Settings” breadcrumb while open |
+| Status bar | Unchanged; Stop all / Activity log stay available |
+| Settings tab state | Session-only; not persisted |
+| Decoding | Keep Symphonia; do not bundle FFmpeg |
+| Scope | Latency/meter fix, loop simplification + volume, volume consistency, settings, docs |
 
-### 1.3 Config
+## Goals
 
-`config/settings.json` gains two fields, in this order after `preload_hotkey_sounds`:
+- Stop the meter from showing audio before it is audible.
+- Make loop and sound start/stop feel immediate (target ≤250 ms total).
+- Remove the loop's “Buffering”/“Underrun” churn without adding 300 MB of RAM.
+- Give the loop its own level without touching Monitor/Cable.
+- Make every volume control share one curve, one clamp, one formatter, one behaviour.
+- Give settings enough width and structure to stop scrolling for basic options.
+- Document the final architecture for a beginner Rust developer, in one file.
 
-```json
-"loop_enabled": false,
-"loop_path": null
-```
+## Non-goals
 
-Rules:
+- No loop seeking, playlists, crossfade, or multiple loop slots.
+- No loop hotkey.
+- No new preferences beyond the loop volume.
+- No separate native Settings window, no exclusive fullscreen, no settings search.
+- No FFmpeg dependency. Symphonia already decodes the advertised formats, and decoding
+  is not the latency bottleneck. Bundling FFmpeg would add ~100 MB and licensing work
+  without fixing the output queue.
+- No other storage schema change beyond `loop_volume`.
+- No UI redesign here; the native rewrite remains a separate, parked track.
 
-- `loop_enabled` is **visibility only**. It does not auto-start playback.
-- `loop_path` is stored exactly as picked by the file dialog: absolute, or relative to
-  the exe folder. Same rule as `SoundConfig.path` — no canonicalization, no copying.
-- Turning the feature off stops playback, hides the card, and **keeps** `loop_path`.
-- There is no `loop_volume`. Monitor/Cable slot volumes and master gain apply in the
-  mixer, so following is free.
-- Normalize on load: `loop_path.trim()`; empty or whitespace-only → `None`. Do not
-  clear it because the file is missing, and do not `stat` it at startup (a network path
-  must not delay launch).
-- `SETTINGS_VERSION` stays at 2. `#[serde(default)]` on `Settings` already covers old
-  files; unknown keys are ignored as before.
-- Hand-edited `loop_enabled: true` with `loop_path: null` is valid: the card appears
-  with "No file selected".
-- The settings write path is the existing debounced `mark_dirty()` — no new file, no
-  new backup.
+---
 
-### 1.4 Architecture
+## 1. Audio latency and metering
 
-The loop cannot be a `Voice`: voices are fully decoded `Arc<Vec<f32>>`, are stopped by
-exclusive playback, and live in RAM. The loop is streamed and exempt, so it gets its own
-channel through the mixer.
+### 1.1 What is actually happening
 
-```
-UI thread
-  Play ──► Engine::start_loop(path)
-             ├─ LoopStream::spawn ──► decoder thread (symphonia)
-             │      status: Idle/Buffering/Playing/Underrun/Error
-             │      bounded channel(64 × 1024 frames ≈ 1.36 s, ~0.5 MB)
-             └─ Mixer.loop_rx = Some(rx)
+The app prepares audio in 5 ms chunks and pushes them into a per-output **ring**: a
+fixed-size queue between the mixer and the sound card. The card drains that queue at
+real-time speed.
 
-mixer thread (5 ms chunks)
-  Mixer::render ──► voices + loop chunk ──► master gain ──► out
-     └─ rings[Monitor] / rings[Cable] push_scaled(slot volume) ──► WASAPI
-```
+- The ring currently holds **2 seconds**.
+- The mixer runs ahead and fills it.
+- The peak meter is computed at **mix time**, in `mixer_loop`, before the samples reach
+  the ring. The UI therefore lights up while the audio is still queued.
+- Start and stop are delayed by the same queue: stopping only prevents *future* mixes;
+  up to two seconds of already-mixed loop/sound audio is waiting.
 
-New module `src/audio/stream.rs`:
+Disk is not involved once a file is decoded. A short WAV/MP3 decodes in milliseconds.
+The delay is queued audio, not fetching.
 
-```rust
-pub enum LoopState {
-    Idle,
-    Buffering,
-    Playing,
-    Underrun,
-    Error(String),
-}
+### 1.2 The two fixes
 
-pub struct LoopStream { /* stop flag, join handle, shared status */ }
+**A. Measure at the consumer side**
 
-impl LoopStream {
-    /// Spawns the decoder thread and returns immediately with the chunk receiver.
-    /// `status` is shared with the mixer so underruns can be reported too.
-    pub fn spawn(path: PathBuf, status: Arc<Mutex<LoopState>>) -> (Self, Receiver<Vec<f32>>);
-    pub fn state(&self) -> LoopState;
-    /// Sets the stop flag and joins. The caller drops the receiver first.
-    pub fn stop(self);
-}
-```
+- Add a peak field to `Ring`, updated inside `pop_into` (called by the WASAPI render
+  thread) with an atomic max.
+- `Engine::take_levels()` reads and clears each ring's peak instead of reading
+  `Mixer::meter`.
+- Slot gain is already applied when mixing into the ring, so the measured values match
+  the signal sent to each device.
+- Remove `Mixer::meter` and the `peak_of` call in `mixer_loop`.
+- Result: bars match heard audio within the device buffer (≈10–30 ms wired, more over
+  Bluetooth). `AudioEvent` and peak-hold behaviour stay unchanged.
 
-`Engine` additions:
+**B. Shrink the ring**
 
-```rust
-pub fn start_loop(&self, path: PathBuf) -> Result<()>;
-pub fn stop_loop(&self);
-pub fn loop_state(&self) -> LoopState;
-```
+- `Ring::new(2.0)` → `Ring::new(0.15)` per output.
+- 150 ms is 30 chunks of 5 ms. The mixer catches up bursts of up to 4 chunks, so this
+  is enough headroom for normal Windows scheduling.
+- Fallback: 0.25 s if manual QA hears crackles. Never return to 2.0 s.
+- This also reduces the lead on sound-card progress bars and the loop card.
 
-`start_loop` pre-checks that the path exists and is a file so the UI gets an immediate
-`Err`. Everything after that is reported through `LoopState` (missing, unsupported,
-corrupt, device-independent errors), because probing happens on the decoder thread.
-It stops any existing loop first, spawns the decoder, and attaches the receiver to the
-mixer immediately. It does not wait for prebuffering: a few milliseconds of silence at
-the head is better than blocking the UI thread. The status flips
-`Buffering → Playing` when the mixer consumes the first chunk.
+### 1.3 Expected latency
 
-The stream handle lives in `Engine` as `Mutex<Option<LoopStream>>`; the receiver, the
-current chunk, and a clone of the shared status live inside `Mixer`. That is how the
-mixer reports `Underrun` and flips back to `Playing` without a second status channel.
-
-### 1.5 Decoder thread
-
-1. Validate: exists, is a file, readable. Errors map to `Error("File not found: …")`,
-   `Error("Cannot open …")`, etc.
-2. Probe with a `Hint` from the file extension and `enable_gapless: true`, exactly like
-   `decode.rs`. Remember `track_id`; reject `CODEC_TYPE_NULL` / no track.
-3. Decode packet by packet, convert each block to interleaved stereo f32 @ 48 kHz, and
-   send 1024-frame chunks on the bounded channel. A blocking `send` is the backpressure:
-   when the mixer is 1.36 s ahead, the decoder sleeps in `send`.
-4. On `UnexpectedEof`: end of pass. On `ResetRequired` (codec parameters changed
-   mid-file): recreate the decoder from the new stream parameters and keep going in the
-   same pass; if the codec cannot be rebuilt, end the pass and reopen.
-5. Wrap: prefer `format.seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(0.0),
-   track_id: Some(track_id) })` followed by `decoder.reset()`. Formats that reject the
-   seek fall back to reopen + re-probe. If reopening fails, emit
-   `Error("File is no longer available")` and exit.
-6. Guard against spin: if one full pass produced zero decodable frames, emit
-   `Error("No audio samples found")` and exit instead of wrapping forever. Also cap
-   consecutive decode errors (e.g. 64) before bailing.
-7. Check the stop flag between packets. `Engine::stop_loop` drops the mixer's receiver
-   first, so a blocked `send` returns `Err` immediately and the join is bounded to a
-   few milliseconds.
-8. Send a final `Error("…")` only for fatal conditions. Underruns are reported by the
-   mixer, not the decoder.
-
-Conversion lives in a new `src/audio/resample.rs`, extracted from `decode::to_canonical`:
-
-- `StereoResampler { rate, channels, phase, carry }` with
-  `push(&mut self, interleaved: &[f32]) -> Vec<f32>`.
-- Stateful linear interpolation with one carried input frame, so output is independent
-  of chunk boundaries (a hard test requirement).
-- 48 kHz stereo input is passed through unchanged (bit-exact).
-- Mono duplicates to L/R; more than two channels uses channels 0/1; other layouts are
-  clamped the same way as today.
-- `decode::to_canonical` becomes a thin one-shot wrapper so existing tests and decoding
-  behaviour do not change.
-- `MAX_SECONDS = 20 min` stays for sounds only. The loop has no cap.
-
-No new crates: `symphonia`, `crossbeam-channel`, and `anyhow` are already dependencies.
-
-### 1.6 Mixer rules
-
-- `Mixer::render` mixes loop frames **before** `master_gain` is applied, alongside
-  voices, so master gain affects the loop. Slot volumes are applied when the mixed
-  buffer is pushed into each ring, so Monitor/Cable apply automatically.
-- Loop frames are added, never scaled by a sound's volume. There is no per-loop gain.
-- `play()` must not touch the loop: exclusive playback only trims `voices`.
-- `stop_all()` must not touch the loop. Add a comment saying so, or the next cleanup
-  will "fix" it.
-- `stop_sound()` is unaffected.
-- Partial chunks: keep `loop_chunk` + `loop_pos` in the mixer; refill with `try_recv`
-  when exhausted. Never split a chunk across a render call without carrying the
-  remainder.
-- Underrun: if `try_recv` is empty, output silence for the rest of that 5 ms render and
-  keep the loop attached. Set `LoopState::Underrun` through the shared status handle;
-  the next chunk flips it back to `Playing`. Do not log per underrun (network files
-  would flood the log); log once per play session.
-- Stop order: take `loop_rx` and clear `loop_chunk` under the mixer lock (instant
-  silence), then join the decoder. Silence must not wait for a decode to finish.
-- Meter: loop output counts toward the peak meter, so the bars stay alive while the
-  loop plays. This is correct and expected; no special-casing.
-- Device changes, reconnects, and `set_routes` do nothing to the loop. The decoder is
-  device-agnostic; the rings buffer whatever the mixer produces.
-- Quit: stop in `App::on_exit` and again in `Engine::Drop` (idempotent). The decoder must
-  not outlive the window, because the release profile uses `panic = "abort"` and a crash
-  must not leave a thread holding the file.
-
-### 1.7 UI
-
-**Settings → Playback**, above the RAM row, same `paint_switch` pattern as the other
-toggles:
-
-- Label: `Looping track`
-- Helper: `Show a loop player under the meters`
-- Off → stop and hide. On → show the card; do not start playback.
-
-**Sidebar card**, pinned above the Settings button (outside the scroll area, below
-the meters), so it stays visible at 960×540. The pinned block reserves 32 px in compact
-mode and 76 px otherwise; the scroll area shrinks to match.
-
-State → UI mapping:
-
-| State | Transport button | Right-hand text | Play enabled |
-| --- | --- | --- | --- |
-| No path | `Play` | `No loop file` | No |
-| Idle (path set) | `Play` | `Ready` | Yes |
-| Buffering | `Stop` | `Loading…` | n/a (Stop) |
-| Playing | `Stop` | `Playing` | n/a (Stop) |
-| Underrun | `Stop` | `Buffering…` | n/a (Stop) |
-| Missing | `Play` (disabled); pick button becomes `Locate` | `File missing` | No |
-| Error | `Retry` | message (truncated) | Yes, retries |
-
-Full layout (≈66 px, `RADIUS_LG`, `sound_surface` hover, `border_soft`):
-
-```
-┌──────────────────────────────────────────────┐
-│ [LOOP]  rain_loop.flac                  [⌕]  │  20 px
-│ [ ▶ Play ]   Playing                         │  28 px
-└──────────────────────────────────────────────┘
-```
-
-- Badge: 34×14, `RADIUS_SM`, accent at 16% fill / 70% border, 9 px uppercase `LOOP`.
-  It communicates "this repeats", nothing else.
-- Filename: `display_name()` of the path, 11.5 px, single line, ellipsis via
-  `galley`/`truncate`; tooltip shows the full path.
-- Pick button: 16×16 folder/sound icon, `icon_hover`, tooltip `Choose a loop file`.
-  In the missing state the same button is the Locate action and its tooltip becomes
-  `Locate the loop file`; no second button is added.
-- Transport button: 78×24, `RADIUS_MD`, accent when playing, muted otherwise.
-  - Stopped: play triangle + `Play`.
-  - Playing/Buffering: stop square + `Stop`.
-  - Error: `Retry` (re-attempts the same path).
-- Right side of row 2: 10.5 px muted status text: `Playing`, `Loading…`,
-  `File missing`, or the error message truncated with a tooltip.
-- No progress bar, no elapsed time, no volume slider.
-
-Compact layout (`ui.available_height() < 620.0`), one 26 px row:
-
-- 22×22 transport icon button, filename at 11 px, 16×16 pick button. Badge is reduced
-  to a 7.5 px `LOOP` caption before the filename; the separate status text is dropped.
-  An error or a missing file replaces the filename with the message in `theme::red()`.
-- The Monitor/Cable captions above the device selectors collapse while the loop card is
-  shown on a short window, so the meters stay in view. They return when the loop card
-  is hidden.
-- An empty path still shows `No loop file` with Play disabled and the pick button live.
-
-File dialog: reuse the existing `rfd` setup and `SUPPORTED_EXTENSIONS` filter used by
-`open_file_dialog` (Audio filter + All files), so double extensions and odd paths behave
-identically. The dialog is blocking; that matches the current "Load sounds" path.
-
-Behavior:
-
-- Picking the same path is a no-op (no restart, no re-probe).
-- Picking a different path while stopped just replaces the path.
-- Picking a different path while playing stops the current stream and starts the new one
-  immediately. Brief silence while buffering is acceptable.
-- Toggling the feature off while playing is an instant stop; the path survives.
-- No new keyboard shortcut. Do not touch `hotkeys.rs` or the registry, so global hotkeys
-  and the tray behave exactly as today.
-- Status/log lines: one `Info` on start (`Loop track: <name>`), one `Warn` on failure.
-  Do not log every underrun.
-
-### 1.8 Behavior matrix
-
-| Event | Loop result |
-| --- | --- |
-| Trigger any sound / retrigger | Keeps playing underneath, full level |
-| `Stop all` (red button) | Keeps playing |
-| Switch library tab | Keeps playing |
-| Switch layout grid/list | Keeps playing |
-| Change Monitor/Cable volume or link toggle | Follows immediately |
-| Change master gain | Follows immediately |
-| Change output device | Keeps playing; no restart |
-| Minimize to tray | Keeps playing |
-| Window close / Alt+F4 / tray Quit | Instant stop, thread joined, then exit |
-| App crash | Decoder thread dies with the process (`panic = "abort"`) |
-| Loop file deleted while playing | Decoder error → stop, card shows the error, path kept |
-| Loop file deleted while stopped | Card shows `File missing`, Play disabled, Locate offered |
-| Loop file restored at the same path | Card re-enables Play (existence polled ≤ once per 2 s) |
-| Pick a different loop file while playing | Old stream stops, new one starts immediately |
-| Feature toggled off | Instant stop, card hidden, path kept |
-| Second instance launched | Focuses the first; loop unchanged |
-
-### 1.9 Edge cases
-
-1. **No path.** Card visible with `No loop file`; Play disabled; pick button live.
-2. **Empty file / no audio track / unsupported codec.** Decoder reports a specific
-   error; Play becomes `Retry`; nothing loops, nothing spins.
-3. **Zero decodable frames in a full pass.** Fatal, not an infinite wrap (1.5.6).
-4. **File shorter than one chunk (e.g. 20 ms).** Works; the pass wraps within a chunk.
-   Expect a click at the seam because no crossfade exists.
-5. **Very long file (hours).** Allowed. Decoder memory stays at the channel depth.
-6. **Mono / 5.1 / 7.1 source.** Mono duplicates; >2 channels uses L/R only; matches
-   existing sound decoding.
-7. **Odd sample rates (8 kHz … 192 kHz).** Stateful linear resampling; chunk-invariant
-   test required.
-8. **Sample-rate change mid-file.** `ResetRequired` rebuilds the decoder for the new
-   parameters; if that fails, end the pass and reopen; if the reopen fails, stop with an
-   error.
-9. **Unseekable/odd container.** Fall back to reopening the file; if reopen fails, stop
-   with an error.
-10. **Network / slow USB file.** Underruns become silence; the loop resumes when data
-    arrives. One status warning per session, never a dialog.
-11. **File locked by another process.** Open may succeed for reading; if it does not,
-    show `Cannot open …` and keep the path.
-12. **Permission denied / path too long.** Same error path; the tooltip shows the path.
-13. **File renamed while playing.** The open handle keeps reading (Windows); the next
-    Play reports missing. No watcher.
-14. **Path points to a directory.** Rejected before spawning the thread.
-15. **Double-click Play / rapid toggle.** `start_loop` stops the previous stream first;
-    the UI also keeps a `loop_busy` guard for the duration of the spawn call so two
-    decoder threads cannot exist.
-16. **Play with no output devices.** Allowed; the mixer renders silently and the state
-    still says `Playing`. The existing device warnings are the source of truth.
-17. **Both slots on the same device.** Existing engine rule applies (second route
-    dropped); the loop is unaffected.
-18. **Volume at 0 or device muted.** State stays `Playing`; the meter reads low.
-19. **Master gain at +12 dB.** Loop can clip together with sounds; the mixer clamps to
-    ±1.0 as it does today.
-20. **Loop file is also a sound in a library.** Allowed; independent playback, but the
-    sound will interrupt other sounds, never the loop.
-21. **Loop playing while a sound is preloaded into RAM.** Unrelated; RAM pill does not
-    count the loop.
-22. **Settings hand-edited to `loop_enabled: true` with a bogus path.** Card appears and
-    shows the error; the app still starts.
-23. **Settings hand-edited with an empty string path.** Normalized to `None`.
-24. **Config written by an older build (no loop keys).** Defaults apply: hidden,
-    no path.
-25. **Read-only exe folder.** Loop still plays (nothing is written); the settings change
-    is lost as usual, with the existing warning.
-26. **App quit while buffering.** `stop_loop` joins promptly; no hang on exit.
-27. **Two copies from different exe paths.** Only one instance per path; if both run,
-    they fight over hotkeys as today. The loop is per-process.
-28. **Instant start/stop clicks.** Accepted. A 2 ms declick ramp is the fallback if it
-    is audible in practice (1.14).
-
-### 1.10 Failure and recovery
-
-| Failure | Detection | Result |
+| Stage | Today | After |
 | --- | --- | --- |
-| Missing at Play | Pre-spawn check | No spawn; card shows missing; Play disabled |
-| Probe/decode fails on start | Decoder `Error` | `Retry`; path kept |
-| Decode fails mid-file | Decoder `Error` | Loop stops; card shows message; status warning |
-| File disappears mid-play | Read error → `Error` | Stop, keep path; card offers Locate |
-| Channel underrun | Mixer `try_recv` empty | Silence for that render; auto-recover |
-| Decoder thread panic | Thread finished while status is Buffering/Playing | `LoopState::Error("Loop track stopped")`; Play/Retry recovers |
-| Start called twice | `Engine::start_loop` | Previous stream stopped first |
-| Quit during decode | Drop / tray path | Stop flag + dropped `rx`; join bounded |
+| Click → engine | <1 ms | <1 ms |
+| Loop first audio | probe/first chunk + up to 2 s queue | first chunk + ≤150 ms queue |
+| Sound trigger | up to 2 s queue | ≤150 ms queue |
+| Stop → silence | up to 2 s queued tail | ≤150 ms queued tail |
+| Meter vs ears | ahead by the queued amount | matches within the device buffer |
 
-The loop never takes the app down, never blocks the UI thread waiting for audio, and
-never leaves a path silently cleared.
+Wired shared-mode Windows audio adds roughly 10–30 ms; Bluetooth adds more and cannot
+be fixed in the app. Shared mode is required to let Discord/OBS/games use the same
+device, so ASIO-style 5 ms latency is out of scope.
 
-### 1.11 Tests
+### 1.4 Why not load the loop into RAM
 
-Worth automating:
+A 15-minute stereo loop at 48 kHz f32 is ~330 MB. Streaming the same file costs a few
+MB and one decoder thread, and normal media apps do exactly that. The perceived delay
+is not caused by streaming; it is the output queue plus the “Buffering” state. Fix those
+and streaming is fast enough, with no length cap.
 
-- `resample`: chunk invariance (same 44.1 kHz input pushed as whole / 1-frame / 4096-frame
-  blocks produces identical output), mono duplication, >2-channel mapping, 48 kHz
-  passthrough bit-exact, existing `to_canonical` tests still pass.
-- `stream`: generate a 0.25 s stereo WAV in the temp folder; spawn; pull ≥ 2× the file
-  length through the channel with a timeout; assert the pass yields ≈12000 frames
-  (±1), is not silent after the wrap, and that `stop()` closes the channel and joins
-  quickly. Then assert the file handle is free (rename it).
-- `stream`: zero-frame file (valid WAV header, no samples) reports an error instead of
-  looping forever.
-- `storage`: settings roundtrip includes `loop_enabled` / `loop_path`; empty/whitespace
-  path normalizes to `None`; old JSON without the keys loads as disabled; `loop_enabled`
-  alone is preserved.
-- `engine`: attach a synthetic receiver, render one buffer, assert the loop is audible
-  under a voice and that master gain scales both; empty receiver yields silence without
-  dropping the voice; `stop_loop` silences immediately; `stop_all` leaves the loop
-  attached.
+### 1.5 Loop streaming simplification
 
-Manual QA (review build):
+Keep `audio/stream.rs`; make it smaller and quieter:
 
-1. Enable in Settings → card appears, Play disabled until a file is picked.
-2. Pick a 3-minute MP3 → Play → loops at the seam; Stop is instant; Play restarts at
-   the beginning.
-3. Play a sound over the loop: both audible; the sound fades out the previous sound,
-   not the loop.
-4. `Stop all`, switch tabs, switch layouts: loop keeps playing.
-5. Change Monitor and Cable volume/gain: loop follows.
-6. Rename the file while playing: card shows the error; Restore → Locate/Play works.
-7. Enable → disable while playing: instant stop, card hidden; re-enable restores path.
-8. Minimize, hotkey a sound, restore: loop never glitched.
-9. Quit from the tray while playing: process exits within a second, file handle released.
-10. 44.1 kHz mono and 96 kHz stereo files: correct pitch and speed; no drift over
-    several loops.
+- **Decode-ahead channel:** `CHANNEL_CHUNKS` 64 → **16** chunks (≈0.34 s, ~130 KB).
+  Enough to absorb decode jitter; less RAM and less lookahead.
+- **States:** replace `LoopState { Idle, Buffering, Playing, Underrun, Error }` with
+  `{ Idle, Playing, Error(String) }`.
+  - `start_loop` sets `Playing` immediately after spawning. The first chunk usually
+    arrives within milliseconds; the UI flips to Stop at once.
+  - No `Buffering` flash, no `Underrun` state, no mixer-side state transitions.
+  - A starved channel simply outputs silence for that render and recovers. Optionally
+    log one warning per play session; do not change the UI state.
+- **Mixer:** keep `loop_rx`, `loop_chunk`, `loop_pos`; remove `loop_status`.
+  `Engine::loop_state()` reads the engine-held status and treats a finished decoder
+  thread with a non-error state as `Error("Loop track stopped")`.
+- **Start:** pre-check the path, stop any existing loop, spawn the decoder, attach the
+  receiver. No prebuffer wait.
+- **Stop:** drop the receiver, clear the chunk under the mixer lock, join the decoder,
+  set `Idle`. The queued output tail is now ≤150 ms.
+- **Wrap:** keep the current seek/reopen logic; the 0.34 s channel hides the seek.
+- **No 15-minute cap**, no `loopbank`, no RAM copy of the file.
+- Keep `resample.rs`, `decode.rs`, and their tests.
 
-### 1.12 Docs (same commit)
+Result: fewer moving parts than today, any-length support, <1 MB of buffers, one
+decoder thread only while playing.
 
-README additions:
+### 1.6 Loop volume
 
-- Features: `Looping track` bullet, "streams from disk, any length".
-- `Config files`: `loop_enabled`, `loop_path`, "path is a reference, never copied".
-- New `Looping track` section: enable in Settings → Playback, pick a file, Play/Stop,
-  instant start/stop, follows Monitor/Cable, exempt from `Stop all` and library switches,
-  missing-file behavior with Locate.
-- `Audio notes`: sounds still cap at 20 minutes and preload to RAM; the loop streams and
-  does not appear in the RAM preload count.
-- `Hotkey limitations`: state explicitly that the loop has no global hotkey.
-- Update the settings snippet with the two new keys.
+- `Settings.loop_volume: f32` (linear `0..1`, default `1.0`), clamped in `normalize()`.
+  `#[serde(default)]` covers old files; no settings version bump.
+- `Mixer.loop_gain` and `Engine::set_loop_volume(f32)`. Loop samples are scaled by
+  `loop_gain` before the master gain and the per-slot Monitor/Cable gains.
+- `App` applies `cfg.loop_volume` right after `Engine::new` and on every change.
+- UI:
+  - Settings → Playback: “Volume” row with a logarithmic slider + percentage.
+  - Board loop card: one volume row, matching per-sound bars; full card grows 66 → 84,
+    compact 26 → 44. Pinned reserve grows by 18 px. At 960×540 the compact sidebar still
+    fits (device captions already collapse when the card is shown).
+- Total loop level = `loop_volume × slot volume × master gain`. Link volumes does not
+  touch `loop_volume`.
+- Volume 0 means playing but silent; the state stays `Playing`.
+- Changes apply on the next 5 ms render. No smoothing in this pass; matches sound
+  volume behaviour.
 
-### 1.13 Implementation order
+### 1.7 Loop edge cases
 
-1. Extract `audio/resample.rs`; keep `to_canonical` delegating to it. Tests pass with no
-   behavior change.
-2. Add `audio/stream.rs` (probe, decode, resample, bounded channel, wrap, stop, status).
-3. Add the Engine loop API and mixer integration (`loop_rx`, chunk carry, underrun,
-   `stop_loop`, Drop).
-4. Add the two settings fields + normalize + tests.
-5. Add the Settings toggle, sidebar card, file dialog, status polling, busy guard, and
-   compact layout.
-6. Run `cargo test`, release build, deploy to `review\SoundDeck.exe`, manual QA (1.11).
-7. Commit all of it plus README. Then the separate docs commit for `plan.md` /
-   `context.md` and the remaining README gaps.
+1. **File longer than any size.** Streams fine; no cap.
+2. **Unsupported/corrupt file.** Decoder reports `Error`; path kept; picker active.
+3. **Missing file.** Play disabled; picker becomes Locate.
+4. **File disappears mid-play.** Decoder error → stop; card shows the message.
+5. **Slow network/USB read.** Brief silence, state stays Playing, recovers.
+6. **Rapid Play/Stop.** Start stops the previous stream first; stop joins after dropping
+   the receiver; no thread leak.
+7. **Volume 0 or mute.** Silent but Playing; meter flat.
+8. **Seam on MP3/AAC.** Decoder padding can leave a small gap. WAV/FLAC loop cleanly.
+9. **Quit while playing.** `on_exit`/`Engine::Drop` stop and join the decoder.
+10. **Device switch/reconnect.** No loop action; the ring is device-agnostic.
+11. **Master +12 dB plus sounds.** Mixer clamps to ±1.0 as today.
+12. **Two copies.** Per-process; unchanged.
 
-### 1.14 Follow-ups (not this commit)
+### 1.8 Audio tests
 
-- 2 ms declick ramp on start/stop if instant cuts are audible.
-- Optional global hotkey for loop toggle (would need a reserved, non-conflicting slot).
-- Optional elapsed-time readout in the card (needs a position counter; the stream
-  currently has none).
-- Optional track normalization ("even loudness") — a streaming gain stage, not a fader.
+- `Ring`: consumer peak reflects popped samples and clears on read; slot gain applies
+  before measurement.
+- `mixer`: loop gain scales the loop; loop is unaffected by `play()` and `stop_all()`;
+  stop silences immediately; wrap after N frames.
+- `stream`: wrap, prompt stop, file-handle release, empty file error (existing tests,
+  adjusted for the new states).
+- `storage`: `loop_volume` roundtrip, default, clamp.
+- Manual: measure click-to-sound for a sound and the loop; confirm the meter no longer
+  leads audibly; loop 20-minute file; volume drag while playing; device switch.
 
-### 1.15 As built
+---
 
-- `src/audio/resample.rs` is a stateful, absolute-position resampler. Chunk invariance
-  is unit-tested (whole block vs 1-frame vs 1024-frame pushes, bit-identical).
-- `src/audio/stream.rs` owns the decoder thread, 64×1024-frame bounded channel, wrap
-  seek/reopen, zero-frame guard, and prompt stop (receiver dropped before join).
-- `Engine` owns the stream handle plus a shared `LoopState`; the mixer drains the
-  channel and reports `Playing`/`Underrun`. `start_loop`/`stop_loop`/`loop_state` are
-  the public surface; `Engine::Drop` and `App::on_exit` stop the thread.
-- Storage: `loop_enabled`, `loop_path` (trimmed on load), defaults off/empty; migration
-  from `sounddeck.json` writes them as off/empty.
-- UI: Settings → Playback checkbox, pinned sidebar card, picker, missing/error states,
-  in-app logging, 2-second existence poll, tooltips.
-- Deviations from the draft:
-  1. The card is pinned above Settings instead of living inside the scroll area —
-     at 960×540 the scrolled version was entirely below the fold.
-  2. The Monitor/Cable captions collapse in compact mode while the card is shown, to
-     keep the meters visible; they return when the loop card is hidden.
-- Tests: 33 total (5 resampler, 3 stream, 3 engine loop, 1 storage normalize plus the
-  existing 21). Release build deployed to the review folder after the commit.
+## 2. Volume consistency pass
 
+No visual redesign. Keep the slim bars on cards and the existing sliders on outputs.
+Make the logic, constants and behaviour live in one place.
+
+### 2.1 Current inconsistencies
+
+- `volume_to_position` / `position_to_volume` are app-local helpers; the loop volume
+  would add a third caller.
+- The card bar claims “scroll to adjust” but only handles click/drag.
+- Percentage formatting and clamping are repeated.
+- Device sliders and card bars store linear gains but map positions identically.
+- Master gain uses a separate 0…+12 dB range (correct, but its reset/tooltip should
+  follow the same conventions).
+
+### 2.2 New module `src/ui/volume.rs`
+
+```rust
+pub const RANGE_DB: f32 = 60.0;
+
+pub fn to_position(linear: f32) -> f32;
+pub fn from_position(position: f32) -> f32;
+pub fn percent(linear: f32) -> String;     // " 80%" style, consistent width
+pub fn bar(ui, rect, id, linear, compact, on_change); // existing look
+```
+
+- All volume callers use these functions: sound cards, Monitor, Cable, loop card,
+  Settings rows.
+- `bar` gains wheel support (2 % per notch) and keeps click/drag. Tooltips and
+  percentages use `percent`.
+- Clamp 0..1 at the source; `from_position` clamps too.
+- Remove the duplicated helpers from `app.rs`.
+- `device_volume` keeps its egui slider but uses the shared mapping and formatter.
+- Master gain stays a dB control with right-click reset; factor its label/readout row
+  so Settings and the sidebar share it.
+- No new stored types; `loop_volume`, sound volume and slot volumes stay `f32`.
+
+### 2.3 Behaviour rules (all volume controls)
+
+- Drag/click sets the value; wheel adjusts; release persists.
+- Slider position is logarithmic; stored value is linear.
+- 0 is silent, 1.0 is 100 %; no negative values.
+- Percent readout reflects slider position, not raw gain.
+- Changing Monitor/Cable honours the link switch; widgets do not implement linking.
+- Loop volume is independent; no link, no master-gain interaction beyond multiplying.
+
+### 2.4 Tests
+
+- Round-trip: `from_position(to_position(v)) ≈ v` for 0, 0.001, 0.1, 0.5, 0.99, 1.
+- Endpoints: 0 → silent, 1 → 0 dB.
+- Clamp: negatives/NaN handled safely.
+- Formatter produces the same width used by the UI.
+- Manual: drag each volume; wheel over a card bar; linked Monitor/Cable; loop 0/50/100;
+  master gain reset.
+
+---
+
+## 3. Full-window Settings
+
+### 3.1 Information architecture
+
+| Tab | Contains |
+| --- | --- |
+| **Playback** | Loop (enable, file, transport, volume, errors), hotkey RAM preload |
+| **Audio** | Monitor/Cable device + volume, link switch, master gain + reset, refresh |
+| **Appearance** | Theme picker, reload themes, Animate UI |
+| **About** | App version, portable note, Open config folder, developer block |
+
+About is pinned to the bottom of the rail; the three real settings tabs sit above it.
+
+### 3.2 Layout
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ▣ SoundDeck    Settings                                      –   □   ✕       │ 38
+├──────────────────────┬───────────────────────────────────────────────────────┤
+│ ← Back to soundboard │  Playback                                             │
+│                      │  Playback and memory.                                 │
+│ ▸ Playback           │                                                       │
+│   Audio              │  Background loop                                      │
+│   Appearance         │  ┌─────────────────────────────────────────────────┐  │
+│                      │  │ Looping track                            [ On ] │  │
+│                      │  │ Play one file under the sound effects.          │  │
+│                      │  │                                                 │  │
+│  ─────────────────   │  │ rain_loop.flac        Playing    [Stop] [⌕]    │  │
+│   About              │  │ Volume  ▬▬▬▬▬▬▬▬▬●──────  80%                   │  │
+│                      │  │ Streamed from disk · starts stopped on launch   │  │
+│                      │  └─────────────────────────────────────────────────┘  │
+│                      │                                                       │
+│ Changes save         │  Hotkey sounds                                        │
+│ automatically        │  ┌─────────────────────────────────────────────────┐  │
+│ v0.1.0               │  │ Load hotkey sounds into RAM              [ On ] │  │
+│                      │  │ 3 of 5 hotkey sounds loaded.                    │  │
+│                      │  └─────────────────────────────────────────────────┘  │
+├──────────────────────┴───────────────────────────────────────────────────────┤
+│ ● Ready                                              Stop all   Activity log │ 34
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+At 960×540 the body is 468 px: rail 200, content 760, 28 px margins → 704 px usable.
+
+**Rail**
+
+- `panel_deep` background, 200 px wide, no scrollbar.
+- Back row 30 px, then 34 px nav items with 16 px line icons and 12.5 px labels.
+- Active: accent 14% fill, accent text, 1 px accent stroke.
+- Hover: text at 3% fill, 60 ms.
+- Divider above About; footer “Changes save automatically” + `v0.1.0`.
+
+**Content**
+
+- `bg` background; fixed header with tab title (22 medium) + subtitle (11.5 muted).
+- Group title 13.5 medium; card `card` fill, `border_soft`, `RADIUS_LG`, 16 px padding.
+- Rows: ≥54 px, 12 px vertical padding, 1 px dividers.
+- Label/description takes the remaining width; control column 240 px.
+- Below 620 px usable width, the control stacks under the label.
+- Content column max 780 px, left-aligned; maximized windows keep the same column.
+- Header fixed; groups scroll with a per-tab offset.
+
+**Chrome**
+
+- Title bar keeps logo/name, replaces library tabs with a muted “Settings” breadcrumb,
+  keeps window controls and drag/maximize.
+- Status bar unchanged.
+- Board sidebar and its divider are not drawn while Settings is open.
+
+### 3.3 Visual language
+
+- `RADIUS_MD` for controls/rail items, `RADIUS_LG` for cards, no new radii.
+- Shared `paint_switch` (40×22) for every boolean; no checkboxes in Settings.
+- Dropdowns and sliders use the 240 px control column.
+- Buttons 28 px: `ghost_button` for secondary, accent-tinted for transport.
+- One accent per tab; no gradients, shadows or new colours.
+- Motion: 90 ms fade on open and on tab change; 60 ms nav hover; no slide. Respect
+  `animate_ui` and the Windows flag.
+
+### 3.4 Behaviour
+
+- Entry: sidebar Settings button, `Ctrl+,`, `--settings`.
+- Exit: rail back, `Esc`, `Ctrl+,`. `Esc` closes an open popup first
+  (`memory.any_popup_open()`), then leaves Settings.
+- `Ctrl+Q` still quits; board-only shortcuts (`Ctrl+O/F/L/Z`, Delete, Space, F2) are
+  disabled while Settings is open.
+- Window close quits; minimize hides to tray.
+- On open/close, `memory.stop_text_input()` and clear `focus_search` so the hidden
+  search field never eats keystrokes.
+- Opening Settings does not stop sounds or the loop; meters and hotkeys stay live.
+- Drop-to-add is skipped while Settings is open (no overlay, no file add).
+- Tab order follows rail → content; Space toggles a focused switch, Enter opens a
+  dropdown.
+- Window size is still not persisted.
+
+### 3.5 Tabs
+
+#### 3.5.1 Playback
+
+Subtitle: “Playback and memory.”
+
+**Background loop** (group)
+
+- Row: “Looping track”, description “Play one file on repeat underneath the sound
+  effects. It follows Monitor/Cable and keeps playing through Stop all.”, switch.
+- Enabled sub-panel:
+  - File name + status chip (`Ready`, `Playing`, `File missing`, error).
+  - Full path tooltip; `Choose file` (or `Locate` when missing); `Play`/`Stop` button.
+  - Volume row: logarithmic slider + percentage, description
+    “Independent of Monitor and Cable.”
+  - Meta line: “Streamed from disk · starts stopped on launch”.
+- Turning the switch off stops and hides the sidebar card, keeps `loop_path`.
+- Reuses `pick_loop_file`, `toggle_loop`, and the existing loop state.
+
+**Sidebar loop card** (board, not Settings)
+
+- Gains one volume row using the shared `volume_bar`:
+  - Full: speaker icon + bar + percentage.
+  - Compact: bar only, same drag behaviour.
+- Heights grow 18 px: 66 → 84 full, 26 → 44 compact; the pinned reserve grows with them.
+  At 960×540 the compact sidebar still fits.
+- Status shows `Playing`/`Ready`/error only; no buffering text.
+
+**Hotkey sounds** (group)
+
+- “Load hotkey sounds into RAM” + switch; disabled with “Assign a hotkey to a sound
+  first.” when none exists.
+- Summary: “N of M hotkey sounds loaded.” using `playback.loaded_count()`.
+
+#### 3.5.2 Audio
+
+Subtitle: “Outputs, routing and levels.”
+
+- **Monitor**: device dropdown + volume slider.
+- **Cable**: device dropdown + volume slider.
+- **Routing and gain**:
+  - “Link Monitor and Cable” switch; enabling copies Monitor to Cable.
+  - “Master gain” 0…+12 dB slider, dB readout, visible Reset; right-click resets.
+  - “Refresh audio devices” button.
+- No devices: amber note “No output devices. Plug one in and refresh.”; dropdowns show
+  `None (silent)`.
+- Sidebar and Settings use the same helpers.
+
+#### 3.5.3 Appearance
+
+Subtitle: “Theme and motion.”
+
+- “Theme” dropdown (parsed themes, display-name order).
+- “Reload themes” + “Markdown palettes in `config/themes/`.”
+- Warnings go to the status bar; a deleted active theme falls back to Graphite.
+- “Animate UI” switch + Windows animation note.
+- Theme changes apply instantly, including to Settings itself.
+
+#### 3.5.4 About
+
+Subtitle: “Version, developer and config.”
+
+- `SoundDeck v0.1.0`, portable note.
+- “Config folder” + Open; short `settings.json · libraries.json · themes/` note.
+- Developer name/role/blurb/link from the existing constants; placeholders remain.
+- No clickable link in this pass.
+
+### 3.6 Code shape
+
+```text
+src/ui/volume.rs            curve + shared bar/behaviour
+src/audio/stream.rs         simplified streaming decoder (16 chunks, 3 states)
+src/audio/engine.rs         loop_rx/chunk/pos + loop_gain; consumer-side meter
+src/app.rs
+  enum SettingsTab { Playback, Audio, Appearance, About }
+  fields: settings_tab, settings_tab_fade
+  update(): title bar → status bar → settings screen OR board
+  settings_screen / settings_rail / settings_header
+  settings_page_playback / audio / appearance / about
+  helpers: settings_group, settings_row, settings_switch, settings_nav_item
+```
+
+Shared/extracted helpers:
+
+- `master_gain_control(ui, width)` from the sidebar; used by Audio.
+- `link_toggle(ui) -> bool`; used by Audio.
+- `theme_picker(ctx, ui, width)`; used by Appearance.
+- `device_selector` / `device_volume` as-is inside a 240 px column.
+- `ui::volume::bar` for cards; shared curve in Settings rows.
+- Loop actions: `pick_loop_file`, `toggle_loop`; loop volume setter.
+
+Removals:
+
+- `settings_modal`, backdrop, window, `max_height` scroll.
+- Settings checkboxes; switches instead.
+- `LoopState::Buffering` / `Underrun`, mixer `loop_status`, `Mixer::meter`.
+- “Refresh audio devices” from Playback (moves to Audio).
+
+`modals()` keeps capture, rename and log overlays.
+
+### 3.7 Settings edge cases
+
+1. **860×500 minimum.** Rail 200, content 660 → 604 usable; rows stack; groups scroll.
+2. **960×540.** Playback fits at 704 px; Audio/About may scroll a few rows.
+3. **Maximized.** Content capped at 780 px, controls stay 240 px.
+4. **No devices.** Warning + `None (silent)`; refresh available.
+5. **Same device on both slots.** Engine warning unchanged.
+6. **Linked volumes.** Either slider mirrors the other; link-on copies Monitor.
+7. **Master gain extremes.** Clamped; Reset/right-click to `0.0`.
+8. **Loop missing/error.** Play disabled; picker = Locate; message in the row.
+9. **Loop playing while Settings is open.** Shows Stop; returning shows the live card.
+10. **Loop disabled while playing.** Stops, hides card, keeps path.
+11. **No hotkeys.** RAM switch disabled with the hint.
+12. **Theme reload removes the active theme.** Graphite fallback + status warning.
+13. **Popup + Esc.** First closes the popup, second exits Settings.
+14. **Search focused before opening.** Focus cleared; no hidden filtering.
+15. **Sound playing before opening.** Continues; audio edits apply live.
+16. **Global hotkey while Settings is open.** Still plays sounds.
+17. **Minimize/close from Settings.** Tray restore returns to the same tab/scroll.
+18. **Resize while open.** Reflows; no persisted size.
+19. **Save failure.** Status warning; no fake “saved” state.
+20. **`--settings` launch.** Opens Playback directly.
+21. **Drag/drop over Settings.** Ignored.
+22. **Long names.** Truncated with tooltips.
+23. **Keyboard-only.** Tab/Shift+Tab, Space, Enter, Esc.
+24. **Session tab memory.** Last tab per run; restart starts Playback.
+25. **Device unplugged while open.** Engine logs; dropdown shows stale name until
+    Refresh (same as today).
+26. **High DPI.** Logical points scale rail/controls.
+
+### 3.8 Settings tests
+
+- Existing tests stay green; audio/loop tests from sections 1–2.
+- Manual screenshots at 960×540, 1280×800, 860×500, maximized.
+- Walk every row; verify board state (search/selection/library/scroll) survives.
+- Esc with a dropdown open; focus clearing; drop suppression.
+- Loop volume from Playback and the sidebar card stays in sync.
+- Theme changes affect Settings itself.
+
+---
+
+## 4. Developer documentation
+
+Deliverable: **`sounddeck/ARCHITECTURE.md`**, one file, written after sections 1–3 ship.
+
+Audience: a beginner Rust developer who knows the language basics but not this app.
+Explain the app, not Rust.
+
+### 4.1 Outline
+
+1. What SoundDeck is, and the process/thread map.
+2. Repository map: every source file and what it owns.
+3. Startup and shutdown sequence (`main`, single instance, storage load, themes,
+   engine, devices, hotkeys/tray, eframe).
+4. Storage: schemas, normalization, atomic writes, backups/recovery, migration,
+   portable paths.
+5. Audio pipeline: WASAPI shared mode, 48 kHz stereo, mixer, rings, voices, exclusive
+   playback, the loop stream, RAM vs disk sounds, decode/resample, meters, volume.
+6. Hotkeys and tray: registration rules, active-tab bindings, messages, focus.
+7. UI layer: state, update loop, panels, grid/list, cards/rows, actions, modals,
+   Settings, search, drag/reorder, themes, motion.
+8. Feature walkthroughs: libraries, adding/relinking/removing sounds, volumes, meter,
+   loop, hotkey RAM, search, settings, activity log, diagnostics.
+9. Concurrency rules and invariants: lock order, channels, generations, no UI blocking.
+10. Error handling: missing files, device errors, save failures, warnings.
+11. Testing: unit tests, temporary dirs, manual QA, diagnostics.
+12. “Where to change what”: add a setting, theme token, hotkey, sound action, widget,
+    audio effect.
+13. Glossary: WASAPI, ring, voice, exclusive playback, RAM preload, dBFS, portable path,
+    gapless, shared mode.
+
+### 4.2 Rules
+
+- README stays the user manual; ARCHITECTURE is linked from a short “Developers” line.
+- Tables and short call-flow diagrams, not line-by-line commentary.
+- Update it in the same commit as any schema, audio, hotkey or settings change.
+- No Rust tutorial content; define app concepts only.
+
+---
+
+## 5. Rollout
+
+Five commits, in order.
+
+### 5.1 `fix(audio): meter follows heard audio and shorter output queue`
+
+1. Consumer-side peak in `Ring`; `take_levels` reads it; delete mixer metering.
+2. Ring 2.0 → 0.15 s; manual crackle check.
+3. Tests for ring peak and gain scaling.
+
+### 5.2 `refactor(audio): simplify loop streaming and add loop volume`
+
+1. `loop_volume` storage + clamp.
+2. `LoopState` → Idle/Playing/Error; remove mixer status and underrun paths.
+3. Channel 64 → 16 chunks; optimistic Playing on start.
+4. `Mixer.loop_gain`, `Engine::set_loop_volume`.
+5. Loop volume row on the card (44/84 px heights, reserve).
+6. Tests: wrap, gain, exclusivity, prompt stop; README loop notes.
+
+### 5.3 `refactor(ui): one volume curve and consistent volume behaviour`
+
+1. `ui/volume.rs` with curve/percent/bar; wheel support.
+2. Replace app-local helpers and duplicated formatting.
+3. Shared master-gain row helper.
+4. Tests for round-trip/clamp.
+
+### 5.4 `feat(ui): full-window tabbed settings`
+
+1. `SettingsTab`, state, conditional panel split.
+2. Rail + group/row/switch helpers.
+3. Port Playback/Audio/Appearance/About; extract sidebar helpers.
+4. Remove modal/backdrop; titlebar breadcrumb, focus clearing, Esc popup guard, drop
+   suppression.
+5. Tests, release build, manual QA, README settings section.
+
+### 5.5 `docs: developer architecture guide`
+
+- Write `ARCHITECTURE.md` against the shipped code; link from README; update
+  `context.md` and this plan.
+
+No config version bump. Hotkeys, tray, routing and sound playback rules are unchanged.
+Deploy to `review\SoundDeck.exe` after each UI-visible commit.
+
+---
+
+## 6. Open choices / follow-ups
+
+- **Ring size.** 0.15 s is the target; 0.25 s if crackles appear. Truly instant stop
+  would require flushing device rings when nothing else is playing.
+- **Declick.** Instant loop start/stop can click at a non-zero crossing; a 2 ms ramp is
+  the follow-up if audible.
+- **Consumer-side progress.** Sound-card progress bars still use mix position and lead
+  by ≤150 ms after the ring change; move them too only if it looks wrong.
+- **New preferences later:** Window & tray tab (close-to-tray vs quit, start minimized,
+  remember size), loop hotkey.
+- **Settings search / persisted tab** only if the tab count grows.
+- **Developer block** still needs real name/role/link/blurb.
+- **Native UI rewrite** remains parked (section 7).
+
+---
+
+## 7. Far-future: native UI rewrite (not scheduled)
+
+Status: **parked.** No work in this plan. Revisit only after the current feature set is
+stable and the numbers below justify it.
+
+### 7.1 Why consider it
+
+egui is immediate-mode: it rebuilds the frame and currently asks for a repaint every
+120 ms even when idle (33 ms while the meter moves). A retained-mode native UI can
+sleep until an input, timer, or audio event and paint only what changed.
+
+Goals, in order:
+
+1. Same layout, spacing, radii, colours, copy and interactions — a rendering/event
+   swap, not a redesign.
+2. Lower idle CPU and memory: no constant frame rebuild, no steady repaint.
+3. Optional: drop UI animations or leave them default-off.
+
+### 7.2 Decision gate (measure before rewriting)
+
+Release build, review config, 960×540 and maximized:
+
+| Scenario | Record |
+| --- | --- |
+| Board idle, no audio | CPU %, working set, repaint rate |
+| Board with a sound playing | CPU %, working set |
+| Settings open, idle | CPU %, working set |
+| Minimized to tray | CPU %, working set |
+
+Rough targets: **<0.5% CPU** and zero repaints when idle, **<100 MB** UI overhead
+(excluding decoded sounds). If egui is already close, stop here.
+
+Cheap egui wins to try first:
+
+- Repaint only on input or active audio; no periodic tick when hidden or silent.
+- Stop meter repaints at 33 ms when no device is active.
+- Default `Animate UI` off, or remove the animation layer.
+- Cache galleys and static chrome; reduce shapes per frame.
+
+### 7.3 Candidate frameworks
+
+| Option | Pros | Cons |
+| --- | --- | --- |
+| **Win32 + Direct2D/DirectWrite** | Truly native, tiny runtime, event-driven, no GPU dependency, total control | Every widget, text layout, IME, DPI, accessibility, drag/drop and tray glue is manual |
+| **Slint** | Rust-native, retained/declarative, event-driven, software and GPU renderers, good Windows support | Theme tokens and custom-painted widgets need porting; younger ecosystem |
+| **iced** | Rust-native, retained-ish Elm architecture | Still repaints for meters/animations; wgpu/GPU memory; custom widget/accessibility work |
+| **Qt 6** | Mature widgets, accessibility, high-DPI | Heavy runtime, licensing/binding friction |
+| **Tauri / Electron / WebView** | Fast iteration | Rejected: webview memory/CPU, the opposite of the goal |
+
+Recommendation if the gate is passed: prototype the board shell + one Settings tab in
+both **Slint** and **Win32 + Direct2D**, then pick on font/IME/DPI/tray effort and
+measured idle cost. Do not start with the full app.
+
+### 7.4 What must not change
+
+- `audio/`, `storage/`, `hotkeys.rs`, `model.rs` and the config schema are
+  framework-agnostic and stay.
+- Theme tokens, `RADIUS_*`, spacing, fonts, copy, empty states, card/row layouts and
+  window chrome must match. Screenshots become the parity test.
+- Portable folder, single instance, tray, global hotkeys, custom resize, status bar,
+  activity log, modals, settings tabs keep working.
+- Windows integration (WASAPI, `RegisterHotKey`, tray icon, `PrintWindow` QA) remains.
+
+### 7.5 Migration sketch
+
+1. Extract UI state and actions from `app.rs` into a framework-agnostic layer
+   (`UiState`, `Action`); useful even without a rewrite.
+2. Build a shell prototype: custom title bar, window controls, tray, hotkeys, theme
+   tokens, font loading, status bar.
+3. Port the board (tabs, grid/list, cards/rows, search, drag/reorder, volumes, meters).
+4. Port Settings and the smaller modals.
+5. Run old and new builds side by side for parity and performance; ship only when
+   screenshots, interaction checklist, idle CPU/RAM and DPI tests pass.
+
+### 7.6 Risks
+
+- Multi-week effort with a real regression surface; the current UI already works.
+- Accessibility/IME and font rendering differ per framework and need explicit testing.
+- Tray, hotkeys, single-instance and custom chrome wiring must be rebuilt.
+- A rewrite does **not** reduce decoded-audio RAM. It only addresses UI overhead.
+- Dropping animations is independent and cheap; do that first if motion is unwanted.

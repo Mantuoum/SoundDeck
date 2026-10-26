@@ -1,8 +1,0 @@
-﻿cargo :    Compiling sounddeck v0.1.0 (C:\My files\Open code projects\Model testing\sounddeck)
-At line:1 char:183
-+ ... sounddeck | Out-Null; cargo check --message-format short 2>&1 | Out-F ...
-+                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (   Compiling so...ting\sounddeck):String) [], RemoteException
-    + FullyQualifiedErrorId : NativeCommandError
- 
-    Finished `dev` profile [optimized + debuginfo] target(s) in 2.36s

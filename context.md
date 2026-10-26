@@ -6,13 +6,16 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `cd22482 feat(audio): streamed looping track`.
-- Working tree: only untracked `plan.md`, `context.md`, `References/`.
+- Last commit: `1e8dc72 docs: retire shipped phase specs, record the looping track`.
+- Working tree: `plan.md` rewritten for audio latency, loop simplification + volume,
+  volume consistency, full-window Settings, and developer docs (uncommitted);
+  `context.md` updated. Untracked `References/`.
 - Tests: 33 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
 - Storage, per-file themes, motion, the UI polish batch, and the looping track are
-  shipped.
+  shipped. The next pass is the latency/meter fix, then loop simplification, volume
+  consistency, Settings, and `ARCHITECTURE.md`.
 
 ## Source of truth
 
@@ -74,7 +77,11 @@ docs or reports.
 
 ## Next steps
 
-1. Manual QA of the loop card (play/stop, seam, missing file, disable/enable, quit).
-2. Fill the remaining README gaps (compact sidebar, gain reset, capsule search,
-   `Animate UI`) if anything is still missing.
+1. Implement `plan.md` in its rollout order:
+   - consumer-side metering + 0.15 s output ring,
+   - simplify the loop stream (3 states, 16-chunk buffer) + `loop_volume`,
+   - one volume curve/behaviour (keep current visuals),
+   - full-window tabbed Settings,
+   - `ARCHITECTURE.md` written against the final code.
+2. Deploy after each UI-visible commit and verify latency by ear.
 3. Replace the developer placeholders once the user supplies name, role, link and blurb.
