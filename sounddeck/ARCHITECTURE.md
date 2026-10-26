@@ -358,8 +358,12 @@ if late, and pushes to each `Ring` only when that output has a consumer.
 
 ### Modals
 
-Capture hotkey, rename, and activity log remain modal overlays. They take keyboard
-input directly where needed (hotkey capture) and are drawn after the board/settings.
+Capture hotkey, rename, and activity log use `egui::Modal` with a **transparent**
+backdrop, so the board stays visible without a dim layer and input cannot leak through.
+They share `modal_header` + `close_button` (red hover), are centred over the board area,
+and take keyboard input directly where needed (hotkey capture).
+The sidebar divider is painted inside the central-panel layer, not as a separate
+top-level layer, so it can never draw over modals or popups.
 
 ### Theme system (`ui/theme.rs`, `theme_file.rs`, `theme_defaults.rs`)
 

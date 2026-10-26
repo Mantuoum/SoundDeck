@@ -3102,29 +3102,14 @@ impl App {
             .current
             .and_then(|hk| self.find_conflict(hk, capture.sound_id).map(|s| s.name.clone()));
 
-        let screen = ctx.screen_rect();
-        let overlay = egui::Area::new(Id::new("capture_backdrop"))
-            .fixed_pos(screen.min)
-            .order(Order::Foreground)
-            .show(ctx, |ui| {
-                let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    CornerRadius::ZERO,
-                    theme::alpha(theme::bg(), 210),
-                );
-                response
-            });
-        if overlay.inner.clicked() {
-            close = true;
-        }
-
-        egui::Window::new("Set hotkey")
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .order(Order::Foreground)
-            .collapsible(false)
-            .resizable(false)
-            .title_bar(false)
+        let modal_area = egui::Modal::default_area(Id::new("capture_modal"))
+            .anchor(
+                Align2::CENTER_CENTER,
+                Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0),
+            );
+        let modal = egui::Modal::new(Id::new("capture_modal"))
+            .area(modal_area)
+            .backdrop_color(Color32::TRANSPARENT)
             .frame(
                 Frame::NONE
                     .fill(theme::panel())
@@ -3134,25 +3119,7 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_width(400.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Set hotkey")
-                            .font(theme::medium(20.0))
-                            .color(theme::text()),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                Button::new(RichText::new("x").size(15.0).color(theme::muted()))
-                                    .frame(false),
-                            )
-                            .on_hover_text("Close")
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                });
+                modal_header(ui, "Set hotkey", Id::new("capture_close"), &mut close);
                 ui.label(
                     RichText::new(format!("\"{sound_name}\""))
                         .size(13.0)
@@ -3225,6 +3192,10 @@ impl App {
                 ui.add_space(2.0);
             });
 
+        if modal.backdrop_response.clicked() {
+            close = true;
+        }
+
         if close {
             return;
         }
@@ -3289,11 +3260,10 @@ impl App {
             close = true;
         }
 
-        egui::Window::new(title)
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
-            .collapsible(false)
-            .resizable(false)
-            .title_bar(false)
+        let rename_area = centered_modal_area(Id::new("rename_modal"));
+        let modal = egui::Modal::new(Id::new("rename_modal"))
+            .area(rename_area)
+            .backdrop_color(Color32::TRANSPARENT)
             .frame(
                 Frame::NONE
                     .fill(theme::panel())
@@ -3303,7 +3273,7 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.label(RichText::new(title).font(theme::medium(20.0)).color(theme::text()));
+                modal_header(ui, title, Id::new("rename_close"), &mut close);
                 ui.add_space(8.0);
                 let response = ui.add_sized(
                     [ui.available_width(), 34.0],
@@ -3326,6 +3296,10 @@ impl App {
                     }
                 });
             });
+
+        if modal.backdrop_response.clicked() {
+            close = true;
+        }
 
         if commit {
             let name = renaming.buffer.trim().to_string();
@@ -3392,12 +3366,11 @@ impl App {
                 (entry.kind, when, entry.text.clone())
             })
             .collect();
-        let mut open = true;
-        egui::Window::new("Activity log")
-            .open(&mut open)
-            .default_size([560.0, 340.0])
-            .min_width(460.0)
-            .resizable(true)
+        let mut close = false;
+        let log_area = centered_modal_area(Id::new("log_modal"));
+        let modal = egui::Modal::new(Id::new("log_modal"))
+            .area(log_area)
+            .backdrop_color(Color32::TRANSPARENT)
             .frame(
                 Frame::NONE
                     .fill(theme::panel())
@@ -3406,6 +3379,9 @@ impl App {
                     .inner_margin(Margin::same(12)),
             )
             .show(ctx, |ui| {
+                ui.set_width(520.0);
+                modal_header(ui, "Activity log", Id::new("log_close"), &mut close);
+                ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height(380.0)
                     .auto_shrink([false, true])
@@ -3435,7 +3411,10 @@ impl App {
                         }
                     });
             });
-        if !open {
+        if modal.backdrop_response.clicked() {
+            close = true;
+        }
+        if close {
             self.show_log = false;
         }
     }
@@ -3831,8 +3810,6 @@ impl eframe::App for App {
         } else {
             side.response.rect.left()
         };
-        ctx.layer_painter(LayerId::new(Order::Middle, Id::new("sidebar_border")))
-            .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
 
         if self.show_settings {
             egui::CentralPanel::default()
@@ -3842,11 +3819,21 @@ impl eframe::App for App {
                     top: 20,
                     bottom: 14,
                 }))
-                .show(ctx, |ui| self.settings_content(ctx, ui));
+                .show(ctx, |ui| {
+                    ui.painter()
+                        .with_clip_rect(screen)
+                        .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
+                    self.settings_content(ctx, ui);
+                });
         } else {
             egui::CentralPanel::default()
                 .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin::symmetric(14, 10)))
-                .show(ctx, |ui| self.main_page(ui));
+                .show(ctx, |ui| {
+                    ui.painter()
+                        .with_clip_rect(screen)
+                        .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
+                    self.main_page(ui);
+                });
         }
 
         // Window chrome: keep it below modals/drop overlays so popups are never
@@ -4243,6 +4230,32 @@ fn draw_list(
                 actions.extend(row_actions);
                 ui.add_space(6.0);
             }
+        });
+    });
+}
+
+fn centered_modal_area(id: Id) -> egui::Area {
+    egui::Modal::default_area(id).anchor(
+        Align2::CENTER_CENTER,
+        Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0),
+    )
+}
+
+fn modal_header(ui: &mut Ui, title: &str, id: Id, close: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(title)
+                .font(theme::medium(20.0))
+                .color(theme::text()),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            let painter = ui.painter().clone();
+            let response = close_button(ui, &painter, rect, id);
+            if response.clicked() {
+                *close = true;
+            }
+            response.on_hover_text("Close");
         });
     });
 }
