@@ -212,7 +212,7 @@ impl LibrariesFile {
                     next_sound += 1;
                     seen_sounds.insert(sound.id);
                 }
-                sound.volume = sound.volume.clamp(0.0, 2.0);
+                sound.volume = sound.volume.clamp(0.0, 1.0);
                 if sound.name.trim().is_empty() {
                     sound.name = "Untitled sound".to_string();
                 }

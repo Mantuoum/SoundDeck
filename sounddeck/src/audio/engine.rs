@@ -6,7 +6,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
+
+use crate::stats;
 
 use super::decode::{CHANNELS, SAMPLE_RATE};
 use super::stream::{LoopState, LoopStream};
@@ -180,6 +182,13 @@ struct Mixer {
 }
 
 impl Mixer {
+    /// True when a render pass would produce something. Deliberately ignores
+    /// the loop routing switches: the chunk must keep advancing while both
+    /// outputs are muted so re-enabling is seamless.
+    fn has_work(&self) -> bool {
+        !self.voices.is_empty() || self.loop_rx.is_some()
+    }
+
     fn render(&mut self, monitor: &mut [f32], cable: &mut [f32]) {
         debug_assert_eq!(monitor.len(), cable.len());
         let frames = monitor.len() / CHANNELS;
@@ -235,7 +244,16 @@ impl Mixer {
                             self.loop_chunk = chunk;
                             self.loop_pos = 0;
                         }
-                        Err(_) => break,
+                        Err(TryRecvError::Empty) => break,
+                        // The decoder is gone (error or stop): drop the receiver
+                        // so `has_work` can park the mixer instead of polling a
+                        // channel that will never produce again.
+                        Err(TryRecvError::Disconnected) => {
+                            self.loop_rx = None;
+                            self.loop_chunk.clear();
+                            self.loop_pos = 0;
+                            break;
+                        }
                     }
                 }
 
@@ -316,6 +334,9 @@ pub struct Engine {
     events_tx: Sender<AudioEvent>,
     events_rx: Receiver<AudioEvent>,
     mixer_stop: Arc<AtomicBool>,
+    /// Capacity-one wake token: a producer publishes work with `try_send`, the
+    /// mixer parks on the receiving end when it has nothing to render.
+    mixer_wake: Sender<()>,
     mixer_thread: Mutex<Option<JoinHandle<()>>>,
     loop_stream: Mutex<Option<LoopStream>>,
 }
@@ -337,6 +358,7 @@ impl Engine {
         let rings = [Arc::new(Ring::new(0.15)), Arc::new(Ring::new(0.15))];
         let (events_tx, events_rx) = unbounded();
         let mixer_stop = Arc::new(AtomicBool::new(false));
+        let (mixer_wake, mixer_wake_rx) = bounded::<()>(1);
 
         let mixer_thread = {
             let mixer = mixer.clone();
@@ -344,7 +366,10 @@ impl Engine {
             let stop = mixer_stop.clone();
             thread::Builder::new()
                 .name("sounddeck-mixer".into())
-                .spawn(move || mixer_loop(mixer, rings, stop))
+                .spawn(move || {
+                    super::raise_thread_priority();
+                    mixer_loop(mixer, rings, stop, mixer_wake_rx)
+                })
                 .ok()
         };
 
@@ -355,6 +380,7 @@ impl Engine {
             events_tx,
             events_rx,
             mixer_stop,
+            mixer_wake,
             mixer_thread: Mutex::new(mixer_thread),
             loop_stream: Mutex::new(None),
         }
@@ -406,24 +432,33 @@ impl Engine {
     }
 
     pub fn play(&self, sound_id: u64, samples: Arc<Vec<f32>>, volume: f32) {
-        let Ok(mut mixer) = self.mixer.lock() else {
-            return;
-        };
-        // Exclusive playback: fade out anything that is still playing (including
-        // a previous instance of this same sound) so triggers never stack.
-        for voice in &mut mixer.voices {
-            if voice.stop_at.is_none() {
-                voice.stop_at = Some(voice.position);
+        {
+            let Ok(mut mixer) = self.mixer.lock() else {
+                return;
+            };
+            // Exclusive playback: fade out anything that is still playing (including
+            // a previous instance of this same sound) so triggers never stack.
+            for voice in &mut mixer.voices {
+                if voice.stop_at.is_none() {
+                    voice.stop_at = Some(voice.position);
+                }
             }
+            mixer.voices.push(Voice {
+                sound_id,
+                samples,
+                position: 0,
+                gain: volume.clamp(0.0, 1.0),
+                stop_at: None,
+                finished: false,
+            });
         }
-        mixer.voices.push(Voice {
-            sound_id,
-            samples,
-            position: 0,
-            gain: volume.clamp(0.0, 2.0),
-            stop_at: None,
-            finished: false,
-        });
+        // Publish after the lock is released so the mixer cannot wake, block on
+        // the lock and then find stale state.
+        self.wake_mixer();
+    }
+
+    fn wake_mixer(&self) {
+        let _ = self.mixer_wake.try_send(());
     }
 
     pub fn stop_sound(&self, sound_id: u64) {
@@ -469,6 +504,7 @@ impl Engine {
         if let Ok(mut slot) = self.loop_stream.lock() {
             *slot = Some(stream);
         }
+        self.wake_mixer();
         Ok(())
     }
 
@@ -527,6 +563,15 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Cheap "is anything sounding" check for the UI repaint policy. Unlike
+    /// [`Engine::active`] this does not allocate.
+    pub fn is_playing(&self) -> bool {
+        self.mixer
+            .lock()
+            .map(|mixer| !mixer.voices.is_empty())
+            .unwrap_or(false)
+    }
+
     /// Peak level per output since the previous call, as linear amplitude.
     /// Measured where the device consumes samples, so it matches what is heard.
     pub fn take_levels(&self) -> [f32; 2] {
@@ -552,7 +597,7 @@ impl Engine {
         if let Ok(mut mixer) = self.mixer.lock() {
             for voice in &mut mixer.voices {
                 if voice.sound_id == sound_id {
-                    voice.gain = volume.clamp(0.0, 2.0);
+                    voice.gain = volume.clamp(0.0, 1.0);
                 }
             }
         }
@@ -585,6 +630,7 @@ impl Drop for Engine {
             }
         }
         self.mixer_stop.store(true, Ordering::SeqCst);
+        let _ = self.mixer_wake.try_send(());
         if let Ok(mut thread) = self.mixer_thread.lock() {
             if let Some(join) = thread.take() {
                 let _ = join.join();
@@ -597,39 +643,69 @@ fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db.clamp(-60.0, 12.0) / 20.0)
 }
 
-/// Move the shared loop status from `from` to `to` if it currently matches.
-/// Used for mixer-side transitions (first chunk, underrun) without stomping on
-/// a decoder error.
 fn mixer_loop(
     mixer: Arc<Mutex<Mixer>>,
     rings: [Arc<Ring>; 2],
     stop: Arc<AtomicBool>,
+    wake: Receiver<()>,
 ) {
+    /// How long the mixer parks when nothing is playing. A producer wake normally
+    /// releases it sooner; this only bounds the damage from a missed wake.
+    const IDLE_PARK: Duration = Duration::from_millis(50);
+
     let mut monitor_buffer = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
     let mut cable_buffer = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
     let mut next = Instant::now();
 
-    while !stop.load(Ordering::Relaxed) {
-        let now = Instant::now();
-        if now < next {
-            thread::sleep(Duration::from_millis(1));
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        stats::mixer_iteration();
+
+        let has_work = match mixer.lock() {
+            Ok(mixer) => mixer.has_work(),
+            Err(_) => break,
+        };
+        if !has_work {
+            stats::mixer_sleep();
+            match wake.recv_timeout(IDLE_PARK) {
+                Ok(()) => {
+                    // Work was published while we were asleep; start a fresh
+                    // schedule instead of bursting to catch up on idle time.
+                    next = Instant::now();
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
             continue;
         }
 
-        let behind = now.saturating_duration_since(next);
+        let due = next.saturating_duration_since(Instant::now());
+        if !due.is_zero() {
+            match wake.recv_timeout(due) {
+                Ok(()) => next = Instant::now(),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let behind = Instant::now().saturating_duration_since(next);
         let chunks = ((behind.as_micros() / 5_000) as usize).clamp(1, 4);
         for _ in 0..chunks {
             monitor_buffer.fill(0.0);
             cable_buffer.fill(0.0);
-            let (monitor_gain, cable_gain) = {
+            let (monitor_gain, cable_gain, voices) = {
                 match mixer.lock() {
                     Ok(mut mixer) => {
                         mixer.render(&mut monitor_buffer, &mut cable_buffer);
-                        (mixer.monitor_gain, mixer.cable_gain)
+                        (mixer.monitor_gain, mixer.cable_gain, mixer.voices.len())
                     }
                     Err(_) => break,
                 }
             };
+            stats::mixer_render();
+            stats::set_voices(voices);
             if rings[0].has_consumers() {
                 rings[0].push_scaled(&monitor_buffer, monitor_gain);
             }
@@ -638,7 +714,6 @@ fn mixer_loop(
             }
             next += Duration::from_millis(5);
         }
-        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -827,5 +902,63 @@ mod loop_tests {
         mixer.render(&mut monitor, &mut cable);
         assert!(monitor.iter().all(|sample| *sample == 0.0));
         assert!(cable.iter().all(|sample| *sample == 0.0));
+    }
+
+    fn idle_mixer(loop_rx: Option<Receiver<Vec<f32>>>) -> Mixer {
+        Mixer {
+            voices: Vec::new(),
+            monitor_gain: 1.0,
+            cable_gain: 1.0,
+            master_gain: 1.0,
+            loop_rx,
+            loop_chunk: Vec::new(),
+            loop_pos: 0,
+            loop_gain: 1.0,
+            loop_on_monitor: true,
+            loop_on_cable: true,
+        }
+    }
+
+    #[test]
+    fn idle_mixer_has_no_work() {
+        assert!(!idle_mixer(None).has_work());
+    }
+
+    #[test]
+    fn a_playing_voice_keeps_the_mixer_awake() {
+        let mut mixer = idle_mixer(None);
+        mixer.voices.push(Voice {
+            sound_id: 1,
+            samples: Arc::new(vec![0.1f32; MIX_CHUNK_FRAMES * CHANNELS]),
+            position: 0,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+        });
+        assert!(mixer.has_work());
+    }
+
+    #[test]
+    fn a_connected_loop_counts_as_work() {
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        assert!(idle_mixer(Some(rx)).has_work());
+    }
+
+    #[test]
+    fn a_dead_loop_stops_counting_as_work() {
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<f32>>();
+        let mut mixer = idle_mixer(Some(rx));
+        assert!(mixer.has_work());
+
+        drop(tx);
+        let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        mixer.render(&mut monitor, &mut cable);
+
+        assert!(mixer.loop_rx.is_none(), "receiver should be dropped");
+        assert!(
+            !mixer.has_work(),
+            "a dead loop must let the mixer park instead of polling"
+        );
     }
 }

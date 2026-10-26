@@ -237,6 +237,7 @@ pub fn spawn_render(
     let result = thread::Builder::new()
         .name(format!("sounddeck-render-{}", slot.index()))
         .spawn(move || {
+            crate::audio::raise_thread_priority();
             let _consumer = ConsumerGuard(consumer_ring.clone());
             match render_loop(&device_id, &device_name, slot, &consumer_ring, &events, &stop) {
                 Ok(()) => {
@@ -377,6 +378,7 @@ fn render_loop(
             while source.len() / 2 < needed {
                 let want = (needed - source.len() / 2).min(9_600);
                 let got = ring.pop_into(&mut source, want);
+                crate::stats::ring_pop(slot.index(), got);
                 if got == 0 {
                     // No sample data available for the rest of this cycle: pad
                     // with silence, but keep the queue's timeline intact.
@@ -388,24 +390,30 @@ fn render_loop(
 
             let available = source.len() / 2;
             stereo[..frames * 2].fill(0.0);
-            for frame in 0..frames {
-                let index = position as usize;
-                let frac = (position - index as f64) as f32;
-                let (left, right) = if index + 1 < available {
-                    let a = index * 2;
-                    let b = a + 2;
-                    (
-                        source[a] + (source[b] - source[a]) * frac,
-                        source[a + 1] + (source[b + 1] - source[a + 1]) * frac,
-                    )
-                } else if index < available {
-                    (source[index * 2], source[index * 2 + 1])
-                } else {
-                    (0.0, 0.0)
-                };
-                stereo[frame * 2] = left;
-                stereo[frame * 2 + 1] = right;
-                position += step;
+            if available == 0 {
+                // Idle: the buffer is already silence, so skip the per-frame
+                // resampling loop (it runs ~200x/second across the two outputs).
+                position += step * frames as f64;
+            } else {
+                for frame in 0..frames {
+                    let index = position as usize;
+                    let frac = (position - index as f64) as f32;
+                    let (left, right) = if index + 1 < available {
+                        let a = index * 2;
+                        let b = a + 2;
+                        (
+                            source[a] + (source[b] - source[a]) * frac,
+                            source[a + 1] + (source[b + 1] - source[a + 1]) * frac,
+                        )
+                    } else if index < available {
+                        (source[index * 2], source[index * 2 + 1])
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    stereo[frame * 2] = left;
+                    stereo[frame * 2 + 1] = right;
+                    position += step;
+                }
             }
 
             let consumed = (position as usize).saturating_sub(2);

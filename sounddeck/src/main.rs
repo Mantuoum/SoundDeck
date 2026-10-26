@@ -6,6 +6,7 @@ mod hotkeys;
 mod icon;
 mod model;
 mod playback;
+mod stats;
 mod storage;
 mod ui;
 
@@ -61,10 +62,31 @@ fn load_icon() -> Option<Arc<eframe::egui::IconData>> {
     }))
 }
 
+/// Drops the whole process below normal priority. Audio worker threads raise
+/// themselves again individually, so playback stays smooth while the UI never
+/// competes with whatever the user is actually working in.
+fn lower_process_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+    };
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
-    // 1 ms timer resolution keeps the mixer's 5 ms tick stable.
+    // 1 ms timer resolution keeps the mixer's 5 ms tick stable. Since Windows
+    // 10 2004 this only affects this process, not the whole system.
     unsafe {
         windows::Win32::Media::timeBeginPeriod(1);
+    }
+
+    // The board is a background utility: never compete with the foreground app
+    // for CPU. The audio threads raise themselves above normal where it matters.
+    lower_process_priority();
+
+    if std::env::args().any(|arg| arg == "--stats") {
+        stats::start_reporter();
     }
 
     if std::env::args().nth(1).as_deref() == Some("--diag") {

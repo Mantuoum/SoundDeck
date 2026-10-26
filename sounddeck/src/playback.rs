@@ -118,9 +118,9 @@ impl Playback {
                 entry.pending_play = false;
                 entry.generation += 1;
             }
-            entry.volume = volume.clamp(0.0, 2.0);
+            entry.volume = volume.clamp(0.0, 1.0);
         } else {
-            state.insert(id, Playable::new(path, volume.clamp(0.0, 2.0)));
+            state.insert(id, Playable::new(path, volume.clamp(0.0, 1.0)));
         }
     }
 
@@ -157,7 +157,7 @@ impl Playback {
     pub fn set_volume(&self, id: u64, volume: f32) {
         if let Ok(mut state) = self.state.lock() {
             if let Some(entry) = state.get_mut(&id) {
-                entry.volume = volume.clamp(0.0, 2.0);
+                entry.volume = volume.clamp(0.0, 1.0);
                 self.engine.set_sound_volume(id, entry.volume);
             }
         }

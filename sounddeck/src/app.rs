@@ -19,6 +19,7 @@ use crate::model::{
     APP_NAME, SUPPORTED_EXTENSIONS,
 };
 use crate::playback::{Playback, PlaybackEvent, SoundInfo};
+use crate::stats;
 use crate::storage;
 use crate::ui::anim;
 use crate::ui::theme;
@@ -171,6 +172,16 @@ pub struct App {
     device_note: [Option<String>; 2],
     tray_available: bool,
     hidden: bool,
+    /// Set when the window is restored from the tray so the OS-minimize
+    /// detector cannot re-hide it on the same or the next frame.
+    restored_at: Instant,
+    /// Previous frame's minimized state, so only a real minimize transition
+    /// hides the window (a stale level signal used to undo every restore).
+    was_minimized: bool,
+    /// Last time the Win32 minimize fallback ran; it is throttled to 4 Hz.
+    minimize_checked_at: Instant,
+    /// Repaint interval chosen for this frame, for `--stats`.
+    last_interval_ms: u32,
     quit: bool,
     search: String,
     focus_search: bool,
@@ -392,6 +403,7 @@ impl App {
             32,
             format!("{APP_NAME} - {} sounds", sounds.len()),
             playback.clone(),
+            cc.egui_ctx.clone(),
         );
 
         let mut app = Self {
@@ -407,6 +419,10 @@ impl App {
             device_note: [None, None],
             tray_available: false,
             hidden: false,
+            restored_at: Instant::now() - Duration::from_secs(10),
+            was_minimized: false,
+            minimize_checked_at: Instant::now() - Duration::from_secs(10),
+            last_interval_ms: 0,
             quit: false,
             search: String::new(),
             focus_search: false,
@@ -603,11 +619,17 @@ impl App {
 
     fn show_from_tray(&mut self, ctx: &egui::Context) {
         self.hidden = false;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        self.restored_at = Instant::now();
+        self.was_minimized = false;
         self.meter_db = [-60.0; 2];
         self.meter_peak_db = [-60.0; 2];
+        crate::hotkeys::set_taskbar_tab(true);
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        // Viewport commands are applied after this frame, and winit can keep
+        // reporting the window as minimized in the meantime. Restore it with
+        // Win32 directly so the next frame sees a visible, unminimized window.
+        crate::hotkeys::focus_main_window();
         ctx.request_repaint();
     }
 
@@ -621,11 +643,50 @@ impl App {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         self.save_now();
         self.hidden = true;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        // Minimize instead of hiding: winit stops delivering paint events to a
+        // hidden HWND, which leaves eframe spinning in `ControlFlow::Poll` at a
+        // full core and freezes every tray/UI event. A minimized window keeps
+        // receiving frames, so events still flow and the idle timer applies.
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        crate::hotkeys::set_taskbar_tab(false);
         self.log(
             StatusKind::Info,
             "Minimized to tray - hotkeys still work",
         );
+    }
+
+    /// Hides to the tray only when the window actually becomes minimized.
+    ///
+    /// A level check is wrong here: after a restore winit can still report
+    /// `minimized = true` for a frame, so the old code hid the window again
+    /// immediately and the tray icon appeared dead.
+    fn handle_os_minimize(&mut self, ctx: &egui::Context) {
+        let mut minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+
+        // Fallback for the custom title bar, where winit may miss the OS
+        // minimize. EnumWindows is not free, so this runs at most 4x/second.
+        let now = Instant::now();
+        if !minimized
+            && !self.hidden
+            && self.cfg.minimize_to_tray
+            && self.tray_available
+            && now.duration_since(self.minimize_checked_at) > Duration::from_millis(250)
+        {
+            self.minimize_checked_at = now;
+            minimized = main_window_minimized();
+        }
+
+        let became_minimized = minimized && !self.was_minimized;
+        self.was_minimized = minimized;
+
+        if became_minimized
+            && !self.hidden
+            && self.cfg.minimize_to_tray
+            && self.tray_available
+            && self.restored_at.elapsed() > Duration::from_millis(400)
+        {
+            self.hide_to_tray(ctx);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -633,6 +694,11 @@ impl App {
     // ---------------------------------------------------------------------
 
     fn handle_actions(&mut self, actions: Vec<Action>, ctx: &egui::Context) {
+        // An empty list means nothing changed. Requesting a frame here is what
+        // kept the board at 60 fps (and a hidden window at 100% of a core).
+        if actions.is_empty() {
+            return;
+        }
         for action in actions {
             match action {
                 Action::Play(id) => {
@@ -3640,44 +3706,12 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
-        let previous_loop = self.loop_state.clone();
-        self.loop_state = self.engine.loop_state();
-        if let LoopState::Error(message) = &self.loop_state {
-            if !matches!(previous_loop, LoopState::Error(_)) {
-                let message = message.clone();
-                self.log(StatusKind::Error, format!("Loop track: {message}"));
-            }
-        }
+        self.poll_loop_state();
         self.refresh_loop_missing(false);
+        self.save_debounced();
+        self.update_tray_tip();
 
-        if self.dirty && self.last_save.elapsed() > Duration::from_millis(700) {
-            self.save_now();
-        }
-
-        let now = Instant::now();
-        if now >= self.next_tip {
-            self.next_tip = now + Duration::from_secs(3);
-            let loaded = self.playback.loaded_count();
-            let playing = self
-                .engine
-                .active()
-                .iter()
-                .map(|v| v.sound_id)
-                .collect::<HashSet<_>>()
-                .len();
-            let tip = if playing > 0 {
-                format!("{APP_NAME} - {playing} playing - {loaded} in RAM")
-            } else {
-                format!("{APP_NAME} - {} sounds - {loaded} in RAM", self.sounds.len())
-            };
-            if tip != self.last_tip {
-                self.hotkeys.set_tooltip(tip.clone());
-                self.last_tip = tip;
-            }
-        }
-
-        // Keep hotkeys responsive while the window is minimized or hidden.
-        // Meter motion needs ~30 fps; idle or hidden stays cheap.
+        // Meter motion needs ~30 fps; idle settles to one frame per second.
         let levels = self.engine.take_levels();
         let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.2);
         let now = Instant::now();
@@ -3702,15 +3736,108 @@ impl App {
             }
         }
 
-        let moving = levels.iter().any(|level| *level > 0.0)
-            || self.meter_db.iter().any(|db| *db > -59.5);
-        let interval = if self.hidden || !moving { 120 } else { 33 };
-        ctx.request_repaint_after(Duration::from_millis(interval));
+        let interval = self.repaint_interval();
+        self.last_interval_ms = interval.as_millis() as u32;
+        ctx.request_repaint_after(interval);
+    }
+
+    /// The per-frame work that must keep running with the window hidden:
+    /// loop errors, the save debounce and the tray tooltip. Meter smoothing and
+    /// painting are deliberately absent.
+    fn hidden_tick(&mut self, ctx: &egui::Context) {
+        self.poll_loop_state();
+        self.refresh_loop_missing(false);
+        self.save_debounced();
+        self.update_tray_tip();
+        // Drop whatever the device produced, so showing again never flashes a
+        // stale peak.
+        let _ = self.engine.take_levels();
+        let interval = self.repaint_interval();
+        self.last_interval_ms = interval.as_millis() as u32;
+        ctx.request_repaint_after(interval);
+    }
+
+    /// One place decides when the next frame is due. `request_repaint()` from a
+    /// real event always wins; this only covers idle motion and the hidden case.
+    fn repaint_interval(&self) -> Duration {
+        const ANIM: Duration = Duration::from_millis(33);
+        const SETTINGS_AUDIO: Duration = Duration::from_millis(100);
+        const IDLE: Duration = Duration::from_millis(1000);
+
+        if self.hidden {
+            return IDLE;
+        }
+
+        let now = Instant::now();
+        let flashing = self
+            .sounds
+            .iter()
+            .any(|sound| sound.flash_until.map(|until| until > now).unwrap_or(false));
+        let fading = self.page_fade.elapsed() < Duration::from_millis(90)
+            || self.settings_opened.elapsed() < Duration::from_millis(90)
+            || self.settings_tab_fade.elapsed() < Duration::from_millis(90);
+        let moving = self.engine.is_playing()
+            || self.meter_db.iter().any(|db| *db > -59.5)
+            || self.meter_peak_db.iter().any(|db| *db > -59.5);
+
+        match (self.show_settings && !flashing, moving || flashing || fading) {
+            (_, false) => IDLE,
+            (true, true) => SETTINGS_AUDIO,
+            (false, true) => ANIM,
+        }
+    }
+
+    fn poll_loop_state(&mut self) {
+        let previous_loop = self.loop_state.clone();
+        self.loop_state = self.engine.loop_state();
+        stats::set_loop(match self.loop_state {
+            LoopState::Idle => 0,
+            LoopState::Playing => 1,
+            LoopState::Error(_) => 2,
+        });
+        if let LoopState::Error(message) = &self.loop_state {
+            if !matches!(previous_loop, LoopState::Error(_)) {
+                let message = message.clone();
+                self.log(StatusKind::Error, format!("Loop track: {message}"));
+            }
+        }
+    }
+
+    fn save_debounced(&mut self) {
+        if self.dirty && self.last_save.elapsed() > Duration::from_millis(700) {
+            self.save_now();
+        }
+    }
+
+    fn update_tray_tip(&mut self) {
+        let now = Instant::now();
+        if now < self.next_tip {
+            return;
+        }
+        self.next_tip = now + Duration::from_secs(3);
+        let loaded = self.playback.loaded_count();
+        let playing = self
+            .engine
+            .active()
+            .iter()
+            .map(|v| v.sound_id)
+            .collect::<HashSet<_>>()
+            .len();
+        let tip = if playing > 0 {
+            format!("{APP_NAME} - {playing} playing - {loaded} in RAM")
+        } else {
+            format!("{APP_NAME} - {} sounds - {loaded} in RAM", self.sounds.len())
+        };
+        if tip != self.last_tip {
+            self.hotkeys.set_tooltip(tip.clone());
+            self.last_tip = tip;
+        }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_start = Instant::now();
         // Detect the settings screen opening so its fade starts from zero.
         if self.show_settings && !self.settings_was_open {
             self.settings_opened = Instant::now();
@@ -3727,14 +3854,17 @@ impl eframe::App for App {
         }
         // The custom title bar hides decorations, so honor an OS minimize as
         // well (taskbar button, Win+D) when the user asked to minimize to tray.
-        if !self.hidden
-            && self.cfg.minimize_to_tray
-            && self.tray_available
-            && (ctx.input(|i| i.viewport().minimized.unwrap_or(false))
-                || main_window_minimized())
-        {
-            self.hide_to_tray(ctx);
+        self.handle_os_minimize(ctx);
+
+        // Nothing on screen: skip the whole paint pass. The idle timer alone
+        // still pays tessellation and a present, which is what kept a hidden
+        // window busier than a visible one.
+        if self.hidden {
+            self.hidden_tick(ctx);
+            stats::record_frame(frame_start.elapsed(), true, self.last_interval_ms);
+            return;
         }
+
         self.global_shortcuts(ctx);
         self.handle_resize(ctx);
         self.tick(ctx);
@@ -3859,6 +3989,8 @@ impl eframe::App for App {
         self.draw_drop_overlay(ctx);
         self.drag_ghost(ctx);
         self.modals(ctx);
+
+        stats::record_frame(frame_start.elapsed(), false, self.last_interval_ms);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

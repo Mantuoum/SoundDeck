@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use eframe::egui;
 
 // ---------------------------------------------------------------------------
 // Hotkey model / parsing (platform independent, unit tested)
@@ -335,6 +336,7 @@ impl HotkeyService {
         tray_size: u32,
         tooltip: String,
         playback: Arc<crate::playback::Playback>,
+        ctx: egui::Context,
     ) -> Self {
         let (tx, rx) = unbounded();
         let (event_tx, event_rx) = unbounded();
@@ -348,6 +350,7 @@ impl HotkeyService {
                 win::run(
                     rx,
                     event_tx,
+                    ctx,
                     tid,
                     tray_rgba,
                     tray_size,
@@ -356,7 +359,7 @@ impl HotkeyService {
                 );
                 #[cfg(not(windows))]
                 {
-                    let _ = (rx, event_tx, tid, tray_rgba, tray_size, tooltip, playback);
+                    let _ = (rx, event_tx, ctx, tid, tray_rgba, tray_size, tooltip, playback);
                 }
             })
             .ok();
@@ -429,6 +432,16 @@ pub fn main_window_minimized() -> bool {
     unsafe { win::main_window_minimized() }
 }
 
+/// Shows or hides the taskbar button without touching the window styles.
+/// Used while the window is parked in the tray as a minimized window.
+#[cfg(windows)]
+pub fn set_taskbar_tab(visible: bool) {
+    unsafe { win::set_taskbar_tab(visible) }
+}
+
+#[cfg(not(windows))]
+pub fn set_taskbar_tab(_visible: bool) {}
+
 #[cfg(not(windows))]
 pub fn main_window_minimized() -> bool {
     false
@@ -487,6 +500,8 @@ mod win {
     struct State {
         rx: Receiver<Command>,
         tx: Sender<ServiceEvent>,
+        /// Wakes the UI out of its idle/dead repaint interval.
+        ctx: egui::Context,
         hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
         owns_icon: bool,
         tray_added: bool,
@@ -497,11 +512,21 @@ mod win {
         keyboard_hook: Option<HHOOK>,
     }
 
+    impl State {
+        /// Forward an event and wake the UI so a tray click or hotkey is never
+        /// stuck behind a one-second idle repaint.
+        fn emit(&self, event: ServiceEvent) {
+            let _ = self.tx.send(event);
+            self.ctx.request_repaint();
+        }
+    }
+
     unsafe impl Send for State {}
 
     pub fn run(
         rx: Receiver<Command>,
         tx: Sender<ServiceEvent>,
+        ctx: egui::Context,
         thread_id: Arc<AtomicU32>,
         rgba: Vec<u8>,
         size: u32,
@@ -525,6 +550,7 @@ mod win {
                     "Could not register window class (error {})",
                     err.0
                 )));
+                ctx.request_repaint();
                 return;
             }
 
@@ -543,6 +569,7 @@ mod win {
             let state = Box::new(State {
                 rx,
                 tx: tx.clone(),
+                ctx,
                 hicon,
                 owns_icon,
                 tray_added: false,
@@ -602,7 +629,9 @@ mod win {
             }
 
             thread_id.store(GetCurrentThreadId(), Ordering::SeqCst);
-            process_commands(hwnd, state);
+            if !process_commands(hwnd, state) {
+                return;
+            }
 
             let mut msg = MSG::default();
             loop {
@@ -611,7 +640,12 @@ mod win {
                     break;
                 }
                 if msg.hwnd.is_invalid() && msg.message == WAKE_MSG {
-                    process_commands(hwnd, &mut *state_ptr);
+                    // `process_commands` may have destroyed the window, which
+                    // frees `state`; the token queue can still hold a wake that
+                    // was posted earlier, so stop touching it once it does.
+                    if !process_commands(hwnd, &mut *state_ptr) {
+                        break;
+                    }
                     continue;
                 }
                 let _ = TranslateMessage(&msg);
@@ -620,7 +654,9 @@ mod win {
         }
     }
 
-    unsafe fn process_commands(hwnd: HWND, state: &mut State) {
+    /// Drains queued service commands. Returns `false` after the background
+    /// window has been destroyed, at which point `state` is freed.
+    unsafe fn process_commands(hwnd: HWND, state: &mut State) -> bool {
         while let Ok(cmd) = state.rx.try_recv() {
             match cmd {
                 Command::SetBindings(bindings) => {
@@ -629,7 +665,7 @@ mod win {
                         .map(|(sound_id, hotkey)| (*hotkey, *sound_id))
                         .collect();
                     for (sound_id, hk) in bindings {
-                        let _ = state.tx.send(ServiceEvent::Registered {
+                        state.emit(ServiceEvent::Registered {
                             sound_id,
                             hotkey: hk,
                             error: None,
@@ -645,10 +681,11 @@ mod win {
                 Command::Shutdown => {
                     remove_tray(hwnd, state);
                     let _ = DestroyWindow(hwnd);
-                    return;
+                    return false;
                 }
             }
         }
+        true
     }
 
     unsafe extern "system" fn keyboard_proc(
@@ -717,7 +754,7 @@ mod win {
                 if let Some(state) = state {
                     let sound_id = wparam.0 as u64;
                     state.playback.play(sound_id);
-                    let _ = state.tx.send(ServiceEvent::Pressed(sound_id));
+                    state.emit(ServiceEvent::Pressed(sound_id));
                 }
                 LRESULT(0)
             }
@@ -727,7 +764,7 @@ mod win {
                     match event {
                         WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(hwnd, state),
                         WM_LBUTTONDBLCLK => {
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
+                            state.emit(ServiceEvent::Tray(TrayCommand::Toggle));
                         }
                         _ => {}
                     }
@@ -739,15 +776,15 @@ mod win {
                     let id = (wparam.0 & 0xFFFF) as usize;
                     match id {
                         MENU_SHOW => {
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
+                            state.emit(ServiceEvent::Tray(TrayCommand::Toggle));
                         }
                         MENU_STOP => {
                             state.playback.stop_all();
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::StopAll));
+                            state.emit(ServiceEvent::Tray(TrayCommand::StopAll));
                         }
                         MENU_QUIT => {
                             close_main_window();
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Quit));
+                            state.emit(ServiceEvent::Tray(TrayCommand::Quit));
                         }
                         _ => {}
                     }
@@ -767,7 +804,7 @@ mod win {
             WM_DESTROY => {
                 if let Some(state) = state {
                     remove_tray(hwnd, state);
-                    let _ = state.tx.send(ServiceEvent::TrayReady(false));
+                    state.emit(ServiceEvent::TrayReady(false));
                     if let Some(hook) = state.keyboard_hook.take() {
                         let _ = UnhookWindowsHookEx(hook);
                     }
@@ -864,15 +901,15 @@ mod win {
             if cmd.0 > 0 {
                 match cmd.0 as usize {
                     MENU_SHOW => {
-                        let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
+                        state.emit(ServiceEvent::Tray(TrayCommand::Toggle));
                     }
                     MENU_STOP => {
                         state.playback.stop_all();
-                        let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::StopAll));
+                        state.emit(ServiceEvent::Tray(TrayCommand::StopAll));
                     }
                     MENU_QUIT => {
                         close_main_window();
-                        let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Quit));
+                        state.emit(ServiceEvent::Tray(TrayCommand::Quit));
                     }
                     _ => {}
                 }
@@ -956,6 +993,36 @@ mod win {
     pub unsafe fn main_window_minimized() -> bool {
         let hwnd = main_window();
         !hwnd.is_invalid() && IsIconic(hwnd).as_bool()
+    }
+
+    /// Adds or removes the taskbar button for the main window.
+    ///
+    /// A minimized window still owns a taskbar button, which is exactly what
+    /// "minimize to tray" is not supposed to leave behind. `ITaskbarList` is the
+    /// documented way to drop it without touching the window styles; failures
+    /// are ignored because the worst case is a stray button, not bad audio.
+    pub unsafe fn set_taskbar_tab(visible: bool) {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
+
+        let hwnd = main_window();
+        if hwnd.is_invalid() {
+            return;
+        }
+        // The UI thread may already be initialised under another model; that is
+        // fine, the failure is expected and harmless here.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let Ok(list) =
+            CoCreateInstance::<_, ITaskbarList>(&TaskbarList, None, CLSCTX_INPROC_SERVER)
+        else {
+            return;
+        };
+        let _ = list.HrInit();
+        if visible {
+            let _ = list.AddTab(hwnd);
+        } else {
+            let _ = list.DeleteTab(hwnd);
+        }
     }
 
     unsafe fn close_main_window() {
