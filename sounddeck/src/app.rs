@@ -3102,8 +3102,26 @@ impl App {
             .current
             .and_then(|hk| self.find_conflict(hk, capture.sound_id).map(|s| s.name.clone()));
 
+        let screen = ctx.screen_rect();
+        let overlay = egui::Area::new(Id::new("capture_backdrop"))
+            .fixed_pos(screen.min)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
+                ui.painter().rect_filled(
+                    rect,
+                    CornerRadius::ZERO,
+                    theme::alpha(theme::bg(), 210),
+                );
+                response
+            });
+        if overlay.inner.clicked() {
+            close = true;
+        }
+
         egui::Window::new("Set hotkey")
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .order(Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
@@ -3204,6 +3222,7 @@ impl App {
                         .size(10.5)
                         .color(theme::faint()),
                 );
+                ui.add_space(2.0);
             });
 
         if close {
