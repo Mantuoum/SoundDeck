@@ -170,7 +170,8 @@ plays it, and prints progress plus WASAPI events.
 ## Developers
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the module map, audio pipeline, storage
-rules, concurrency invariants and “where to change what” notes.
+rules, concurrency invariants and "where to change what" notes, and
+[`../SPEC.md`](../SPEC.md) for the behavioural contract and performance budgets.
 
 ## Third-party
 
