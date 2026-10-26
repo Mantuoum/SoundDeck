@@ -34,6 +34,15 @@ const DEVELOPER_ROLE: &str = "Independent developer";
 const DEVELOPER_LINK: &str = "your-link.example";
 const DEVELOPER_BLURB: &str = "Add your bio, links, and contact details here.";
 
+/// Placeholder name that means "not filled in yet"; the credit line stays
+/// hidden until it is replaced.
+const DEVELOPER_PLACEHOLDER: &str = "Your Name";
+
+/// About -> Links. Add a label and an `https://` URL here and the group appears;
+/// entries with an empty URL are skipped, so there are never dead links on
+/// screen. Support goes first when it exists.
+const ABOUT_LINKS: &[(&str, &str)] = &[("Support", ""), ("Website", ""), ("Source code", "")];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RamState {
     Off,
@@ -2786,7 +2795,7 @@ impl App {
 
         let tab = self.settings_tab;
         settings_header(ui, tab);
-        ui.add_space(10.0);
+        ui.add_space(6.0);
 
         egui::ScrollArea::vertical()
             .id_salt(("settings_scroll", tab.title()))
@@ -2800,7 +2809,7 @@ impl App {
                         SettingsTab::Window => self.settings_page_window(ui),
                         SettingsTab::About => self.settings_page_about(ui),
                     }
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                 });
             });
     }
@@ -2996,50 +3005,99 @@ impl App {
     }
 
     fn settings_page_about(&mut self, ui: &mut Ui) {
-        settings_group(ui, "SoundDeck", |ui| {
-            ui.label(
-                RichText::new(APP_NAME)
-                    .font(theme::medium(17.0))
-                    .color(theme::text()),
-            );
-            ui.label(
-                RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
-                    .size(11.5)
-                    .color(theme::muted()),
-            );
-            settings_divider(ui);
-            settings_row(ui, "Config folder", 200.0, |ui| {
-                if ghost_button(ui, "Open", Vec2::new(90.0, 28.0)).clicked() {
-                    let _ = std::process::Command::new("explorer")
-                        .arg(model::config_dir())
-                        .spawn();
-                }
-            });
-        });
+        // Narrow column: the page is short text, so a 780 px card reads as an
+        // empty box.
+        ui.scope(|ui| {
+            ui.set_max_width(680.0);
 
-        settings_group(ui, "Developer", |ui| {
-            ui.label(
-                RichText::new(DEVELOPER_NAME)
-                    .font(theme::medium(16.0))
-                    .color(theme::text()),
-            );
-            ui.label(
-                RichText::new(DEVELOPER_ROLE)
-                    .size(11.5)
-                    .color(theme::muted()),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(DEVELOPER_BLURB)
-                    .size(11.0)
-                    .color(theme::faint()),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(DEVELOPER_LINK)
-                    .size(11.0)
-                    .color(theme::accent()),
-            );
+            settings_group(ui, "Application", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(APP_NAME)
+                            .font(theme::medium(15.5))
+                            .color(theme::text()),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                                .size(11.0)
+                                .color(theme::faint()),
+                        );
+                    });
+                });
+                ui.add_space(1.0);
+                ui.label(
+                    RichText::new("Portable Windows soundboard")
+                        .size(10.5)
+                        .color(theme::faint()),
+                );
+                settings_divider(ui);
+                settings_row(ui, "Config folder", 200.0, |ui| {
+                    if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(model::config_dir())
+                            .spawn();
+                    }
+                });
+            });
+
+            let links: Vec<(&str, &str)> = ABOUT_LINKS
+                .iter()
+                .copied()
+                .filter(|(_, url)| !url.is_empty())
+                .collect();
+            if !links.is_empty() {
+                settings_group(ui, "Links", |ui| {
+                    for (index, (label, url)) in links.iter().enumerate() {
+                        if index > 0 {
+                            settings_divider(ui);
+                        }
+                        settings_row(ui, label, 200.0, |ui| {
+                            if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
+                                open_url(url);
+                            }
+                        });
+                    }
+                });
+            }
+
+            // No credit until the placeholders are replaced, rather than showing
+            // "Your Name" and a dead link.
+            if DEVELOPER_NAME != DEVELOPER_PLACEHOLDER {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(DEVELOPER_NAME)
+                            .size(11.5)
+                            .color(theme::muted()),
+                    );
+                    ui.label(RichText::new("·").size(11.5).color(theme::faint()));
+                    ui.label(
+                        RichText::new(DEVELOPER_ROLE)
+                            .size(11.5)
+                            .color(theme::faint()),
+                    );
+                });
+                ui.label(
+                    RichText::new(DEVELOPER_BLURB)
+                        .size(10.5)
+                        .color(theme::faint()),
+                );
+                if !DEVELOPER_LINK.is_empty() {
+                    let link = ui.add(
+                        egui::Label::new(
+                            RichText::new(DEVELOPER_LINK)
+                                .size(10.5)
+                                .color(theme::accent()),
+                        )
+                        .sense(Sense::click()),
+                    );
+                    if link.clicked() {
+                        open_url(DEVELOPER_LINK);
+                    }
+                    link.on_hover_cursor(egui::CursorIcon::PointingHand);
+                }
+            }
         });
     }
 
@@ -3222,7 +3280,7 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new("Esc cancels")
+                    RichText::new("Press `Esc` to cancel")
                         .size(10.5)
                         .color(theme::faint()),
                 );
@@ -3992,7 +4050,7 @@ impl Drop for App {
 fn settings_header(ui: &mut Ui, tab: SettingsTab) {
     ui.label(
         RichText::new(tab.title())
-            .font(theme::medium(22.0))
+            .font(theme::medium(20.0))
             .color(theme::text()),
     );
 }
@@ -4000,20 +4058,20 @@ fn settings_header(ui: &mut Ui, tab: SettingsTab) {
 fn settings_group(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.label(
         RichText::new(title)
-            .font(theme::medium(13.5))
+            .font(theme::medium(13.0))
             .color(theme::text()),
     );
-    ui.add_space(8.0);
+    ui.add_space(5.0);
     Frame::NONE
         .fill(theme::card())
         .stroke(Stroke::new(1.0_f32, theme::border_soft()))
         .corner_radius(theme::RADIUS_LG)
-        .inner_margin(Margin::same(14))
+        .inner_margin(Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add_contents(ui);
         });
-    ui.add_space(14.0);
+    ui.add_space(8.0);
 }
 
 fn settings_row(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
@@ -4021,9 +4079,9 @@ fn settings_row(ui: &mut Ui, title: &str, control_width: f32, add_control: impl 
     if width < 620.0 {
         ui.vertical(|ui| {
             ui.label(RichText::new(title).size(12.5).color(theme::text()));
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), 30.0),
+                Vec2::new(ui.available_width(), 28.0),
                 Layout::top_down(Align::Min),
                 |ui| add_control(ui),
             );
@@ -4037,7 +4095,7 @@ fn settings_row(ui: &mut Ui, title: &str, control_width: f32, add_control: impl 
             });
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 ui.allocate_ui_with_layout(
-                    Vec2::new(control_width, 30.0),
+                    Vec2::new(control_width, 28.0),
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.set_width(control_width);
@@ -4057,9 +4115,32 @@ fn settings_rule(ui: &mut Ui) {
 }
 
 fn settings_divider(ui: &mut Ui) {
-    ui.add_space(12.0);
+    ui.add_space(7.0);
     settings_rule(ui);
-    ui.add_space(12.0);
+    ui.add_space(7.0);
+}
+
+/// Opens an http(s) URL in the default browser. Anything else is ignored so a
+/// mistyped constant in `ABOUT_LINKS` cannot hand the shell an arbitrary verb.
+fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let target = HSTRING::from(url);
+    unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
+    }
 }
 
 fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool {
