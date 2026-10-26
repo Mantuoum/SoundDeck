@@ -6,14 +6,14 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `6bfe247 feat(audio): independent loop routing per output`.
+- Last commit: `a9874b8 feat(hotkeys): pass global hotkeys through to the focused app`.
 - Working tree: `context.md` only.
-- Tests: 40 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
+- Tests: 41 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
 - Latency/meter, loop + volume + per-output routing, Settings, tray toggle/minimize,
-  sidebar gain visibility, and the Settings trim are shipped. The idle CPU/repaint
-  pass remains.
+  sidebar gain visibility, Settings trim, and pass-through hotkeys are shipped. The
+  idle CPU/repaint pass remains.
 
 ## Source of truth
 
@@ -81,6 +81,7 @@ docs or reports.
    - 1 s visible-idle repaint, no hidden periodic repaint, hotkey/tray wake;
    - measure visible/hidden CPU before and after.
 2. User QA: tray double-click, minimize toggle (taskbar/tray), show-gain toggle,
-   Settings tabs, list spacing at maximized, and loop routing (Monitor/Cable).
+   Settings tabs, list spacing at maximized, loop routing (Monitor/Cable), and
+   pass-through hotkeys (including elevated apps/AV limitations).
 3. Replace the developer placeholders once the user supplies name, role, link and blurb.
 4. Optional/far-future: native UI rewrite behind the measurement gate in `plan.md` §9.
