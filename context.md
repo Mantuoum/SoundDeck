@@ -6,14 +6,13 @@ App: `sounddeck/` — Rust + eframe/egui 0.31.1, WASAPI, portable, no Electron
 
 ## Where things stand
 
-- Last commit: `fe0b468 docs: add the developer architecture guide`.
-- Working tree: `plan.md` §7 now specifies tray behaviour and idle performance
-  (decisions resolved, no code yet); `context.md` updated.
+- Last commit: `d626b09 feat(ui): tray toggle, gain visibility, leaner settings`.
+- Working tree: `context.md` only.
 - Tests: 38 passing; release build deployed to `sounddeck\review\SoundDeck.exe`.
 - The review app uses the user's real config and audio files. Never overwrite
   `sounddeck\review\config\` with demo data.
-- Latency/meter, loop + volume, volume consistency, and full-window Settings are
-  shipped. Next is the tray/minimize toggle, then the idle CPU/repaint pass.
+- Latency/meter, loop + volume, Settings, tray toggle/minimize, sidebar gain
+  visibility, and the Settings trim are shipped. The idle CPU/repaint pass remains.
 
 ## Source of truth
 
@@ -75,11 +74,12 @@ docs or reports.
 
 ## Next steps
 
-1. Implement `plan.md` §7, tray first:
-   - `minimize_to_tray` (default false/taskbar), Window tab, double-click toggle,
-     minimize routing and restore;
-   - then `--stats`, idle mixer wake/sleep, repaint policy, hidden path;
+1. Implement the performance half of `plan.md` §7:
+   - `--stats` counters;
+   - event-driven idle mixer + wake channel;
+   - 1 s visible-idle repaint, no hidden periodic repaint, hotkey/tray wake;
    - measure visible/hidden CPU before and after.
-2. User QA: tray toggle, double-click, and the CPU numbers on the same machine.
+2. User QA: tray double-click, minimize toggle (taskbar/tray), show-gain toggle,
+   Settings tabs, list spacing at maximized.
 3. Replace the developer placeholders once the user supplies name, role, link and blurb.
-4. Optional/far-future: native UI rewrite behind the measurement gate in `plan.md` §8.
+4. Optional/far-future: native UI rewrite behind the measurement gate in `plan.md` §9.
