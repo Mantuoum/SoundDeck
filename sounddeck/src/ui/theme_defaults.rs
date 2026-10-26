@@ -27,7 +27,7 @@ pub fn graphite() -> Palette {
         muted: hex(0x8a919a),
         faint: hex(0x5c636c),
         accent,
-        accent_soft: blend(bg, accent, 0.20),
+        accent_soft: blend(bg, accent, 0.25),
         purple: hex(0x8b78e6),
         amber: hex(0xd6a656),
         red: hex(0xde6969),

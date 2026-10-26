@@ -37,6 +37,7 @@ pub fn parse(id: &str, text: &str, fallback: &Palette) -> ParsedTheme {
     let mut name = None;
     let mut warnings = Vec::new();
     let mut saw_token = false;
+    let mut accent_soft_seen = false;
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -154,6 +155,16 @@ pub fn parse(id: &str, text: &str, fallback: &Palette) -> ParsedTheme {
                 "accent",
                 &mut warnings,
             ),
+            "accent_soft" => {
+                accent_soft_seen = true;
+                set_color(
+                    &mut palette.accent_soft,
+                    fallback.accent_soft,
+                    value,
+                    "accent_soft",
+                    &mut warnings,
+                )
+            }
             "purple" => set_color(
                 &mut palette.purple,
                 fallback.purple,
@@ -185,12 +196,18 @@ pub fn parse(id: &str, text: &str, fallback: &Palette) -> ParsedTheme {
         ));
     }
 
-    // Tinted accent surfaces are always derived from the final bg + accent.
-    palette.accent_soft = blend(
-        palette.bg,
-        palette.accent,
-        if palette.is_light { 0.18 } else { 0.20 },
-    );
+    // Derive the tinted accent surface unless the file provides it explicitly,
+    // so the exact shipped values round-trip and partial edits stay consistent.
+    if !accent_soft_seen {
+        let ratio = if id == "graphite" {
+            0.25
+        } else if palette.is_light {
+            0.18
+        } else {
+            0.20
+        };
+        palette.accent_soft = blend(palette.bg, palette.accent, ratio);
+    }
 
     ParsedTheme {
         name: name.unwrap_or_else(|| id.to_string()),
@@ -222,6 +239,7 @@ pub fn template(name: &str, palette: &Palette) -> String {
         ("muted", palette.muted),
         ("faint", palette.faint),
         ("accent", palette.accent),
+        ("accent_soft", palette.accent_soft),
         ("purple", palette.purple),
         ("amber", palette.amber),
         ("red", palette.red),
