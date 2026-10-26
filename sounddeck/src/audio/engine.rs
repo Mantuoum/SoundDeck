@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -65,6 +65,8 @@ pub struct Ring {
     queue: Mutex<VecDeque<f32>>,
     capacity_samples: usize,
     consumers: AtomicUsize,
+    /// Peak of the samples handed to the device since the last UI read.
+    peak: AtomicU32,
 }
 
 impl Ring {
@@ -73,6 +75,7 @@ impl Ring {
             queue: Mutex::new(VecDeque::with_capacity(16_384)),
             capacity_samples: (SAMPLE_RATE as f32 * CHANNELS as f32 * capacity_seconds) as usize,
             consumers: AtomicUsize::new(0),
+            peak: AtomicU32::new(0),
         }
     }
 
@@ -112,18 +115,30 @@ impl Ring {
             Err(_) => return 0,
         };
         let frames = (max_frames * CHANNELS).min(queue.len()) / CHANNELS;
+        let mut peak = 0.0f32;
         for _ in 0..frames * CHANNELS {
             if let Some(sample) = queue.pop_front() {
+                peak = peak.max(sample.abs());
                 out.push_back(sample);
             }
         }
+        if peak > 0.0 {
+            // Non-negative f32 bit patterns are ordered like the floats.
+            self.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        }
         frames
+    }
+
+    /// Peak since the previous call, as linear amplitude.
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
 
     pub fn clear(&self) {
         if let Ok(mut queue) = self.queue.lock() {
             queue.clear();
         }
+        self.peak.store(0, Ordering::Relaxed);
     }
 
     pub fn buffered_frames(&self) -> usize {
@@ -154,8 +169,6 @@ struct Mixer {
     monitor_gain: f32,
     cable_gain: f32,
     master_gain: f32,
-    /// Peak since the last UI read, per output.
-    meter: [f32; 2],
     /// Streaming loop track. Kept out of `voices`: it never takes part in
     /// exclusive playback and is fed from disk instead of RAM.
     loop_rx: Option<Receiver<Vec<f32>>>,
@@ -312,13 +325,12 @@ impl Engine {
             monitor_gain: monitor_volume.clamp(0.0, 1.0),
             cable_gain: cable_volume.clamp(0.0, 1.0),
             master_gain: db_to_gain(master_gain_db),
-            meter: [0.0; 2],
             loop_rx: None,
             loop_chunk: Vec::new(),
             loop_pos: 0,
             loop_status: None,
         }));
-        let rings = [Arc::new(Ring::new(2.0)), Arc::new(Ring::new(2.0))];
+        let rings = [Arc::new(Ring::new(0.15)), Arc::new(Ring::new(0.15))];
         let (events_tx, events_rx) = unbounded();
         let mixer_stop = Arc::new(AtomicBool::new(false));
 
@@ -507,13 +519,9 @@ impl Engine {
     }
 
     /// Peak level per output since the previous call, as linear amplitude.
+    /// Measured where the device consumes samples, so it matches what is heard.
     pub fn take_levels(&self) -> [f32; 2] {
-        let Ok(mut mixer) = self.mixer.lock() else {
-            return [0.0; 2];
-        };
-        let levels = mixer.meter;
-        mixer.meter = [0.0; 2];
-        levels
+        [self.rings[0].take_peak(), self.rings[1].take_peak()]
     }
 
     pub fn set_master(&self, slot: Slot, volume: f32) {
@@ -594,10 +602,6 @@ fn set_loop_state(status: &Option<Arc<Mutex<LoopState>>>, from: LoopState, to: L
     }
 }
 
-fn peak_of(samples: &[f32]) -> f32 {
-    samples.iter().fold(0.0f32, |peak, s| peak.max(s.abs()))
-}
-
 fn mixer_loop(
     mixer: Arc<Mutex<Mixer>>,
     rings: [Arc<Ring>; 2],
@@ -621,9 +625,6 @@ fn mixer_loop(
                 match mixer.lock() {
                     Ok(mut mixer) => {
                         mixer.render(&mut buffer);
-                        let peak = peak_of(&buffer);
-                        mixer.meter[0] = mixer.meter[0].max(peak * mixer.monitor_gain).min(1.0);
-                        mixer.meter[1] = mixer.meter[1].max(peak * mixer.cable_gain).min(1.0);
                         (mixer.monitor_gain, mixer.cable_gain)
                     }
                     Err(_) => break,
@@ -709,6 +710,25 @@ mod loop_tests {
     }
 
     #[test]
+    fn ring_peak_tracks_consumed_samples() {
+        let ring = Ring::new(0.1);
+        ring.push_scaled(&[0.5f32, -0.25, 0.1, -0.1], 1.0);
+        let mut out = VecDeque::new();
+        assert_eq!(ring.pop_into(&mut out, 2), 2);
+        assert!((ring.take_peak() - 0.5).abs() < 1e-6);
+        assert_eq!(ring.take_peak(), 0.0);
+    }
+
+    #[test]
+    fn ring_peak_applies_slot_gain() {
+        let ring = Ring::new(0.1);
+        ring.push_scaled(&[0.8f32, -0.8], 0.5);
+        let mut out = VecDeque::new();
+        ring.pop_into(&mut out, 1);
+        assert!((ring.take_peak() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
     fn mixer_adds_the_loop_before_master_gain() {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let mut mixer = Mixer {
@@ -716,7 +736,6 @@ mod loop_tests {
             monitor_gain: 1.0,
             cable_gain: 1.0,
             master_gain: 0.5,
-            meter: [0.0; 2],
             loop_rx: Some(rx),
             loop_chunk: Vec::new(),
             loop_pos: 0,
