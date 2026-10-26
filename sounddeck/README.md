@@ -22,9 +22,9 @@ live in `config/` next to the executable.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
 - **Looping track** (opt-in): enable it in Settings → Playback to show a loop
-  player under the meters. One file, streamed from disk, repeating forever. It
-  follows Monitor/Cable and master gain, plays underneath sound effects, and
-  keeps playing through `Stop all`, library switches, and tray minimize. No
+  player under the meters. One file, streamed from disk, repeating forever, with
+  its own volume independent of Monitor/Cable. It plays underneath sound effects
+  and keeps playing through `Stop all`, library switches, and tray minimize. No
   hotkey, no seeking, no progress bar.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...).
 - **Dual output**: one monitor device and one cable device, with independent
@@ -77,7 +77,10 @@ live in `config/` next to the executable.
   meter; until a file is chosen, Play is disabled.
 - Controls are Play/Stop plus the picker (folder icon) to choose or locate the file.
   Start and stop are instant.
-- The path is remembered in `settings.json`, but playback always starts stopped.
+- It has its own volume bar, independent of Monitor/Cable. Master gain still applies
+  to everything.
+- The path and volume are remembered in `settings.json`, but playback always starts
+  stopped.
 - A missing or corrupt file keeps its path and shows the error; the picker becomes
   the Locate action. Play turns into Retry after a decode failure.
 - It is not a library sound: no search entry, no hotkey, no RAM preload. It keeps
@@ -95,8 +98,8 @@ config/
 ```
 
 Sounds keep their original paths; audio files are never copied. The looping
-track is stored as `loop_enabled` and `loop_path` in `settings.json`, following
-the same reference-only rule. A legacy `sounddeck.json` is imported once on first
+track is stored as `loop_enabled`, `loop_path` and `loop_volume` in
+`settings.json`, following the same reference-only rule. A legacy `sounddeck.json` is imported once on first
 launch and renamed to `sounddeck.v1.json.bak`. Each JSON file is written
 atomically and keeps one rolling `.bak`; interrupted writes are recovered on the
 next start.
@@ -110,7 +113,8 @@ next start.
 - Decoded audio is cached only for hotkey sounds that are marked RAM.
 - Files without a hotkey always play from disk on demand.
 - The looping track is decoded by a dedicated thread and streamed through a small
-  buffer, so it is never counted in the RAM preload and has no 20-minute cap.
+  buffer, so it is never counted in the RAM preload and has no 20-minute cap. It has
+  its own level before the master gain.
 - Sound effects are still capped at 20 minutes when loaded into memory.
 
 ## Hotkey limitations

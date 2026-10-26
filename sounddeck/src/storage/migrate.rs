@@ -199,6 +199,7 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         window_size: legacy.window_size,
         loop_enabled: false,
         loop_path: None,
+        loop_volume: 1.0,
         animate_ui: true,
     };
 

@@ -174,7 +174,7 @@ struct Mixer {
     loop_rx: Option<Receiver<Vec<f32>>>,
     loop_chunk: Vec<f32>,
     loop_pos: usize,
-    loop_status: Option<Arc<Mutex<LoopState>>>,
+    loop_gain: f32,
 }
 
 impl Mixer {
@@ -228,20 +228,8 @@ impl Mixer {
                         Ok(chunk) => {
                             self.loop_chunk = chunk;
                             self.loop_pos = 0;
-                            set_loop_state(
-                                &self.loop_status,
-                                LoopState::Buffering,
-                                LoopState::Playing,
-                            );
                         }
-                        Err(_) => {
-                            set_loop_state(
-                                &self.loop_status,
-                                LoopState::Playing,
-                                LoopState::Underrun,
-                            );
-                            break;
-                        }
+                        Err(_) => break,
                     }
                 }
 
@@ -254,11 +242,12 @@ impl Mixer {
                 let take = (frames - index).min(available);
                 let source = &self.loop_chunk[self.loop_pos..self.loop_pos + take * CHANNELS];
                 let start = index * CHANNELS;
+                let gain = self.loop_gain;
                 for (dst, src) in out[start..start + take * CHANNELS]
                     .iter_mut()
                     .zip(source.iter())
                 {
-                    *dst += *src;
+                    *dst += *src * gain;
                 }
                 self.loop_pos += take * CHANNELS;
                 index += take;
@@ -315,7 +304,6 @@ pub struct Engine {
     mixer_stop: Arc<AtomicBool>,
     mixer_thread: Mutex<Option<JoinHandle<()>>>,
     loop_stream: Mutex<Option<LoopStream>>,
-    loop_status: Arc<Mutex<LoopState>>,
 }
 
 impl Engine {
@@ -328,7 +316,7 @@ impl Engine {
             loop_rx: None,
             loop_chunk: Vec::new(),
             loop_pos: 0,
-            loop_status: None,
+            loop_gain: 1.0,
         }));
         let rings = [Arc::new(Ring::new(0.15)), Arc::new(Ring::new(0.15))];
         let (events_tx, events_rx) = unbounded();
@@ -353,7 +341,6 @@ impl Engine {
             mixer_stop,
             mixer_thread: Mutex::new(mixer_thread),
             loop_stream: Mutex::new(None),
-            loop_status: Arc::new(Mutex::new(LoopState::Idle)),
         }
     }
 
@@ -453,7 +440,8 @@ impl Engine {
         }
         self.stop_loop();
 
-        let (stream, rx) = LoopStream::spawn(path, self.loop_status.clone());
+        let status = Arc::new(Mutex::new(LoopState::Playing));
+        let (stream, rx) = LoopStream::spawn(path, status)?;
         {
             let Ok(mut mixer) = self.mixer.lock() else {
                 bail!("Audio mixer is unavailable");
@@ -461,7 +449,6 @@ impl Engine {
             mixer.loop_rx = Some(rx);
             mixer.loop_chunk.clear();
             mixer.loop_pos = 0;
-            mixer.loop_status = Some(self.loop_status.clone());
         }
         if let Ok(mut slot) = self.loop_stream.lock() {
             *slot = Some(stream);
@@ -474,7 +461,6 @@ impl Engine {
     pub fn stop_loop(&self) {
         let rx = match self.mixer.lock() {
             Ok(mut mixer) => {
-                mixer.loop_status = None;
                 mixer.loop_chunk.clear();
                 mixer.loop_pos = 0;
                 mixer.loop_rx.take()
@@ -487,8 +473,11 @@ impl Engine {
         if let Some(stream) = stream {
             stream.stop();
         }
-        if let Ok(mut status) = self.loop_status.lock() {
-            *status = LoopState::Idle;
+    }
+
+    pub fn set_loop_volume(&self, volume: f32) {
+        if let Ok(mut mixer) = self.mixer.lock() {
+            mixer.loop_gain = volume.clamp(0.0, 1.0);
         }
     }
 
@@ -505,10 +494,7 @@ impl Engine {
                 return state;
             }
         }
-        self.loop_status
-            .lock()
-            .map(|status| status.clone())
-            .unwrap_or(LoopState::Idle)
+        LoopState::Idle
     }
 
     pub fn active(&self) -> Vec<ActiveSound> {
@@ -591,17 +577,6 @@ fn db_to_gain(db: f32) -> f32 {
 /// Move the shared loop status from `from` to `to` if it currently matches.
 /// Used for mixer-side transitions (first chunk, underrun) without stomping on
 /// a decoder error.
-fn set_loop_state(status: &Option<Arc<Mutex<LoopState>>>, from: LoopState, to: LoopState) {
-    let Some(status) = status else {
-        return;
-    };
-    if let Ok(mut current) = status.lock() {
-        if *current == from {
-            *current = to;
-        }
-    }
-}
-
 fn mixer_loop(
     mixer: Arc<Mutex<Mixer>>,
     rings: [Arc<Ring>; 2],
@@ -729,6 +704,29 @@ mod loop_tests {
     }
 
     #[test]
+    fn mixer_loop_gain_scales_the_loop() {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut mixer = Mixer {
+            voices: Vec::new(),
+            monitor_gain: 1.0,
+            cable_gain: 1.0,
+            master_gain: 1.0,
+            loop_rx: Some(rx),
+            loop_chunk: Vec::new(),
+            loop_pos: 0,
+            loop_gain: 0.25,
+        };
+        tx.send(vec![0.8f32; MIX_CHUNK_FRAMES * CHANNELS])
+            .unwrap();
+
+        let mut out = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        mixer.render(&mut out);
+        assert!(out
+            .iter()
+            .all(|sample| (*sample - 0.2).abs() < 1e-6));
+    }
+
+    #[test]
     fn mixer_adds_the_loop_before_master_gain() {
         let (tx, rx) = crossbeam_channel::bounded(4);
         let mut mixer = Mixer {
@@ -739,7 +737,7 @@ mod loop_tests {
             loop_rx: Some(rx),
             loop_chunk: Vec::new(),
             loop_pos: 0,
-            loop_status: None,
+            loop_gain: 1.0,
         };
         tx.send(vec![0.25f32; MIX_CHUNK_FRAMES * CHANNELS])
             .unwrap();

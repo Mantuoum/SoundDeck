@@ -268,6 +268,7 @@ impl App {
             },
             cfg.master_gain_db,
         ));
+        engine.set_loop_volume(cfg.loop_volume);
         if cfg.link_volumes {
             cfg.cable_volume = cfg.monitor_volume;
         }
@@ -858,6 +859,16 @@ impl App {
         self.refresh_loop_missing(true);
     }
 
+    fn set_loop_volume(&mut self, volume: f32) {
+        let volume = volume.clamp(0.0, 1.0);
+        if (self.cfg.loop_volume - volume).abs() < 1e-4 {
+            return;
+        }
+        self.cfg.loop_volume = volume;
+        self.engine.set_loop_volume(volume);
+        self.mark_dirty();
+    }
+
     fn locate_sound(&mut self, id: u64) {
         let Some(sound) = self.sounds.iter().find(|s| s.id == id) else {
             return;
@@ -1420,9 +1431,9 @@ impl App {
         let hide_device_labels = compact && self.cfg.loop_enabled;
         let loop_reserve = if self.cfg.loop_enabled {
             if compact {
-                32.0
+                50.0
             } else {
-                76.0
+                90.0
             }
         } else {
             0.0
@@ -1815,7 +1826,7 @@ impl App {
         let has_file = path.is_some() && !missing;
         let playable = has_file && error.is_none();
         let retry = has_file && error.is_some();
-        let height = if compact { 26.0 } else { 66.0 };
+        let height = if compact { 44.0 } else { 84.0 };
         let (rect, card_response) = ui.allocate_exact_size(
             Vec2::new(ui.available_width(), height),
             Sense::hover(),
@@ -2011,9 +2022,7 @@ impl App {
             } else {
                 match &self.loop_state {
                     LoopState::Idle => "Ready".to_string(),
-                    LoopState::Buffering => "Loading…".to_string(),
                     LoopState::Playing => "Playing".to_string(),
-                    LoopState::Underrun => "Buffering…".to_string(),
                     LoopState::Error(message) => message.clone(),
                 }
             };
@@ -2034,6 +2043,27 @@ impl App {
                 status_color,
             );
         }
+
+        // Loop level, independent of the Monitor/Cable volumes.
+        let volume_rect = if compact {
+            Rect::from_min_max(
+                Pos2::new(rect.left() + 7.0, rect.top() + 27.0),
+                Pos2::new(rect.right() - 7.0, rect.top() + 43.0),
+            )
+        } else {
+            Rect::from_min_max(
+                Pos2::new(rect.left() + 8.0, rect.top() + 59.0),
+                Pos2::new(rect.right() - 8.0, rect.top() + 79.0),
+            )
+        };
+        volume_bar(
+            ui,
+            volume_rect,
+            Id::new("loop_volume"),
+            self.cfg.loop_volume,
+            |volume| self.set_loop_volume(volume),
+            compact,
+        );
 
         let transport = transport.on_hover_text(if active {
             "Stop the looping track"

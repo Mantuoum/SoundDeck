@@ -37,6 +37,8 @@ pub struct Settings {
     pub loop_enabled: bool,
     /// Referenced file for the looping track; same path rules as sounds.
     pub loop_path: Option<String>,
+    /// Linear loop level, independent of the Monitor/Cable volumes.
+    pub loop_volume: f32,
     /// Parsed for older config files, but the window always starts at a fixed
     /// size, so this is no longer read or written.
     #[allow(dead_code)]
@@ -62,6 +64,7 @@ impl Default for Settings {
             preload_hotkey_sounds: true,
             loop_enabled: false,
             loop_path: None,
+            loop_volume: 1.0,
             window_size: None,
             animate_ui: true,
         }
@@ -84,6 +87,7 @@ impl Settings {
                 Some(trimmed.to_string())
             }
         });
+        self.loop_volume = self.loop_volume.clamp(0.0, 1.0);
     }
 }
 
@@ -327,6 +331,7 @@ mod tests {
         settings.animate_ui = false;
         settings.loop_enabled = true;
         settings.loop_path = Some("C:\\loops\\rain.flac".to_string());
+        settings.loop_volume = 0.42;
 
         let libraries = vec![
             LibraryConfig {
@@ -353,6 +358,7 @@ mod tests {
             loaded.settings.loop_path.as_deref(),
             Some("C:\\loops\\rain.flac")
         );
+        assert!((loaded.settings.loop_volume - 0.42).abs() < 1e-6);
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
@@ -376,6 +382,13 @@ mod tests {
         settings.loop_enabled = false;
         settings.normalize();
         assert_eq!(settings.loop_path.as_deref(), Some("C:\\loops\\rain.mp3"));
+
+        settings.loop_volume = 2.5;
+        settings.normalize();
+        assert!((settings.loop_volume - 1.0).abs() < 1e-6);
+        settings.loop_volume = -1.0;
+        settings.normalize();
+        assert_eq!(settings.loop_volume, 0.0);
     }
 
     #[test]

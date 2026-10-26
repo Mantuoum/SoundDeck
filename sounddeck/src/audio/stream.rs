@@ -26,23 +26,21 @@ use super::resample::StereoResampler;
 
 /// Frames per channel sent to the mixer. 1024 frames ≈ 21 ms.
 pub const LOOP_CHUNK_FRAMES: usize = 1024;
-/// Channel depth ≈ 1.36 s of look-ahead, ~0.5 MB.
-const CHANNEL_CHUNKS: usize = 64;
+/// Channel depth ≈ 0.34 s of look-ahead, ~130 KB.
+const CHANNEL_CHUNKS: usize = 16;
 /// A corrupt file can emit a few bad packets; this many in a row is fatal.
 const MAX_DECODE_ERRORS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoopState {
     Idle,
-    Buffering,
     Playing,
-    Underrun,
     Error(String),
 }
 
 impl LoopState {
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Buffering | Self::Playing | Self::Underrun)
+        matches!(self, Self::Playing)
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -64,10 +62,12 @@ impl LoopStream {
     ///
     /// The receiver must be dropped before `stop` so a decoder parked in `send`
     /// wakes up and the join stays prompt.
-    pub fn spawn(path: PathBuf, status: Arc<Mutex<LoopState>>) -> (Self, Receiver<Vec<f32>>) {
+    pub fn spawn(
+        path: PathBuf,
+        status: Arc<Mutex<LoopState>>,
+    ) -> Result<(Self, Receiver<Vec<f32>>)> {
         let (tx, rx) = bounded(CHANNEL_CHUNKS);
         let stop = Arc::new(AtomicBool::new(false));
-        set_status(&status, LoopState::Buffering);
 
         let join = {
             let stop = stop.clone();
@@ -81,20 +81,17 @@ impl LoopStream {
                         }
                     }
                 })
-                .ok()
+                .context("Could not start the loop decoder")?
         };
-        if join.is_none() {
-            set_status(&status, LoopState::Error("Could not start the loop decoder".into()));
-        }
 
-        (
+        Ok((
             Self {
                 stop,
-                join,
+                join: Some(join),
                 status,
             },
             rx,
-        )
+        ))
     }
 
     pub fn state(&self) -> LoopState {
@@ -408,8 +405,8 @@ mod tests {
         let path = dir.join("tone.wav");
         write_wav(&path, 0.25, 440.0);
 
-        let status = Arc::new(Mutex::new(LoopState::Idle));
-        let (stream, rx) = LoopStream::spawn(path.clone(), status.clone());
+        let status = Arc::new(Mutex::new(LoopState::Playing));
+        let (stream, rx) = LoopStream::spawn(path.clone(), status.clone()).unwrap();
 
         let expected = (0.25 * 48_000.0) as usize;
         let mut frames = 0usize;
@@ -449,8 +446,8 @@ mod tests {
         let path = dir.join("empty.wav");
         write_empty_wav(&path);
 
-        let status = Arc::new(Mutex::new(LoopState::Idle));
-        let (stream, rx) = LoopStream::spawn(path.clone(), status);
+        let status = Arc::new(Mutex::new(LoopState::Playing));
+        let (stream, rx) = LoopStream::spawn(path.clone(), status).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut error = None;
@@ -470,8 +467,9 @@ mod tests {
 
     #[test]
     fn missing_file_reports_an_error() {
-        let status = Arc::new(Mutex::new(LoopState::Idle));
-        let (stream, rx) = LoopStream::spawn(PathBuf::from("Z:\\no-such-file.wav"), status);
+        let status = Arc::new(Mutex::new(LoopState::Playing));
+        let (stream, rx) =
+            LoopStream::spawn(PathBuf::from("Z:\\no-such-file.wav"), status).unwrap();
         drop(rx);
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline && !stream.finished() {
