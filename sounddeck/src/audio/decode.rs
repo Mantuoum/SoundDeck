@@ -11,6 +11,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use super::resample::StereoResampler;
+
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
 pub const MAX_SECONDS: f32 = 20.0 * 60.0;
@@ -150,41 +152,9 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
 
 /// Convert interleaved source audio to 48 kHz stereo with linear interpolation.
 fn to_canonical(src: &[f32], channels: usize, rate: u32) -> Vec<f32> {
-    if channels == 0 || rate == 0 || src.is_empty() {
-        return Vec::new();
-    }
-    let frames = src.len() / channels;
-    if frames == 0 {
-        return Vec::new();
-    }
-
-    let ratio = SAMPLE_RATE as f64 / rate as f64;
-    let out_frames = ((frames as f64 * ratio).ceil() as usize).max(1);
-    let mut out = Vec::with_capacity(out_frames * CHANNELS);
-
-    // Pull the L/R pair from any channel layout.
-    let sample_at = |frame: usize, side: usize| -> f32 {
-        let frame = frame.min(frames - 1);
-        let index = if channels == 1 {
-            frame
-        } else {
-            frame * channels + side.min(channels - 1)
-        };
-        src[index]
-    };
-
-    for i in 0..out_frames {
-        let t = i as f64 / ratio;
-        let i0 = t.floor() as usize;
-        let i1 = (i0 + 1).min(frames - 1);
-        let frac = (t - i0 as f64) as f32;
-        let l0 = sample_at(i0, 0);
-        let r0 = sample_at(i0, 1);
-        let l1 = sample_at(i1, 0);
-        let r1 = sample_at(i1, 1);
-        out.push(l0 + (l1 - l0) * frac);
-        out.push(r0 + (r1 - r0) * frac);
-    }
+    let mut resampler = StereoResampler::new(rate, channels);
+    let mut out = resampler.push(src);
+    out.extend(resampler.finish());
     out
 }
 

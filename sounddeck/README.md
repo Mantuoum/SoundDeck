@@ -21,14 +21,19 @@ live in `config/` next to the executable.
   hotkey/RAM set. Hotkeys in background tabs never fire.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
+- **Looping track** (opt-in): enable it in Settings → Playback to show a loop
+  player under the meters. One file, streamed from disk, repeating forever. It
+  follows Monitor/Cable and master gain, plays underneath sound effects, and
+  keeps playing through `Stop all`, library switches, and tray minimize. No
+  hotkey, no seeking, no progress bar.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...).
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.
 - **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
-  outputs, with a reset button (or double-click the slider).
-- **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one bar per
-  output, zone colours, and a peak-hold marker.
+  outputs. Right-click the slider to reset it to `0.0 dB`.
+- **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one full-width
+  bar per output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
   - Global `Load hotkey sounds into RAM` switch.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
@@ -42,10 +47,14 @@ live in `config/` next to the executable.
   rename, remove with undo.
 - Missing file detection with click-to-locate.
 - System tray. **Minimize hides to the tray; Close quits the app.**
+- The sidebar compacts automatically below 620 px window height: the dB scale,
+  developer credit, and inline RAM row are hidden (the RAM switch stays in
+  Settings → Playback). When the loop player is visible on a short window, the
+  Monitor/Cable captions also collapse so the meters stay in view.
 - One instance per executable path. Launching the same exe again focuses the
   window that is already open (including one hidden in the tray).
-- Settings screen (`Ctrl+,` or the Settings button) for theme, window behaviour,
-  developer info, and opening the config folder.
+- Settings screen (`Ctrl+,` or the Settings button) for loop player, RAM preload,
+  theme, `Animate UI`, developer info, and opening the config folder.
 
 ## Keyboard
 
@@ -62,29 +71,47 @@ live in `config/` next to the executable.
 | `Space` | Play selected |
 | `F2` | Rename selected |
 
+## Looping track
+
+- Enable **Looping track** in Settings → Playback. The card appears under the peak
+  meter; until a file is chosen, Play is disabled.
+- Controls are Play/Stop plus the picker (folder icon) to choose or locate the file.
+  Start and stop are instant.
+- The path is remembered in `settings.json`, but playback always starts stopped.
+- A missing or corrupt file keeps its path and shows the error; the picker becomes
+  the Locate action. Play turns into Retry after a decode failure.
+- It is not a library sound: no search entry, no hotkey, no RAM preload. It keeps
+  playing through `Stop all`, tab switches, and tray minimize. Closing the app
+  stops it.
+
 ## Config files
 
 ```
 SoundDeck.exe
 config/
-  settings.json     window, devices, volumes, theme, layout, active tab
+  settings.json     window, devices, volumes, theme, layout, active tab, loop file
   libraries.json    tabs and the sounds registered in each tab
   themes/           one Markdown palette per theme
 ```
 
-Sounds keep their original paths; audio files are never copied. A legacy
-`sounddeck.json` is imported once on first launch and renamed to
-`sounddeck.v1.json.bak`. Each JSON file is written atomically and keeps one
-rolling `.bak`; interrupted writes are recovered on the next start.
+Sounds keep their original paths; audio files are never copied. The looping
+track is stored as `loop_enabled` and `loop_path` in `settings.json`, following
+the same reference-only rule. A legacy `sounddeck.json` is imported once on first
+launch and renamed to `sounddeck.v1.json.bak`. Each JSON file is written
+atomically and keeps one rolling `.bak`; interrupted writes are recovered on the
+next start.
 
 ## Audio notes
 
 - Shared-mode WASAPI at the device's mix format; internal format is 48 kHz stereo.
 - Two render streams are kept in sync from one mixer.
 - Triggers are exclusive: the previous voice gets a 5 ms fade-out while the new
-  one starts.
+  one starts. The looping track is deliberately exempt from this rule.
 - Decoded audio is cached only for hotkey sounds that are marked RAM.
 - Files without a hotkey always play from disk on demand.
+- The looping track is decoded by a dedicated thread and streamed through a small
+  buffer, so it is never counted in the RAM preload and has no 20-minute cap.
+- Sound effects are still capped at 20 minutes when loaded into memory.
 
 ## Hotkey limitations
 

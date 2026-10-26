@@ -1,12 +1,15 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use anyhow::{bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use super::decode::{CHANNELS, SAMPLE_RATE};
+use super::stream::{LoopState, LoopStream};
 use super::wasapi;
 
 const MIX_CHUNK_FRAMES: usize = 240; // 5 ms
@@ -153,6 +156,12 @@ struct Mixer {
     master_gain: f32,
     /// Peak since the last UI read, per output.
     meter: [f32; 2],
+    /// Streaming loop track. Kept out of `voices`: it never takes part in
+    /// exclusive playback and is fed from disk instead of RAM.
+    loop_rx: Option<Receiver<Vec<f32>>>,
+    loop_chunk: Vec<f32>,
+    loop_pos: usize,
+    loop_status: Option<Arc<Mutex<LoopState>>>,
 }
 
 impl Mixer {
@@ -194,6 +203,55 @@ impl Mixer {
                 voice.finished = true;
             }
         }
+
+        // Loop track: mixed alongside voices, before master gain. An empty
+        // channel means silence for the rest of this render, not a stop.
+        if let Some(rx) = self.loop_rx.as_ref() {
+            let frames = out.len() / CHANNELS;
+            let mut index = 0usize;
+            while index < frames {
+                if self.loop_pos >= self.loop_chunk.len() {
+                    match rx.try_recv() {
+                        Ok(chunk) => {
+                            self.loop_chunk = chunk;
+                            self.loop_pos = 0;
+                            set_loop_state(
+                                &self.loop_status,
+                                LoopState::Buffering,
+                                LoopState::Playing,
+                            );
+                        }
+                        Err(_) => {
+                            set_loop_state(
+                                &self.loop_status,
+                                LoopState::Playing,
+                                LoopState::Underrun,
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                let available = (self.loop_chunk.len() - self.loop_pos) / CHANNELS;
+                if available == 0 {
+                    self.loop_chunk.clear();
+                    self.loop_pos = 0;
+                    break;
+                }
+                let take = (frames - index).min(available);
+                let source = &self.loop_chunk[self.loop_pos..self.loop_pos + take * CHANNELS];
+                let start = index * CHANNELS;
+                for (dst, src) in out[start..start + take * CHANNELS]
+                    .iter_mut()
+                    .zip(source.iter())
+                {
+                    *dst += *src;
+                }
+                self.loop_pos += take * CHANNELS;
+                index += take;
+            }
+        }
+
         for sample in out.iter_mut() {
             *sample = (*sample * self.master_gain).clamp(-1.0, 1.0);
         }
@@ -243,6 +301,8 @@ pub struct Engine {
     events_rx: Receiver<AudioEvent>,
     mixer_stop: Arc<AtomicBool>,
     mixer_thread: Mutex<Option<JoinHandle<()>>>,
+    loop_stream: Mutex<Option<LoopStream>>,
+    loop_status: Arc<Mutex<LoopState>>,
 }
 
 impl Engine {
@@ -253,6 +313,10 @@ impl Engine {
             cable_gain: cable_volume.clamp(0.0, 1.0),
             master_gain: db_to_gain(master_gain_db),
             meter: [0.0; 2],
+            loop_rx: None,
+            loop_chunk: Vec::new(),
+            loop_pos: 0,
+            loop_status: None,
         }));
         let rings = [Arc::new(Ring::new(2.0)), Arc::new(Ring::new(2.0))];
         let (events_tx, events_rx) = unbounded();
@@ -276,6 +340,8 @@ impl Engine {
             events_rx,
             mixer_stop,
             mixer_thread: Mutex::new(mixer_thread),
+            loop_stream: Mutex::new(None),
+            loop_status: Arc::new(Mutex::new(LoopState::Idle)),
         }
     }
 
@@ -365,6 +431,74 @@ impl Engine {
         }
     }
 
+    /// Starts the background loop. Replaces any loop already playing.
+    ///
+    /// The decoder is attached immediately; audio begins as soon as the first
+    /// chunk arrives (a few milliseconds), so this never blocks the UI.
+    pub fn start_loop(&self, path: PathBuf) -> Result<()> {
+        if !path.is_file() {
+            bail!("File not found: {}", path.display());
+        }
+        self.stop_loop();
+
+        let (stream, rx) = LoopStream::spawn(path, self.loop_status.clone());
+        {
+            let Ok(mut mixer) = self.mixer.lock() else {
+                bail!("Audio mixer is unavailable");
+            };
+            mixer.loop_rx = Some(rx);
+            mixer.loop_chunk.clear();
+            mixer.loop_pos = 0;
+            mixer.loop_status = Some(self.loop_status.clone());
+        }
+        if let Ok(mut slot) = self.loop_stream.lock() {
+            *slot = Some(stream);
+        }
+        Ok(())
+    }
+
+    /// Stops the loop immediately. Dropping the receiver unblocks the decoder
+    /// even if it is parked in `send`, so the join is bounded.
+    pub fn stop_loop(&self) {
+        let rx = match self.mixer.lock() {
+            Ok(mut mixer) => {
+                mixer.loop_status = None;
+                mixer.loop_chunk.clear();
+                mixer.loop_pos = 0;
+                mixer.loop_rx.take()
+            }
+            Err(_) => None,
+        };
+        drop(rx);
+
+        let stream = self.loop_stream.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(stream) = stream {
+            stream.stop();
+        }
+        if let Ok(mut status) = self.loop_status.lock() {
+            *status = LoopState::Idle;
+        }
+    }
+
+    pub fn loop_state(&self) -> LoopState {
+        if let Ok(slot) = self.loop_stream.lock() {
+            if let Some(stream) = slot.as_ref() {
+                let state = stream.state();
+                if state.error().is_some() {
+                    return state;
+                }
+                if stream.finished() {
+                    return LoopState::Error("Loop track stopped".into());
+                }
+                return state;
+            }
+        }
+        self.loop_status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or(LoopState::Idle)
+    }
+
     pub fn active(&self) -> Vec<ActiveSound> {
         self.mixer
             .lock()
@@ -425,6 +559,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.stop_loop();
         if let Ok(mut devices) = self.devices.lock() {
             for slot in 0..2 {
                 if let Some(mut handle) = devices[slot].take() {
@@ -443,6 +578,20 @@ impl Drop for Engine {
 
 fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db.clamp(-60.0, 12.0) / 20.0)
+}
+
+/// Move the shared loop status from `from` to `to` if it currently matches.
+/// Used for mixer-side transitions (first chunk, underrun) without stomping on
+/// a decoder error.
+fn set_loop_state(status: &Option<Arc<Mutex<LoopState>>>, from: LoopState, to: LoopState) {
+    let Some(status) = status else {
+        return;
+    };
+    if let Ok(mut current) = status.lock() {
+        if *current == from {
+            *current = to;
+        }
+    }
 }
 
 fn peak_of(samples: &[f32]) -> f32 {
@@ -489,5 +638,103 @@ fn mixer_loop(
             next += Duration::from_millis(5);
         }
         thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod loop_tests {
+    use super::*;
+    use std::fs;
+    use std::time::Instant;
+
+    fn write_wav(path: &std::path::Path, seconds: f32) {
+        let rate = 48_000u32;
+        let frames = (rate as f32 * seconds) as u32;
+        let mut data = Vec::new();
+        for i in 0..frames {
+            let sample = ((i as f32 / rate as f32) * 220.0 * std::f32::consts::TAU).sin() * 0.3;
+            let value = (sample * 32_767.0) as i16;
+            data.extend_from_slice(&value.to_le_bytes());
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn start_reaches_playing_and_stop_is_idle() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("sounddeck-engine-loop-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loop.wav");
+        write_wav(&path, 0.2);
+
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        engine.start_loop(path).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && engine.loop_state() != LoopState::Playing {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(engine.loop_state(), LoopState::Playing);
+
+        engine.stop_loop();
+        assert_eq!(engine.loop_state(), LoopState::Idle);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_rejected_without_a_stream() {
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        assert!(engine
+            .start_loop(PathBuf::from("Z:\\no-such-loop-file.wav"))
+            .is_err());
+        assert_eq!(engine.loop_state(), LoopState::Idle);
+    }
+
+    #[test]
+    fn mixer_adds_the_loop_before_master_gain() {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut mixer = Mixer {
+            voices: Vec::new(),
+            monitor_gain: 1.0,
+            cable_gain: 1.0,
+            master_gain: 0.5,
+            meter: [0.0; 2],
+            loop_rx: Some(rx),
+            loop_chunk: Vec::new(),
+            loop_pos: 0,
+            loop_status: None,
+        };
+        tx.send(vec![0.25f32; MIX_CHUNK_FRAMES * CHANNELS])
+            .unwrap();
+
+        let mut out = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        mixer.render(&mut out);
+        assert!(out
+            .iter()
+            .all(|sample| (*sample - 0.125).abs() < 1e-6));
+
+        // Channel drained: silence, not a stop.
+        out.fill(0.0);
+        mixer.render(&mut out);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert!(mixer.loop_rx.is_some());
     }
 }

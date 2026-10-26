@@ -33,6 +33,10 @@ pub struct Settings {
     pub master_gain_db: f32,
     pub link_volumes: bool,
     pub preload_hotkey_sounds: bool,
+    /// Shows the loop player in the sidebar. Does not auto-start playback.
+    pub loop_enabled: bool,
+    /// Referenced file for the looping track; same path rules as sounds.
+    pub loop_path: Option<String>,
     /// Parsed for older config files, but the window always starts at a fixed
     /// size, so this is no longer read or written.
     #[allow(dead_code)]
@@ -56,6 +60,8 @@ impl Default for Settings {
             master_gain_db: 0.0,
             link_volumes: true,
             preload_hotkey_sounds: true,
+            loop_enabled: false,
+            loop_path: None,
             window_size: None,
             animate_ui: true,
         }
@@ -70,6 +76,14 @@ impl Settings {
         self.monitor_volume = self.monitor_volume.clamp(0.0, 1.0);
         self.cable_volume = self.cable_volume.clamp(0.0, 1.0);
         self.master_gain_db = self.master_gain_db.clamp(0.0, 12.0);
+        self.loop_path = self.loop_path.take().and_then(|path| {
+            let trimmed = path.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     }
 }
 
@@ -311,6 +325,8 @@ mod tests {
         settings.active_library = 2;
         settings.master_gain_db = 3.5;
         settings.animate_ui = false;
+        settings.loop_enabled = true;
+        settings.loop_path = Some("C:\\loops\\rain.flac".to_string());
 
         let libraries = vec![
             LibraryConfig {
@@ -332,9 +348,34 @@ mod tests {
         assert_eq!(loaded.settings.active_library, 2);
         assert_eq!(loaded.settings.master_gain_db, 3.5);
         assert!(!loaded.settings.animate_ui);
+        assert!(loaded.settings.loop_enabled);
+        assert_eq!(
+            loaded.settings.loop_path.as_deref(),
+            Some("C:\\loops\\rain.flac")
+        );
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn loop_settings_normalize() {
+        let mut settings = Settings::default();
+        assert!(!settings.loop_enabled);
+        assert!(settings.loop_path.is_none());
+
+        settings.loop_path = Some("   ".into());
+        settings.normalize();
+        assert!(settings.loop_path.is_none());
+
+        settings.loop_path = Some(" C:\\loops\\rain.mp3 ".into());
+        settings.normalize();
+        assert_eq!(settings.loop_path.as_deref(), Some("C:\\loops\\rain.mp3"));
+
+        // Disabling the feature keeps the path.
+        settings.loop_enabled = false;
+        settings.normalize();
+        assert_eq!(settings.loop_path.as_deref(), Some("C:\\loops\\rain.mp3"));
     }
 
     #[test]

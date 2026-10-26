@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 
 use crate::audio::engine::{AudioEvent, DeviceRoute, Engine, Slot};
+use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
@@ -174,6 +175,9 @@ pub struct App {
     meter_db: [f32; 2],
     meter_peak_db: [f32; 2],
     meter_peak_at: [Instant; 2],
+    loop_state: LoopState,
+    loop_missing: bool,
+    loop_checked_at: Instant,
 }
 
 impl App {
@@ -403,6 +407,9 @@ impl App {
             meter_db: [-60.0; 2],
             meter_peak_db: [-60.0; 2],
             meter_peak_at: [Instant::now(); 2],
+            loop_state: LoopState::Idle,
+            loop_missing: false,
+            loop_checked_at: Instant::now() - Duration::from_secs(10),
         };
 
         // Fingerprints so a slider move never rewrites the library file.
@@ -761,6 +768,94 @@ impl App {
             }
             self.add_files(files);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Loop track
+    // ---------------------------------------------------------------------
+
+    /// Re-check the loop file at most every two seconds. A cheap metadata call,
+    /// enough to notice a file appearing or disappearing between actions.
+    fn refresh_loop_missing(&mut self, force: bool) {
+        let now = Instant::now();
+        if !force && now.duration_since(self.loop_checked_at) < Duration::from_secs(2) {
+            return;
+        }
+        self.loop_checked_at = now;
+        self.loop_missing = self.cfg.loop_enabled
+            && self
+                .cfg
+                .loop_path
+                .as_deref()
+                .map(|path| !model::resolve_path(path).is_file())
+                .unwrap_or(false);
+    }
+
+    fn pick_loop_file(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("Audio files", SUPPORTED_EXTENSIONS)
+            .add_filter("All files", &["*"])
+            .set_title("Choose a looping track");
+        if let Some(stored) = self.cfg.loop_path.as_deref() {
+            let current = model::resolve_path(stored);
+            if let Some(parent) = current.parent().filter(|parent| parent.exists()) {
+                dialog = dialog.set_directory(parent);
+            }
+        } else if let Some(dir) = self.last_dir.clone() {
+            dialog = dialog.set_directory(dir);
+        }
+
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            self.last_dir = Some(parent.to_path_buf());
+        }
+
+        let stored = model::portable_path(&path);
+        if self.cfg.loop_path.as_deref() == Some(stored.as_str()) {
+            return;
+        }
+        let was_active = self.loop_state.is_active();
+        let name = display_name(&path);
+        self.cfg.loop_path = Some(stored);
+        self.mark_dirty();
+        self.loop_missing = false;
+        self.loop_checked_at = Instant::now() - Duration::from_secs(10);
+
+        if was_active {
+            match self.engine.start_loop(path) {
+                Ok(()) => self.log(StatusKind::Info, format!("Loop track: {name}")),
+                Err(err) => self.log(StatusKind::Error, format!("Loop track: {err}")),
+            }
+        }
+        self.loop_state = self.engine.loop_state();
+        self.refresh_loop_missing(true);
+    }
+
+    fn toggle_loop(&mut self) {
+        if self.loop_state.is_active() {
+            self.engine.stop_loop();
+            self.loop_state = LoopState::Idle;
+            self.log(StatusKind::Info, "Loop track stopped");
+            return;
+        }
+
+        let Some(stored) = self.cfg.loop_path.clone() else {
+            return;
+        };
+        let path = model::resolve_path(&stored);
+        let name = display_name(&path);
+        match self.engine.start_loop(path) {
+            Ok(()) => {
+                self.loop_state = self.engine.loop_state();
+                self.log(StatusKind::Info, format!("Loop track: {name}"));
+            }
+            Err(err) => {
+                self.log(StatusKind::Error, format!("Loop track: {err}"));
+            }
+        }
+        self.refresh_loop_missing(true);
     }
 
     fn locate_sound(&mut self, id: u64) {
@@ -1319,7 +1414,20 @@ impl App {
         // on short windows or the meters end up below the fold.
         let compact = ui.available_height() < 620.0;
         let gap = if compact { 0.35 } else { 1.0 };
-        let reserve = if compact { 44.0 } else { 84.0 };
+        // On the 960x540 default size there is no room for the device captions
+        // once the loop player is pinned above Settings. They reappear when the
+        // window is taller or the loop player is disabled.
+        let hide_device_labels = compact && self.cfg.loop_enabled;
+        let loop_reserve = if self.cfg.loop_enabled {
+            if compact {
+                32.0
+            } else {
+                76.0
+            }
+        } else {
+            0.0
+        };
+        let reserve = (if compact { 44.0 } else { 84.0 }) + loop_reserve;
         let content_height = (ui.available_height() - reserve).max(120.0);
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), content_height),
@@ -1340,7 +1448,9 @@ impl App {
                         section_line(ui);
                         ui.add_space(4.0 * gap);
 
-                        ui.label(RichText::new("Monitor").size(12.5).color(theme::muted()));
+                        if !hide_device_labels {
+                            ui.label(RichText::new("Monitor").size(12.5).color(theme::muted()));
+                        }
                         self.device_selector(ui, Slot::Monitor);
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Monitor);
@@ -1368,7 +1478,9 @@ impl App {
                         link_resp.on_hover_text("Link monitor and cable volumes");
 
                         ui.add_space(2.0 * gap);
-                        ui.label(RichText::new("Cable").size(12.5).color(theme::muted()));
+                        if !hide_device_labels {
+                            ui.label(RichText::new("Cable").size(12.5).color(theme::muted()));
+                        }
                         self.device_selector(ui, Slot::Cable);
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Cable);
@@ -1496,6 +1608,10 @@ impl App {
                     .clicked()
                 {
                     self.show_settings = true;
+                }
+                if self.cfg.loop_enabled {
+                    ui.add_space(6.0);
+                    self.loop_card(ui, compact);
                 }
                 if !compact {
                     ui.add_space(4.0);
@@ -1684,6 +1800,267 @@ impl App {
                 self.set_slot_volume(slot, position_to_volume(position));
             }
         });
+    }
+
+    /// Background loop player. Drawn only when enabled in Settings.
+    fn loop_card(&mut self, ui: &mut Ui, compact: bool) {
+        let path = self.cfg.loop_path.as_deref().map(model::resolve_path);
+        let name = path
+            .as_ref()
+            .map(|path| display_name(path))
+            .unwrap_or_else(|| "No loop file".to_string());
+        let active = self.loop_state.is_active();
+        let error = self.loop_state.error().map(str::to_string);
+        let missing = path.is_some() && self.loop_missing;
+        let has_file = path.is_some() && !missing;
+        let playable = has_file && error.is_none();
+        let retry = has_file && error.is_some();
+        let height = if compact { 26.0 } else { 66.0 };
+        let (rect, card_response) = ui.allocate_exact_size(
+            Vec2::new(ui.available_width(), height),
+            Sense::hover(),
+        );
+        let hover = anim::hover(ui, Id::new("loop_card"), ui.rect_contains_pointer(rect));
+        let painter = ui.painter();
+
+        let fill = theme::mix(theme::card(), theme::text(), 0.03 * hover);
+        let fill = if active {
+            theme::mix(fill, theme::accent(), 0.08)
+        } else {
+            fill
+        };
+        let border = if missing || error.is_some() {
+            theme::alpha(theme::red(), 150)
+        } else if active {
+            theme::alpha(theme::accent(), 150)
+        } else {
+            theme::border_soft()
+        };
+        painter.rect(
+            rect,
+            CornerRadius::same(theme::RADIUS_LG),
+            fill,
+            Stroke::new(1.0_f32, border),
+            StrokeKind::Inside,
+        );
+
+        let (transport_rect, pick_rect) = if compact {
+            (
+                Rect::from_min_size(Pos2::new(rect.left() + 7.0, rect.top() + 2.0), Vec2::splat(22.0)),
+                Rect::from_min_size(
+                    Pos2::new(rect.right() - 23.0, rect.top() + 5.0),
+                    Vec2::splat(16.0),
+                ),
+            )
+        } else {
+            (
+                Rect::from_min_size(
+                    Pos2::new(rect.left() + 10.0, rect.top() + 30.0),
+                    Vec2::new(78.0, 26.0),
+                ),
+                Rect::from_min_size(
+                    Pos2::new(rect.right() - 26.0, rect.top() + 10.0),
+                    Vec2::splat(16.0),
+                ),
+            )
+        };
+
+        let transport = ui.interact(
+            transport_rect,
+            Id::new("loop_transport"),
+            if playable || retry || active {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        let pick = ui.interact(pick_rect, Id::new("loop_pick"), Sense::click());
+
+        // Transport button: filled accent while playing, outlined otherwise.
+        let (bg, fg, stroke) = if active {
+            (theme::accent(), theme::bg(), theme::accent())
+        } else if playable || retry {
+            (theme::field(), theme::text(), theme::border())
+        } else {
+            (theme::field(), theme::faint(), theme::border_soft())
+        };
+        let bg = if transport.hovered() && (playable || retry || active) {
+            theme::mix(bg, theme::text(), 0.08)
+        } else {
+            bg
+        };
+        painter.rect(
+            transport_rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            bg,
+            Stroke::new(1.0_f32, stroke),
+            StrokeKind::Inside,
+        );
+        let press = anim::press(
+            ui,
+            Id::new("loop_transport_press"),
+            transport.is_pointer_button_down_on(),
+        );
+        press_overlay(painter, transport_rect.shrink(1.5), theme::RADIUS_MD, press);
+
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(transport_rect.left() + 14.0, transport_rect.center().y),
+            Vec2::splat(12.0),
+        );
+        if active {
+            paint_stop_icon(painter, icon_rect, fg);
+        } else {
+            paint_play_icon(painter, icon_rect, fg);
+        }
+        if !compact {
+            painter.text(
+                Pos2::new(transport_rect.left() + 25.0, transport_rect.center().y),
+                Align2::LEFT_CENTER,
+                if active {
+                    "Stop"
+                } else if retry {
+                    "Retry"
+                } else {
+                    "Play"
+                },
+                theme::ui_font(11.5),
+                fg,
+            );
+        }
+
+        // Pick / Locate.
+        let pick_hover = anim::hover(ui, Id::new("loop_pick_hover"), pick.hovered());
+        if pick_hover > 0.01 {
+            painter.rect_filled(
+                pick_rect.expand(3.0),
+                CornerRadius::same(theme::RADIUS_MD),
+                theme::alpha(theme::accent(), (16.0 * pick_hover) as u8),
+            );
+        }
+        paint_folder_icon(
+            painter,
+            pick_rect,
+            if pick.hovered() {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
+        );
+
+        // FILE / LOOP badge.
+        let name_left = if compact { rect.left() + 62.0 } else { rect.left() + 52.0 };
+        let name_right = pick_rect.left() - 6.0;
+        if compact {
+            painter.text(
+                Pos2::new(rect.left() + 37.0, rect.top() + 13.0),
+                Align2::LEFT_CENTER,
+                "LOOP",
+                theme::ui_font(7.5),
+                theme::accent(),
+            );
+        } else {
+            let badge = Rect::from_min_size(
+                Pos2::new(rect.left() + 10.0, rect.top() + 11.0),
+                Vec2::new(34.0, 14.0),
+            );
+            painter.rect(
+                badge,
+                CornerRadius::same(theme::RADIUS_SM),
+                theme::alpha(theme::accent(), 16),
+                Stroke::new(1.0_f32, theme::alpha(theme::accent(), 70)),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                "LOOP",
+                theme::ui_font(8.5),
+                theme::accent(),
+            );
+        }
+
+        let name_color = if missing || error.is_some() {
+            theme::red()
+        } else if playable || active {
+            theme::text()
+        } else {
+            theme::faint()
+        };
+        let shown = if compact {
+            if missing {
+                "File missing"
+            } else {
+                error.as_deref().unwrap_or(name.as_str())
+            }
+        } else {
+            name.as_str()
+        };
+        let name_width = (name_right - name_left).max(20.0);
+        let font = theme::ui_font(if compact { 11.0 } else { 11.5 });
+        painter.text(
+            Pos2::new(name_left, rect.top() + if compact { 13.0 } else { 18.0 }),
+            Align2::LEFT_CENTER,
+            theme::truncate(painter, shown, font, name_width),
+            theme::ui_font(if compact { 11.0 } else { 11.5 }),
+            name_color,
+        );
+
+        if !compact {
+            let status = if missing {
+                "File missing".to_string()
+            } else {
+                match &self.loop_state {
+                    LoopState::Idle => "Ready".to_string(),
+                    LoopState::Buffering => "Loading…".to_string(),
+                    LoopState::Playing => "Playing".to_string(),
+                    LoopState::Underrun => "Buffering…".to_string(),
+                    LoopState::Error(message) => message.clone(),
+                }
+            };
+            let status_color = if missing || error.is_some() {
+                theme::red()
+            } else if active {
+                theme::accent()
+            } else {
+                theme::faint()
+            };
+            let status_left = transport_rect.right() + 9.0;
+            let status_width = (rect.right() - 10.0 - status_left).max(20.0);
+            painter.text(
+                Pos2::new(status_left, transport_rect.center().y),
+                Align2::LEFT_CENTER,
+                theme::truncate(painter, &status, theme::ui_font(10.5), status_width),
+                theme::ui_font(10.5),
+                status_color,
+            );
+        }
+
+        let transport = transport.on_hover_text(if active {
+            "Stop the looping track"
+        } else if retry {
+            "Try loading the loop file again"
+        } else {
+            "Play the looping track"
+        });
+        let pick = pick.on_hover_text(if missing {
+            "Locate the loop file"
+        } else {
+            "Choose a loop file"
+        });
+        if pick.clicked() {
+            self.pick_loop_file();
+            ui.ctx().request_repaint();
+        }
+        if transport.clicked() && (playable || retry || active) {
+            self.toggle_loop();
+            ui.ctx().request_repaint();
+        }
+        if let Some(text) = error
+            .clone()
+            .or_else(|| path.as_ref().map(|path| path.display().to_string()))
+        {
+            card_response.on_hover_text(text);
+        }
     }
 
     /// Compact two-output peak meter with a dBFS scale.
@@ -2371,6 +2748,24 @@ impl App {
                     .max_height(max_height)
                     .show(ui, |ui| {
                         section_label(ui, "PLAYBACK");
+                        ui.add_space(4.0);
+                        let mut loop_enabled = self.cfg.loop_enabled;
+                        if ui.checkbox(&mut loop_enabled, "Looping track").changed() {
+                            self.cfg.loop_enabled = loop_enabled;
+                            if !loop_enabled {
+                                self.engine.stop_loop();
+                                self.loop_state = LoopState::Idle;
+                            }
+                            self.loop_checked_at =
+                                Instant::now() - Duration::from_secs(10);
+                            self.refresh_loop_missing(true);
+                            self.mark_dirty();
+                        }
+                        ui.label(
+                            RichText::new("Show a loop player under the meters.")
+                                .size(10.5)
+                                .color(theme::faint()),
+                        );
                         ui.add_space(4.0);
                         let ram_state = self.ram_summary();
                         let enabled = ram_state.is_some();
@@ -3063,6 +3458,16 @@ impl App {
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
+        let previous_loop = self.loop_state.clone();
+        self.loop_state = self.engine.loop_state();
+        if let LoopState::Error(message) = &self.loop_state {
+            if !matches!(previous_loop, LoopState::Error(_)) {
+                let message = message.clone();
+                self.log(StatusKind::Error, format!("Loop track: {message}"));
+            }
+        }
+        self.refresh_loop_missing(false);
+
         if self.dirty && self.last_save.elapsed() > Duration::from_millis(700) {
             self.save_now();
         }
@@ -3223,10 +3628,16 @@ impl eframe::App for App {
         self.drag_ghost(ctx);
         self.modals(ctx);
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // The loop owns a decoder thread; stop it before the engine is dropped.
+        self.engine.stop_loop();
+    }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.engine.stop_loop();
         self.cfg.active_library = self.active_library;
         let _ = self.persist();
     }
@@ -4437,6 +4848,54 @@ fn draw_level_bar(painter: &egui::Painter, bar: Rect, db: f32, peak_db: f32) {
             Stroke::new(1.0_f32, theme::text()),
         );
     }
+}
+
+fn paint_play_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let center = rect.center();
+    let size = rect.width().min(rect.height()) * 0.34;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(center.x - size * 0.55, center.y - size),
+            Pos2::new(center.x - size * 0.55, center.y + size),
+            Pos2::new(center.x + size, center.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+fn paint_stop_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let side = rect.width().min(rect.height()) * 0.52;
+    painter.rect_filled(
+        Rect::from_center_size(rect.center(), Vec2::splat(side)),
+        CornerRadius::same(2),
+        color,
+    );
+}
+
+fn paint_folder_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let width = rect.width();
+    let height = rect.height();
+    let stroke = Stroke::new(1.2_f32, color);
+    let body = Rect::from_min_max(
+        Pos2::new(rect.left() + width * 0.1, rect.top() + height * 0.32),
+        Pos2::new(rect.right() - width * 0.1, rect.bottom() - height * 0.12),
+    );
+    painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
+    painter.line_segment(
+        [
+            Pos2::new(rect.left() + width * 0.22, rect.top() + height * 0.32),
+            Pos2::new(rect.left() + width * 0.22, rect.top() + height * 0.2),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(rect.left() + width * 0.22, rect.top() + height * 0.2),
+            Pos2::new(rect.left() + width * 0.48, rect.top() + height * 0.2),
+        ],
+        stroke,
+    );
 }
 
 fn paint_rotate_icon(painter: &egui::Painter, rect: Rect, color: Color32, clockwise: bool) {

@@ -197,6 +197,8 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         link_volumes: legacy.link_volumes,
         preload_hotkey_sounds: legacy.preload_hotkey_sounds,
         window_size: legacy.window_size,
+        loop_enabled: false,
+        loop_path: None,
         animate_ui: true,
     };
 
