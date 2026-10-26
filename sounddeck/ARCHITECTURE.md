@@ -137,6 +137,8 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `loop_volume` | Linear `0..1` loop level, independent of outputs |
 | `window_size` | Parsed for old files, ignored |
 | `animate_ui` | UI motion preference |
+| `minimize_to_tray` | Minimize hides to the tray instead of the taskbar |
+| `show_gain_slider` | Show the master-gain slider in the board sidebar |
 
 `Settings::normalize()` clamps volumes, gain, trims/empties the loop path, and fills
 missing fields through `#[serde(default)]`.
@@ -289,8 +291,12 @@ if late, and pushes to each `Ring` only when that output has a consumer.
   the UI can flash the card.
 - Registration failures are sent back as `Registered` events and shown under the hotkey
   pill plus the activity log.
-- The tray icon supports left-click/double-click show, right-click menu (Show, Stop
-  all, Quit), and a tooltip updated with playing/RAM counts.
+- The tray icon supports double-click show/hide, right-click menu (Show/Hide, Stop
+  all, Quit), and a tooltip updated with playing/RAM counts. Single left-click is
+  deliberately inert.
+- Minimize follows `minimize_to_tray`: the custom button and an observed OS minimize
+  hide to the tray when enabled, otherwise the window stays in the taskbar. Showing
+  from the tray restores, focuses and clears stale meter peaks.
 - Only the active library's hotkeys are registered. Win-key chords and mouse buttons
   are not supported; no administrator rights are needed.
 
@@ -317,8 +323,8 @@ if late, and pushes to each `Ring` only when that output has a consumer.
 
 - **Title bar:** logo, library tabs, window buttons; draggable except over tabs.
 - **Sidebar:** Load sounds, layout switch, Monitor/Cable devices + volumes + link,
-  master gain, RAM row, peak meter, loop card (when enabled), Settings button.
-  Compact layout (<620 px sidebar height) hides labels, dB scale, credit and inline RAM.
+  master gain (optional), peak meter, loop card (when enabled), Settings button.
+  Compact layout (<620 px sidebar height) hides labels, dB scale and credit.
 - **Main page:** search toolbar + RAM pill, grid/list of the active library, empty/no
   results states, drop handling.
 - **Cards/rows:** name, hotkey pill, RAM chip, missing state, volume bar, progress
@@ -331,12 +337,15 @@ if late, and pushes to each `Ring` only when that output has a consumer.
 ### Settings screen
 
 - Reached from the sidebar, `Ctrl+,`, or `--settings`; replaces the board.
-- Left rail: Back, Playback, Audio, Appearance, About (bottom), autosave note, version.
-- Content: fixed header + per-tab scroll; grouped cards and label/control rows;
-  `SettingsTab` holds the tab metadata.
+- Left rail: Back, Playback, Appearance, Window, About (bottom).
+- Content: fixed header + per-tab scroll; grouped cards and label/control rows.
+  `SettingsTab` holds the tab metadata. Text is intentionally terse.
+- Playback owns loop enable/file and hotkey RAM; Appearance owns theme/motion; Window
+  owns minimize-to-tray and sidebar gain visibility; About owns version/config/dev.
+- Devices, output volumes, link and master gain live in the sidebar, not Settings.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
 - Shared helpers: `settings_group`, `settings_row`, `settings_switch`,
-  `settings_nav_item`, `settings_back`, `gain_control`.
+  `settings_nav_item`, `settings_back`.
 - Board-only shortcuts are disabled while Settings is open; `Ctrl+Q` still quits.
 
 ### Modals
@@ -395,16 +404,16 @@ reloads. The folder is never scanned automatically.
 
 ### Volume and gain
 
-Sound volume bars and Settings rows use `ui/volume.rs`. Output sliders use the same
-curve. `set_slot_volume` applies the link rule. Master gain is dB-only and global.
+Sound volume bars and the loop card use `ui/volume.rs`. Output sliders use the same
+curve. `set_slot_volume` applies the link rule. Master gain is dB-only and global;
+the sidebar row can be hidden in Settings → Window.
 All values are persisted immediately (debounced).
 
 ### Loop
 
-Enable in Settings → Playback. Choosing a file stores `loop_path`. Play starts the
-decoder thread and attaches its channel; Stop detaches and joins. The card's bar and
-Settings row change `loop_volume`. It survives tab switches, `Stop all`, and tray
-minimize; it stops on quit or when disabled.
+Enable in Settings → Playback and choose the file there. Play/Stop and volume live on
+the board loop card; it survives tab switches, `Stop all`, and tray minimize, and
+stops on quit or when disabled.
 
 ### Settings and version
 

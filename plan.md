@@ -586,7 +586,7 @@ Deploy to `review\SoundDeck.exe` after each UI-visible commit.
   remember size), loop hotkey.
 - **Settings search / persisted tab** only if the tab count grows.
 - **Developer block** still needs real name/role/link/blurb.
-- **Native UI rewrite** remains parked (section 8).
+- **Native UI rewrite** remains parked (section 9).
 
 ### 6.5 As built
 
@@ -627,14 +627,13 @@ the baseline above is the acceptance reference.
 
 **New setting:** `minimize_to_tray: bool`, default **false** (taskbar). Existing
 configs without the field also get taskbar behaviour; this is a deliberate change from
-0.2.0. It lives in a new **Window** Settings tab:
+0.2.0. It lives in the **Window** Settings tab, alongside the sidebar gain toggle:
 
-- Title: “Window”, subtitle: “Tray and taskbar behaviour.”
-- Group “Minimize”: row “Minimize to tray”, switch, description
-  “On: minimizing hides SoundDeck to the tray. Off: it keeps a taskbar button.”
-- Group “Tray”: read-only notes:
-  - “Double-click the icon” → “Show or hide SoundDeck.”
-  - “Right-click the icon” → “Show/Hide, Stop all, Quit.”
+- Tabs: Playback, Appearance, Window, About. There is no Audio tab; device, volume,
+  link and gain controls live only in the board sidebar.
+- Window tab, group “Tray”: row “Minimize to tray”, switch (no description).
+- Window tab, group “Sidebar”: row “Show gain”, switch.
+- No tray help text; the menu and double-click are discoverable.
 
 **Minimize routing**
 
@@ -725,7 +724,7 @@ substitute for a proper idle path.
 
 Profile the visible frame cost: shape count, text galleys, hover tweens, and GPU
 upload. Cache static chrome or reduce per-frame allocations only after the counters
-show the UI is the cost. The native rewrite remains a separate decision (section 8).
+show the UI is the cost. The native rewrite remains a separate decision (section 9).
 
 ### 7.4 RAM expectation
 
@@ -799,13 +798,70 @@ No audio format, routing, volume, or schema changes beyond `minimize_to_tray`.
   forward for memory.
 - The toggle lives in a new **Window** tab.
 - Performance is measured first with `--stats`; the mixer/repaint changes follow.
+- Sidebar gain visibility is a new `show_gain_slider` setting (default `true`), in the
+  same Window tab.
+- Settings text and duplicated controls are trimmed in §8 before the tray work.
 
-## 8. Far-future: native UI rewrite (not scheduled)
+## 8. Settings simplification
+
+Status: **implemented with the tray commit.** One home per control; terse copy.
+
+### 8.1 Ownership split
+
+| Control | Home |
+| --- | --- |
+| Monitor/Cable device, volume, link | Board sidebar only |
+| Master gain | Board sidebar only (hideable) |
+| Refresh devices | Device dropdown menu |
+| Loop enable + file | Settings → Playback |
+| Loop Play/Stop + volume | Board loop card only |
+| Hotkey RAM | Settings → Playback; toolbar pill stays as a quick status/toggle |
+| Theme / Reload / Animate UI | Settings → Appearance |
+| Minimize to tray / Show gain | Settings → Window |
+| Version / config / developer | Settings → About |
+
+The Settings **Audio** tab and the sidebar RAM row are removed. Audio settings are not
+duplicated; loop transport/volume are not duplicated.
+
+### 8.2 Copy rules
+
+- No page subtitles.
+- No group descriptions.
+- No row descriptions.
+- No loop duration/size/streaming meta line.
+- No rail autosave note or rail version.
+- No About portable paragraph or config-file list.
+- Labels shortened: “Load into RAM”, “Show gain”, “Open”, “Back”.
+
+### 8.3 Layout rules
+
+- Header: title only, 10 px gap.
+- Playback: “Looping track” (Enabled switch, file row) and “Hotkey sounds”
+  (Load into RAM switch, count).
+- Appearance: “Theme” (dropdown, Reload) and “Motion” (Animate UI).
+- Window: “Tray” (Minimize to tray) and “Sidebar” (Show gain).
+- About: SoundDeck/version/config, Developer.
+- List layout: content column capped at 1100 px and centred; the volume track spans
+  the free space between the name column and the right-hand controls instead of
+  floating as a short bar on maximized windows.
+- Sidebar: gain row hidden when disabled; no RAM row; device refresh inside each
+  device dropdown.
+
+### 8.4 Validation
+
+- 960×540 and maximized screenshots for each tab.
+- Toggle gain off/on; restart persists it.
+- Toggle minimize-to-tray; custom minimize hides to tray when on, taskbar when off.
+- Single-click tray is inert; double-click toggles; right-click menu works.
+- No Settings control duplicates a sidebar control.
+- README/ARCHITECTURE updated; tests stay green.
+
+## 9. Far-future: native UI rewrite (not scheduled)
 
 Status: **parked.** No work in this plan. Revisit only after the current feature set is
 stable and the numbers below justify it.
 
-### 8.1 Why consider it
+### 9.1 Why consider it
 
 egui is immediate-mode: it rebuilds the frame and currently asks for a repaint every
 120 ms even when idle (33 ms while the meter moves). A retained-mode native UI can
@@ -818,7 +874,7 @@ Goals, in order:
 2. Lower idle CPU and memory: no constant frame rebuild, no steady repaint.
 3. Optional: drop UI animations or leave them default-off.
 
-### 8.2 Decision gate (measure before rewriting)
+### 9.2 Decision gate (measure before rewriting)
 
 Release build, review config, 960×540 and maximized:
 
@@ -839,7 +895,7 @@ Cheap egui wins to try first:
 - Default `Animate UI` off, or remove the animation layer.
 - Cache galleys and static chrome; reduce shapes per frame.
 
-### 8.3 Candidate frameworks
+### 9.3 Candidate frameworks
 
 | Option | Pros | Cons |
 | --- | --- | --- |
@@ -853,7 +909,7 @@ Recommendation if the gate is passed: prototype the board shell + one Settings t
 both **Slint** and **Win32 + Direct2D**, then pick on font/IME/DPI/tray effort and
 measured idle cost. Do not start with the full app.
 
-### 8.4 What must not change
+### 9.4 What must not change
 
 - `audio/`, `storage/`, `hotkeys.rs`, `model.rs` and the config schema are
   framework-agnostic and stay.
@@ -863,7 +919,7 @@ measured idle cost. Do not start with the full app.
   activity log, modals, settings tabs keep working.
 - Windows integration (WASAPI, `RegisterHotKey`, tray icon, `PrintWindow` QA) remains.
 
-### 8.5 Migration sketch
+### 9.5 Migration sketch
 
 1. Extract UI state and actions from `app.rs` into a framework-agnostic layer
    (`UiState`, `Action`); useful even without a rewrite.
@@ -874,7 +930,7 @@ measured idle cost. Do not start with the full app.
 5. Run old and new builds side by side for parity and performance; ship only when
    screenshots, interaction checklist, idle CPU/RAM and DPI tests pass.
 
-### 8.6 Risks
+### 9.6 Risks
 
 - Multi-week effort with a real regression surface; the current UI already works.
 - Accessibility/IME and font rendering differ per framework and need explicit testing.

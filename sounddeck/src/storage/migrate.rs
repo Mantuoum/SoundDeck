@@ -201,6 +201,8 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         loop_path: None,
         loop_volume: 1.0,
         animate_ui: true,
+        minimize_to_tray: false,
+        show_gain_slider: true,
     };
 
     let libraries_path = super::libraries_path(base);

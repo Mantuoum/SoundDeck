@@ -44,6 +44,10 @@ pub struct Settings {
     #[allow(dead_code)]
     pub window_size: Option<[f32; 2]>,
     pub animate_ui: bool,
+    /// Minimize hides to the tray instead of the taskbar.
+    pub minimize_to_tray: bool,
+    /// Show the master-gain slider in the board sidebar.
+    pub show_gain_slider: bool,
 }
 
 impl Default for Settings {
@@ -67,6 +71,8 @@ impl Default for Settings {
             loop_volume: 1.0,
             window_size: None,
             animate_ui: true,
+            minimize_to_tray: false,
+            show_gain_slider: true,
         }
     }
 }
@@ -332,6 +338,8 @@ mod tests {
         settings.loop_enabled = true;
         settings.loop_path = Some("C:\\loops\\rain.flac".to_string());
         settings.loop_volume = 0.42;
+        settings.minimize_to_tray = true;
+        settings.show_gain_slider = false;
 
         let libraries = vec![
             LibraryConfig {
@@ -359,6 +367,8 @@ mod tests {
             Some("C:\\loops\\rain.flac")
         );
         assert!((loaded.settings.loop_volume - 0.42).abs() < 1e-6);
+        assert!(loaded.settings.minimize_to_tray);
+        assert!(!loaded.settings.show_gain_slider);
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);

@@ -307,7 +307,7 @@ fn vk_from_egui(key: eframe::egui::Key) -> Option<u32> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayCommand {
-    Show,
+    Toggle,
     StopAll,
     Quit,
 }
@@ -434,6 +434,16 @@ pub fn focus_main_window() {
 }
 
 #[cfg(windows)]
+pub fn main_window_minimized() -> bool {
+    unsafe { win::main_window_minimized() }
+}
+
+#[cfg(not(windows))]
+pub fn main_window_minimized() -> bool {
+    false
+}
+
+#[cfg(windows)]
 mod win {
     use super::*;
     use std::collections::HashMap;
@@ -457,12 +467,12 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowTextW,
-        GetWindowThreadProcessId, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
+        GetWindowThreadProcessId, IsIconic, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
         RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
         TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HMENU, IDI_APPLICATION, MF_SEPARATOR,
         MF_STRING, MSG, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
         WNDCLASSW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
-        WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NCCREATE, WM_NULL, WM_RBUTTONUP, EnumWindows,
+        WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NULL, WM_RBUTTONUP, EnumWindows,
     };
 
     pub const WAKE_MSG: u32 = WM_APP + 2;
@@ -674,8 +684,8 @@ mod win {
                     let event = (lparam.0 as u32) & 0xFFFF;
                     match event {
                         WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(hwnd, state),
-                        WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Show));
+                        WM_LBUTTONDBLCLK => {
+                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
                         }
                         _ => {}
                     }
@@ -687,8 +697,7 @@ mod win {
                     let id = (wparam.0 & 0xFFFF) as usize;
                     match id {
                         MENU_SHOW => {
-                            focus_main_window();
-                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Show));
+                            let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
                         }
                         MENU_STOP => {
                             state.playback.stop_all();
@@ -793,7 +802,7 @@ mod win {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
-        let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, w!("Show SoundDeck"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, w!("Show / Hide SoundDeck"));
         let _ = AppendMenuW(menu, MF_STRING, MENU_STOP, w!("Stop all sounds"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit SoundDeck"));
@@ -813,8 +822,7 @@ mod win {
             if cmd.0 > 0 {
                 match cmd.0 as usize {
                     MENU_SHOW => {
-                        focus_main_window();
-                        let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Show));
+                        let _ = state.tx.send(ServiceEvent::Tray(TrayCommand::Toggle));
                     }
                     MENU_STOP => {
                         state.playback.stop_all();
@@ -900,6 +908,12 @@ mod win {
             let _ = ShowWindow(hwnd, SW_RESTORE);
             let _ = SetForegroundWindow(hwnd);
         }
+    }
+
+    /// True when this executable's main window is minimized to the taskbar.
+    pub unsafe fn main_window_minimized() -> bool {
+        let hwnd = main_window();
+        !hwnd.is_invalid() && IsIconic(hwnd).as_bool()
     }
 
     unsafe fn close_main_window() {

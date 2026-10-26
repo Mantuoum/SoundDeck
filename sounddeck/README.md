@@ -31,11 +31,12 @@ live in `config/` next to the executable.
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.
 - **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
-  outputs. Right-click the slider to reset it to `0.0 dB`.
+  outputs. Right-click the slider to reset it to `0.0 dB`. It can be hidden from the
+  sidebar in Settings → Window.
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one full-width
   bar per output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
-  - Global `Load hotkey sounds into RAM` switch.
+  - Global `Load into RAM` switch in Settings → Playback.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
@@ -46,31 +47,32 @@ live in `config/` next to the executable.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.
 - Missing file detection with click-to-locate.
-- System tray. **Minimize hides to the tray; Close quits the app.**
-- The sidebar compacts automatically below 620 px window height: the dB scale,
-  developer credit, and inline RAM row are hidden (the RAM switch stays in
-  Settings → Playback). When the loop player is visible on a short window, the
+- System tray. **Double-click the tray icon to show or hide SoundDeck**; right-click
+  for Show/Hide, Stop all, Quit. Minimizing follows Settings → Window (taskbar by
+  default; enable **Minimize to tray** to hide instead). **Close quits the app.**
+- The sidebar compacts automatically below 620 px window height: the dB scale and
+  developer credit are hidden. When the loop player is visible on a short window, the
   Monitor/Cable captions also collapse so the meters stay in view.
 - One instance per executable path. Launching the same exe again focuses the
   window that is already open (including one hidden in the tray).
-- Settings screen (`Ctrl+,` or the Settings button): full-window **Playback / Audio /
-  Appearance / About** tabs. Changes apply immediately and save automatically.
+- Settings screen (`Ctrl+,` or the Settings button): full-window **Playback /
+  Appearance / Window / About** tabs. Changes apply immediately and save automatically.
 
 ## Settings
 
 The Settings button (or `Ctrl+,`) replaces the soundboard with a full-window view.
 The rail on the left switches tabs; the status bar stays available.
 
-- **Playback** — looping track (file, transport, its own volume), hotkey-sound RAM
-  preload.
-- **Audio** — Monitor and Cable devices and volumes, the link switch, master gain,
-  and a device refresh.
-- **Appearance** — theme picker, reload themes, Animate UI.
-- **About** — version, portable note, config folder, developer details.
+- **Playback** — enable the looping track and choose its file; load hotkey sounds
+  into RAM.
+- **Appearance** — theme, reload themes, Animate UI.
+- **Window** — minimize-to-tray and whether the sidebar shows the master-gain slider.
+- **About** — version, config folder, developer details.
 
-Return with **Back to soundboard**, `Esc`, or `Ctrl+,`. `Esc` closes an open dropdown
-first. There is no Save button; every change applies immediately and is written after
-a short debounce.
+Monitor/Cable devices, volumes, the link switch and master gain stay in the board
+sidebar where you need them while performing. Each device dropdown ends with
+**Refresh devices**. Return with **Back**, `Esc`, or `Ctrl+,`; `Esc` closes an open
+dropdown first. There is no Save button; changes apply immediately.
 
 ## Keyboard
 
@@ -91,8 +93,8 @@ a short debounce.
 
 - Enable **Looping track** in Settings → Playback. The card appears under the peak
   meter; until a file is chosen, Play is disabled.
-- Controls are Play/Stop plus the picker (folder icon) to choose or locate the file.
-  Start and stop are instant.
+- Controls are Play/Stop and the volume bar on the loop card; **Choose file** lives in
+  Settings → Playback. Start and stop are instant.
 - It has its own volume bar, independent of Monitor/Cable. Master gain still applies
   to everything.
 - The path and volume are remembered in `settings.json`, but playback always starts

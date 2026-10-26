@@ -12,7 +12,7 @@ use eframe::egui::{
 use crate::audio::engine::{AudioEvent, DeviceRoute, Engine, Slot};
 use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
-use crate::hotkeys::{Hotkey, HotkeyService, ServiceEvent, TrayCommand};
+use crate::hotkeys::{main_window_minimized, Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
 use crate::model::{
     self, display_name, format_bytes, format_duration, is_supported_file, Layout as SoundLayout,
@@ -43,29 +43,25 @@ enum RamState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Playback,
-    Audio,
     Appearance,
+    Window,
     About,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::Playback, Self::Audio, Self::Appearance, Self::About];
+    const ALL: [Self; 4] = [
+        Self::Playback,
+        Self::Appearance,
+        Self::Window,
+        Self::About,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Self::Playback => "Playback",
-            Self::Audio => "Audio",
             Self::Appearance => "Appearance",
+            Self::Window => "Window",
             Self::About => "About",
-        }
-    }
-
-    fn subtitle(self) -> &'static str {
-        match self {
-            Self::Playback => "Playback and memory.",
-            Self::Audio => "Outputs, routing and levels.",
-            Self::Appearance => "Theme and motion.",
-            Self::About => "Version, developer and config.",
         }
     }
 }
@@ -584,11 +580,12 @@ impl App {
 
     fn handle_tray(&mut self, command: TrayCommand, ctx: &egui::Context) {
         match command {
-            TrayCommand::Show => {
-                self.hidden = false;
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-                ctx.request_repaint();
+            TrayCommand::Toggle => {
+                if self.hidden || main_window_minimized() {
+                    self.show_from_tray(ctx);
+                } else {
+                    self.hide_to_tray(ctx);
+                }
             }
             TrayCommand::StopAll => {
                 self.engine.stop_all();
@@ -601,6 +598,16 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         }
+    }
+
+    fn show_from_tray(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        self.meter_db = [-60.0; 2];
+        self.meter_peak_db = [-60.0; 2];
+        ctx.request_repaint();
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
@@ -1439,7 +1446,7 @@ impl App {
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
                 if window_button(ui, WindowButton::Minimize, self.tray_available) {
-                    if self.tray_available {
+                    if self.cfg.minimize_to_tray && self.tray_available {
                         self.hide_to_tray(ctx);
                     } else {
                         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
@@ -1539,112 +1546,42 @@ impl App {
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Cable);
 
-                        ui.add_space(4.0 * gap);
-                        let mut gain_db = self.cfg.master_gain_db;
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
-                            ui.spacing_mut().slider_width =
-                                (ui.available_width() - 70.0).max(70.0);
-                            let response = ui.add(
-                                egui::Slider::new(&mut gain_db, 0.0..=12.0)
-                                    .step_by(0.5)
-                                    .show_value(false)
-                                    .trailing_fill(true),
-                            );
-                            let reset = response.secondary_clicked();
-                            let changed = response.changed();
-                            response.on_hover_text(
-                                "Master gain - both outputs. Right-click to reset.",
-                            );
-                            ui.label(
-                                RichText::new(format_gain_db(gain_db))
-                                    .size(10.5)
-                                    .color(theme::muted())
-                                    .monospace(),
-                            );
-                            if reset {
-                                gain_db = 0.0;
-                            }
-                            if changed || reset {
-                                self.cfg.master_gain_db = gain_db;
-                                self.engine.set_master_gain_db(gain_db);
-                                self.mark_dirty();
-                            }
-                        });
+                        if self.cfg.show_gain_slider {
+                            ui.add_space(4.0 * gap);
+                            let mut gain_db = self.cfg.master_gain_db;
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
+                                ui.spacing_mut().slider_width =
+                                    (ui.available_width() - 70.0).max(70.0);
+                                let response = ui.add(
+                                    egui::Slider::new(&mut gain_db, 0.0..=12.0)
+                                        .step_by(0.5)
+                                        .show_value(false)
+                                        .trailing_fill(true),
+                                );
+                                let reset = response.secondary_clicked();
+                                let changed = response.changed();
+                                response.on_hover_text(
+                                    "Master gain - both outputs. Right-click to reset.",
+                                );
+                                ui.label(
+                                    RichText::new(format_gain_db(gain_db))
+                                        .size(10.5)
+                                        .color(theme::muted())
+                                        .monospace(),
+                                );
+                                if reset {
+                                    gain_db = 0.0;
+                                }
+                                if changed || reset {
+                                    self.cfg.master_gain_db = gain_db;
+                                    self.engine.set_master_gain_db(gain_db);
+                                    self.mark_dirty();
+                                }
+                            });
+                        }
 
                         ui.add_space(6.0 * gap);
-                        if !compact {
-                            section_line(ui);
-                            ui.add_space(6.0 * gap);
-                            let ram_state = self.ram_summary();
-                            let enabled = ram_state.is_some();
-                            let mixed = matches!(ram_state, Some(RamState::Mixed));
-                            let on = matches!(ram_state, Some(RamState::On));
-                            let row_height = 28.0;
-                            let row_rect = Rect::from_min_size(
-                                ui.cursor().min,
-                                Vec2::new(ui.available_width(), row_height),
-                            );
-                            let painter = ui.painter().clone();
-                            painter.text(
-                                row_rect.left_center(),
-                                Align2::LEFT_CENTER,
-                                "Load hotkey sounds into RAM",
-                                theme::ui_font(12.0),
-                                if enabled { theme::text() } else { theme::faint() },
-                            );
-                            let switch_rect = Rect::from_center_size(
-                                Pos2::new(row_rect.right() - 20.0, row_rect.center().y),
-                                Vec2::new(40.0, 22.0),
-                            );
-                            paint_switch(&painter, switch_rect, on, mixed, enabled);
-                            let refresh_rect = Rect::from_center_size(
-                                Pos2::new(row_rect.right() - 68.0, row_rect.center().y),
-                                Vec2::splat(24.0),
-                            );
-                            let response = ui.interact(
-                                row_rect,
-                                Id::new("ram_mode_toggle"),
-                                if enabled { Sense::click() } else { Sense::hover() },
-                            );
-                            let refresh = ui.interact(
-                                refresh_rect,
-                                Id::new("refresh_devices_inline"),
-                                Sense::click(),
-                            );
-                            let refresh_hover =
-                                anim::hover(ui, Id::new("refresh_hover"), refresh.hovered());
-                            icon_hover(&painter, refresh_rect, refresh_hover);
-                            paint_rotate_icon(
-                                &painter,
-                                refresh_rect,
-                                theme::mix(theme::muted(), theme::accent(), refresh_hover),
-                                true,
-                            );
-                            if refresh.clicked() {
-                                self.refresh_devices();
-                            }
-                            let refresh_hovered = refresh.hovered();
-                            refresh.on_hover_text("Refresh audio devices");
-                            if response.clicked() && enabled && !refresh_hovered {
-                                self.set_all_hotkey_ram(!on);
-                            }
-                            response.on_hover_text(if enabled {
-                                if mixed {
-                                    "Some hotkey sounds are in RAM. Click to load all."
-                                } else if on {
-                                    "Hotkey sounds are playing from RAM. Click to play from disk."
-                                } else {
-                                    "Hotkey sounds are playing from disk. Click to load all into RAM."
-                                }
-                            } else {
-                                "Assign a hotkey to a sound first"
-                            });
-                            ui.allocate_space(Vec2::new(0.0, row_height));
-                            ui.add_space(2.0 * gap);
-                            section_line(ui);
-                            ui.add_space(8.0 * gap);
-                        }
                         self.level_meter(ui, compact);
                         ui.add_space(6.0 * gap);
                     });
@@ -1797,6 +1734,7 @@ impl App {
         let fallback = "Select device".to_string();
         let selected_text = name.unwrap_or(fallback);
         let mut chosen: Option<Option<String>> = None;
+        let mut refresh = false;
 
         let width = ui.available_width();
         ComboBox::from_id_salt(("device", slot.index()))
@@ -1823,10 +1761,17 @@ impl App {
                 if self.devices.is_empty() {
                     ui.label(RichText::new("No output devices").color(theme::faint()));
                 }
+                ui.separator();
+                if ui.button("Refresh devices").clicked() {
+                    refresh = true;
+                    ui.close_menu();
+                }
             });
 
         if let Some(choice) = chosen {
             self.set_device(slot, choice);
+        } else if refresh {
+            self.refresh_devices();
         }
     }
 
@@ -2752,25 +2697,14 @@ impl App {
             ui.add_space(3.0);
         }
 
-        // Footer pinned to the bottom: version, autosave note, About.
-        let footer_height = 82.0;
+        // About pinned to the bottom; everything else is a normal tab.
+        let footer_height = 40.0;
         ui.add_space((ui.available_height() - footer_height).max(8.0));
+        settings_rule(ui);
+        ui.add_space(6.0);
         if settings_nav_item(ui, SettingsTab::About, self.settings_tab == SettingsTab::About) {
             self.select_settings_tab(SettingsTab::About, ui.ctx());
         }
-        ui.add_space(8.0);
-        settings_rule(ui);
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("Changes save automatically")
-                .size(9.0)
-                .color(theme::faint()),
-        );
-        ui.label(
-            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                .size(9.5)
-                .color(theme::faint()),
-        );
     }
 
     fn settings_content(&mut self, ctx: &egui::Context, ui: &mut Ui) {
@@ -2792,7 +2726,7 @@ impl App {
 
         let tab = self.settings_tab;
         settings_header(ui, tab);
-        ui.add_space(14.0);
+        ui.add_space(10.0);
 
         egui::ScrollArea::vertical()
             .id_salt(("settings_scroll", tab.title()))
@@ -2802,8 +2736,8 @@ impl App {
                     ui.set_width(ui.available_width().min(780.0));
                     match tab {
                         SettingsTab::Playback => self.settings_page_playback(ui),
-                        SettingsTab::Audio => self.settings_page_audio(ui),
                         SettingsTab::Appearance => self.settings_page_appearance(ctx, ui),
+                        SettingsTab::Window => self.settings_page_window(ui),
                         SettingsTab::About => self.settings_page_about(ui),
                     }
                     ui.add_space(12.0);
@@ -2812,69 +2746,45 @@ impl App {
     }
 
     fn settings_page_playback(&mut self, ui: &mut Ui) {
-        settings_group(
-            ui,
-            "Background loop",
-            Some("One file on repeat, under the sound effects."),
-            |ui| {
-                let mut enabled = self.cfg.loop_enabled;
-                let mut toggled = false;
-                settings_row(
+        settings_group(ui, "Looping track", |ui| {
+            let mut enabled = self.cfg.loop_enabled;
+            let mut toggled = false;
+            settings_row(ui, "Enabled", 80.0, |ui| {
+                toggled = settings_switch(
                     ui,
-                    "Looping track",
-                    Some(
-                        "Follows Monitor and Cable. Keeps playing through Stop all and library switches.",
-                    ),
-                    80.0,
-                    |ui| {
-                        toggled = settings_switch(
-                            ui,
-                            Id::new("settings_loop_enabled"),
-                            &mut enabled,
-                            true,
-                        );
-                    },
+                    Id::new("settings_loop_enabled"),
+                    &mut enabled,
+                    true,
                 );
-                if toggled {
-                    self.set_loop_enabled(enabled);
-                }
-                if self.cfg.loop_enabled {
-                    settings_divider(ui);
-                    self.loop_settings_body(ui);
-                }
-            },
-        );
+            });
+            if toggled {
+                self.set_loop_enabled(enabled);
+            }
+            if self.cfg.loop_enabled {
+                settings_divider(ui);
+                self.loop_settings_body(ui);
+            }
+        });
 
-        settings_group(ui, "Hotkey sounds", None, |ui| {
+        settings_group(ui, "Hotkey sounds", |ui| {
             let ram = self.ram_summary();
             let enabled = ram.is_some();
             let mut on = matches!(ram, Some(RamState::On));
             let mut changed = false;
-            settings_row(
-                ui,
-                "Load hotkey sounds into RAM",
-                Some(if enabled {
-                    "Hotkey sounds stay decoded in memory."
-                } else {
-                    "Assign a hotkey to a sound first."
-                }),
-                80.0,
-                |ui| {
-                    changed =
-                        settings_switch(ui, Id::new("settings_ram"), &mut on, enabled);
-                },
-            );
+            settings_row(ui, "Load into RAM", 80.0, |ui| {
+                changed = settings_switch(ui, Id::new("settings_ram"), &mut on, enabled);
+            });
             if changed {
                 self.set_all_hotkey_ram(on);
                 self.mark_dirty();
             }
             let loaded = self.playback.loaded_count();
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.label(
                 RichText::new(if loaded == 1 {
-                    "1 hotkey sound loaded.".to_string()
+                    "1 in RAM".to_string()
                 } else {
-                    format!("{loaded} hotkey sounds loaded.")
+                    format!("{loaded} in RAM")
                 })
                 .size(10.5)
                 .color(theme::faint()),
@@ -2893,11 +2803,9 @@ impl App {
         let active = state.is_active();
         let missing = path.is_some() && self.loop_missing;
         let has_file = path.is_some() && !missing;
-        let playable = has_file && error.is_none();
-        let retry = has_file && error.is_some();
 
         ui.horizontal(|ui| {
-            let controls_width = 190.0;
+            let controls_width = 110.0;
             let label_width = (ui.available_width() - controls_width - 10.0).max(120.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(label_width, 34.0),
@@ -2913,7 +2821,7 @@ impl App {
                     ui.label(RichText::new(&name).size(12.5).color(name_color));
                     ui.add_space(2.0);
                     let (status, color) = if missing {
-                        ("File missing", theme::red())
+                        ("Missing", theme::red())
                     } else if let Some(message) = &error {
                         (message.as_str(), theme::red())
                     } else if active {
@@ -2921,30 +2829,12 @@ impl App {
                     } else if path.is_some() {
                         ("Ready", theme::muted())
                     } else {
-                        ("No file selected", theme::faint())
+                        ("No file", theme::faint())
                     };
                     ui.label(RichText::new(status).size(10.5).color(color));
                 },
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if active {
-                    "Stop"
-                } else if retry {
-                    "Retry"
-                } else {
-                    "Play"
-                };
-                if accent_button_enabled(
-                    ui,
-                    label,
-                    Vec2::new(78.0, 26.0),
-                    playable || retry || active,
-                )
-                .clicked()
-                    && (playable || retry || active)
-                {
-                    self.toggle_loop();
-                }
                 if ghost_button(
                     ui,
                     if missing { "Locate" } else { "Choose file" },
@@ -2956,163 +2846,30 @@ impl App {
                 }
             });
         });
-
-        ui.add_space(10.0);
-        settings_row(
-            ui,
-            "Volume",
-            Some("Independent of Monitor and Cable."),
-            260.0,
-            |ui| {
-                let mut requested = None;
-                let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(260.0, 24.0), Sense::hover());
-                volume::bar(
-                    ui,
-                    rect,
-                    Id::new("settings_loop_volume"),
-                    self.cfg.loop_volume,
-                    |value| requested = Some(value),
-                    false,
-                );
-                if let Some(value) = requested {
-                    self.set_loop_volume(value);
-                }
-            },
-        );
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("Streamed from disk · starts stopped on launch")
-                .size(10.0)
-                .color(theme::faint()),
-        );
-    }
-
-    fn settings_page_audio(&mut self, ui: &mut Ui) {
-        if self.devices.is_empty() {
-            ui.label(
-                RichText::new("No output devices. Plug one in and refresh.")
-                    .size(11.5)
-                    .color(theme::amber()),
-            );
-            ui.add_space(10.0);
-        }
-
-        settings_group(ui, "Monitor", Some("Plays on your headphones or speakers."), |ui| {
-            settings_row(ui, "Device", None, 260.0, |ui| {
-                self.device_selector(ui, Slot::Monitor);
-            });
-            settings_divider(ui);
-            settings_row(ui, "Volume", None, 260.0, |ui| {
-                self.device_volume(ui, Slot::Monitor);
-            });
-        });
-
-        settings_group(ui, "Cable", Some("The virtual output your other apps record."), |ui| {
-            settings_row(ui, "Device", None, 260.0, |ui| {
-                self.device_selector(ui, Slot::Cable);
-            });
-            settings_divider(ui);
-            settings_row(ui, "Volume", None, 260.0, |ui| {
-                self.device_volume(ui, Slot::Cable);
-            });
-        });
-
-        settings_group(ui, "Routing and gain", None, |ui| {
-            let mut linked = self.cfg.link_volumes;
-            let mut toggled = false;
-            settings_row(
-                ui,
-                "Link Monitor and Cable",
-                Some("One slider moves both outputs."),
-                80.0,
-                |ui| {
-                    toggled =
-                        settings_switch(ui, Id::new("settings_link"), &mut linked, true);
-                },
-            );
-            if toggled {
-                self.set_link_volumes(linked);
-            }
-
-            settings_divider(ui);
-            settings_row(
-                ui,
-                "Master gain",
-                Some("Applied to both outputs. Right-click the slider to reset."),
-                260.0,
-                |ui| {
-                    let mut gain = self.cfg.master_gain_db;
-                    if gain_control(ui, &mut gain, 190.0) {
-                        self.cfg.master_gain_db = gain;
-                        self.engine.set_master_gain_db(gain);
-                        self.mark_dirty();
-                    }
-                },
-            );
-
-            settings_divider(ui);
-            settings_row(
-                ui,
-                "Output devices",
-                Some("Rescan after plugging in or removing a device."),
-                200.0,
-                |ui| {
-                    if ghost_button(
-                        ui,
-                        "Refresh audio devices",
-                        Vec2::new(190.0, 26.0),
-                    )
-                    .clicked()
-                    {
-                        self.refresh_devices();
-                    }
-                },
-            );
-        });
     }
 
     fn settings_page_appearance(&mut self, ctx: &egui::Context, ui: &mut Ui) {
-        settings_group(ui, "Theme", None, |ui| {
-            settings_row(
-                ui,
-                "Theme",
-                Some("Shipped palettes live in config/themes/."),
-                260.0,
-                |ui| {
-                    self.theme_picker(ctx, ui, 240.0);
-                },
-            );
+        settings_group(ui, "Theme", |ui| {
+            settings_row(ui, "Theme", 260.0, |ui| {
+                self.theme_picker(ctx, ui, 240.0);
+            });
             settings_divider(ui);
-            settings_row(
-                ui,
-                "Theme files",
-                Some("Markdown palettes. Reload after editing."),
-                200.0,
-                |ui| {
-                    if ghost_button(ui, "Reload themes", Vec2::new(150.0, 26.0))
-                        .on_hover_text("Re-read config/themes/*.md")
-                        .clicked()
-                    {
-                        self.reload_themes(ctx);
-                    }
-                },
-            );
+            settings_row(ui, "Reload themes", 200.0, |ui| {
+                if ghost_button(ui, "Reload", Vec2::new(100.0, 26.0))
+                    .on_hover_text("Re-read config/themes/*.md")
+                    .clicked()
+                {
+                    self.reload_themes(ctx);
+                }
+            });
         });
 
-        settings_group(ui, "Motion", None, |ui| {
+        settings_group(ui, "Motion", |ui| {
             let mut animate = self.cfg.animate_ui;
             let mut changed = false;
-            settings_row(
-                ui,
-                "Animate UI",
-                Some("60–90 ms transitions. Also follows the Windows animation setting."),
-                80.0,
-                |ui| {
-                    changed =
-                        settings_switch(ui, Id::new("settings_animate"), &mut animate, true);
-                },
-            );
+            settings_row(ui, "Animate UI", 80.0, |ui| {
+                changed = settings_switch(ui, Id::new("settings_animate"), &mut animate, true);
+            });
             if changed {
                 self.cfg.animate_ui = animate;
                 anim::set_user(animate);
@@ -3121,8 +2878,44 @@ impl App {
         });
     }
 
+    fn settings_page_window(&mut self, ui: &mut Ui) {
+        settings_group(ui, "Tray", |ui| {
+            let mut minimize = self.cfg.minimize_to_tray;
+            let mut changed = false;
+            settings_row(ui, "Minimize to tray", 80.0, |ui| {
+                changed = settings_switch(
+                    ui,
+                    Id::new("settings_minimize_to_tray"),
+                    &mut minimize,
+                    self.tray_available,
+                );
+            });
+            if changed {
+                self.cfg.minimize_to_tray = minimize;
+                self.mark_dirty();
+            }
+        });
+
+        settings_group(ui, "Sidebar", |ui| {
+            let mut show_gain = self.cfg.show_gain_slider;
+            let mut changed = false;
+            settings_row(ui, "Show gain", 80.0, |ui| {
+                changed = settings_switch(
+                    ui,
+                    Id::new("settings_show_gain"),
+                    &mut show_gain,
+                    true,
+                );
+            });
+            if changed {
+                self.cfg.show_gain_slider = show_gain;
+                self.mark_dirty();
+            }
+        });
+    }
+
     fn settings_page_about(&mut self, ui: &mut Ui) {
-        settings_group(ui, "SoundDeck", None, |ui| {
+        settings_group(ui, "SoundDeck", |ui| {
             ui.label(
                 RichText::new(APP_NAME)
                     .font(theme::medium(17.0))
@@ -3133,31 +2926,17 @@ impl App {
                     .size(11.5)
                     .color(theme::muted()),
             );
-            ui.add_space(4.0);
-            ui.label(
-                RichText::new("Portable build. Config and themes live beside the executable.")
-                    .size(10.5)
-                    .color(theme::faint()),
-            );
             settings_divider(ui);
-            settings_row(
-                ui,
-                "Config folder",
-                Some("settings.json · libraries.json · themes/"),
-                200.0,
-                |ui| {
-                    if ghost_button(ui, "Open config folder", Vec2::new(170.0, 28.0))
-                        .clicked()
-                    {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(model::config_dir())
-                            .spawn();
-                    }
-                },
-            );
+            settings_row(ui, "Config folder", 200.0, |ui| {
+                if ghost_button(ui, "Open", Vec2::new(90.0, 28.0)).clicked() {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(model::config_dir())
+                        .spawn();
+                }
+            });
         });
 
-        settings_group(ui, "Developer", None, |ui| {
+        settings_group(ui, "Developer", |ui| {
             ui.label(
                 RichText::new(DEVELOPER_NAME)
                     .font(theme::medium(16.0))
@@ -3195,18 +2974,6 @@ impl App {
         }
         self.loop_checked_at = Instant::now() - Duration::from_secs(10);
         self.refresh_loop_missing(true);
-        self.mark_dirty();
-    }
-
-    fn set_link_volumes(&mut self, linked: bool) {
-        if self.cfg.link_volumes == linked {
-            return;
-        }
-        self.cfg.link_volumes = linked;
-        if linked {
-            let volume = self.slot_volume(Slot::Monitor);
-            self.set_slot_volume(Slot::Cable, volume);
-        }
         self.mark_dirty();
     }
 
@@ -3916,6 +3683,16 @@ impl eframe::App for App {
         if self.quit {
             return;
         }
+        // The custom title bar hides decorations, so honor an OS minimize as
+        // well (taskbar button, Win+D) when the user asked to minimize to tray.
+        if !self.hidden
+            && self.cfg.minimize_to_tray
+            && self.tray_available
+            && (ctx.input(|i| i.viewport().minimized.unwrap_or(false))
+                || main_window_minimized())
+        {
+            self.hide_to_tray(ctx);
+        }
         self.global_shortcuts(ctx);
         self.handle_resize(ctx);
         self.tick(ctx);
@@ -4059,33 +3836,14 @@ fn settings_header(ui: &mut Ui, tab: SettingsTab) {
             .font(theme::medium(22.0))
             .color(theme::text()),
     );
-    ui.add_space(2.0);
-    ui.label(
-        RichText::new(tab.subtitle())
-            .size(11.5)
-            .color(theme::faint()),
-    );
 }
 
-fn settings_group(
-    ui: &mut Ui,
-    title: &str,
-    description: Option<&str>,
-    add_contents: impl FnOnce(&mut Ui),
-) {
+fn settings_group(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.label(
         RichText::new(title)
             .font(theme::medium(13.5))
             .color(theme::text()),
     );
-    if let Some(description) = description {
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new(description)
-                .size(10.5)
-                .color(theme::faint()),
-        );
-    }
     ui.add_space(8.0);
     Frame::NONE
         .fill(theme::card())
@@ -4102,7 +3860,6 @@ fn settings_group(
 fn settings_row(
     ui: &mut Ui,
     title: &str,
-    description: Option<&str>,
     control_width: f32,
     add_control: impl FnOnce(&mut Ui),
 ) {
@@ -4110,14 +3867,6 @@ fn settings_row(
     if width < 620.0 {
         ui.vertical(|ui| {
             ui.label(RichText::new(title).size(12.5).color(theme::text()));
-            if let Some(description) = description {
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new(description)
-                        .size(10.5)
-                        .color(theme::faint()),
-                );
-            }
             ui.add_space(8.0);
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), 30.0),
@@ -4131,14 +3880,6 @@ fn settings_row(
             ui.vertical(|ui| {
                 ui.set_max_width(label_width);
                 ui.label(RichText::new(title).size(12.5).color(theme::text()));
-                if let Some(description) = description {
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new(description)
-                            .size(10.5)
-                            .color(theme::faint()),
-                    );
-                }
             });
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 ui.allocate_ui_with_layout(
@@ -4288,7 +4029,7 @@ fn settings_back(ui: &mut Ui) -> bool {
     painter.text(
         rect.left_center() + Vec2::new(22.0, 0.0),
         Align2::LEFT_CENTER,
-        "Back to soundboard",
+        "Back",
         theme::ui_font(11.5),
         color,
     );
@@ -4306,7 +4047,6 @@ fn paint_settings_icon(
     let center = rect.center();
     match tab {
         SettingsTab::Playback => paint_play_icon(painter, rect, color),
-        SettingsTab::Audio => theme::speaker_icon(painter, rect, color),
         SettingsTab::Appearance => {
             painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
             for offset in [
@@ -4316,6 +4056,22 @@ fn paint_settings_icon(
             ] {
                 painter.circle_filled(center + offset, 1.2, color);
             }
+        }
+        SettingsTab::Window => {
+            let body = Rect::from_center_size(center, Vec2::new(12.0, 10.0));
+            painter.rect_stroke(
+                body,
+                CornerRadius::same(2),
+                Stroke::new(1.2_f32, color),
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(body.left(), body.top() + 3.0),
+                    Pos2::new(body.right(), body.top() + 3.0),
+                ],
+                Stroke::new(1.0_f32, color),
+            );
         }
         SettingsTab::About => {
             painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
@@ -4329,33 +4085,6 @@ fn paint_settings_icon(
             );
         }
     }
-}
-
-fn gain_control(ui: &mut Ui, gain_db: &mut f32, slider_width: f32) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = slider_width.max(60.0);
-        let response = ui.add(
-            egui::Slider::new(gain_db, 0.0..=12.0)
-                .step_by(0.5)
-                .show_value(false)
-                .trailing_fill(true),
-        );
-        let edited = response.changed();
-        let reset = response.secondary_clicked();
-        response.on_hover_text("Master gain - both outputs. Right-click to reset.");
-        if reset {
-            *gain_db = 0.0;
-        }
-        ui.label(
-            RichText::new(format_gain_db(*gain_db))
-                .size(10.5)
-                .color(theme::muted())
-                .monospace(),
-        );
-        changed = edited || reset;
-    });
-    changed
 }
 
 fn draw_grid(
@@ -4425,27 +4154,33 @@ fn draw_list(
     rects: &mut Vec<(usize, Rect)>,
     actions: &mut Vec<Action>,
 ) {
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::ZERO;
-        for &index in filtered {
-            let sound = &sounds[index];
-            let info = infos.get(&sound.id).cloned().unwrap_or_default();
-            let playing = progress.get(&sound.id).copied();
-            let (rect, row_actions) = sound_row(
-                ui,
-                sound,
-                &info,
-                playing,
-                drag_enabled,
-                capture_id == Some(sound.id),
-                selected == Some(sound.id),
-                index,
-                libraries,
-            );
-            rects.push((index, rect));
-            actions.extend(row_actions);
-            ui.add_space(6.0);
-        }
+    ui.horizontal_top(|ui| {
+        let content_width = ui.available_width().min(1100.0);
+        let pad = ((ui.available_width() - content_width) * 0.5).max(0.0);
+        ui.add_space(pad);
+        ui.vertical(|ui| {
+            ui.set_width(content_width);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            for &index in filtered {
+                let sound = &sounds[index];
+                let info = infos.get(&sound.id).cloned().unwrap_or_default();
+                let playing = progress.get(&sound.id).copied();
+                let (rect, row_actions) = sound_row(
+                    ui,
+                    sound,
+                    &info,
+                    playing,
+                    drag_enabled,
+                    capture_id == Some(sound.id),
+                    selected == Some(sound.id),
+                    index,
+                    libraries,
+                );
+                rects.push((index, rect));
+                actions.extend(row_actions);
+                ui.add_space(6.0);
+            }
+        });
     });
 }
 
@@ -4884,10 +4619,19 @@ fn sound_row(
         sound_context_menu(ui, sound, info, libraries, &mut actions);
     });
 
-    // Name.
+    // Controls on the right: chip, hotkey pill and close.
+    let pill_width = if has_hotkey { 110.0 } else { 118.0 };
+    let indicator_width = if has_hotkey || missing { 70.0 } else { 0.0 };
+    let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
+
+    // Name column; the volume track uses the remaining space up to the controls
+    // instead of floating as a short bar in a maximized window.
     let name_rect = Rect::from_min_max(
         rect.left_center() + Vec2::new(16.0, -14.0),
-        Pos2::new(rect.left() + rect.width() * 0.38, rect.center().y + 14.0),
+        Pos2::new(
+            rect.left() + rect.width() * 0.38,
+            rect.center().y + 14.0,
+        ),
     );
     let name = theme::truncate(&painter, &sound.name, theme::medium(15.0), name_rect.width());
     painter.text(
@@ -4897,11 +4641,6 @@ fn sound_row(
         theme::medium(15.0),
         if missing { theme::mix(theme::text(), theme::red(), 0.4) } else { theme::text() },
     );
-
-    // Controls on the right: chip, hotkey pill and close.
-    let pill_width = if has_hotkey { 110.0 } else { 118.0 };
-    let indicator_width = if has_hotkey || missing { 70.0 } else { 0.0 };
-    let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
 
     let pill_rect = Rect::from_center_size(
         Pos2::new(rect.right() - 42.0 - pill_width * 0.5, rect.center().y),
@@ -4950,15 +4689,13 @@ fn sound_row(
     }
     close.on_hover_text("Remove sound");
 
-    // Short, centered volume slider in the free space between name and controls.
-    let free_left = name_rect.right() + 16.0;
-    let free_right = controls_left - 16.0;
-    let free_width = (free_right - free_left).max(0.0);
-    let slider_width = 260.0_f32.min(free_width).max(0.0);
-    if slider_width > 80.0 {
-        let center_x = (free_left + free_right) * 0.5;
-        let volume_rect = Rect::from_center_size(
-            Pos2::new(center_x, rect.center().y),
+    // Volume track spans the free space between the name column and the controls.
+    let volume_left = name_rect.right() + 16.0;
+    let volume_right = controls_left - 16.0;
+    let slider_width = (volume_right - volume_left).max(0.0);
+    if slider_width >= 80.0 {
+        let volume_rect = Rect::from_min_size(
+            Pos2::new(volume_left, rect.center().y - 11.0),
             Vec2::new(slider_width, 22.0),
         );
         volume::bar(
@@ -5505,27 +5242,7 @@ fn paint_folder_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
     );
 }
 
-fn paint_rotate_icon(painter: &egui::Painter, rect: Rect, color: Color32, clockwise: bool) {
-    let center = rect.center();
-    let radius = (rect.width().min(rect.height()) * 0.30).max(3.0);
-    let start = -0.6f32;
-    let sweep = if clockwise { 4.6f32 } else { -4.6f32 };
-    let stroke = Stroke::new(1.3_f32, color);
-    let mut points = Vec::with_capacity(19);
-    for i in 0..=18 {
-        let angle = start + sweep * i as f32 / 18.0;
-        points.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
-    }
-    painter.add(egui::Shape::line(points, stroke));
-    let end = start + sweep;
-    let tip = center + Vec2::new(end.cos(), end.sin()) * radius;
-    let travel = Vec2::new(-end.sin(), end.cos()) * sweep.signum();
-    let normal = Vec2::new(end.cos(), end.sin());
-    painter.line_segment([tip, tip - travel * 4.0 + normal * 1.5], stroke);
-    painter.line_segment([tip, tip - travel * 4.0 - normal * 1.5], stroke);
-}
-
-/// Small circular-arrow button. Returns true when clicked while `active`.
+/// Shared switch styling for the sidebar and Settings.
 fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enabled: bool) {
     let track = if !enabled {
         theme::field()
