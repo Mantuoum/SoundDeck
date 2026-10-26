@@ -11,6 +11,10 @@ mod ui;
 
 use std::sync::Arc;
 
+/// Start size: exactly half of a 1920x1080 display.
+const START_WIDTH: f32 = 960.0;
+const START_HEIGHT: f32 = 540.0;
+
 /// FNV-1a hash of the executable path, used to scope the instance mutex to a
 /// single portable copy.
 #[cfg(windows)]
@@ -90,16 +94,14 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     let loaded = storage::load(&model::app_dir());
-    let saved_size = loaded.settings.window_size.unwrap_or([1080.0, 700.0]);
-    let window_size = eframe::egui::Vec2::new(
-        saved_size[0].clamp(900.0, 2600.0),
-        saved_size[1].clamp(600.0, 1800.0),
-    );
+    // The window always starts at half of a 1920x1080 screen; resizing during
+    // the session is not persisted.
+    let window_size = eframe::egui::Vec2::new(START_WIDTH, START_HEIGHT);
 
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title(model::WINDOW_TITLE)
         .with_inner_size(window_size)
-        .with_min_inner_size([860.0, 560.0])
+        .with_min_inner_size([860.0, 500.0])
         .with_decorations(false)
         .with_resizable(true)
         .with_transparent(false);

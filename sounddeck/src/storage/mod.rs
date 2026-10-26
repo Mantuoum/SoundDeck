@@ -33,9 +33,10 @@ pub struct Settings {
     pub master_gain_db: f32,
     pub link_volumes: bool,
     pub preload_hotkey_sounds: bool,
-    pub window_size: Option<[f32; 2]>,
-    /// Reserved for the motion phase.
+    /// Parsed for older config files, but the window always starts at a fixed
+    /// size, so this is no longer read or written.
     #[allow(dead_code)]
+    pub window_size: Option<[f32; 2]>,
     pub animate_ui: bool,
 }
 

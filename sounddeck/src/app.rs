@@ -19,6 +19,7 @@ use crate::model::{
 };
 use crate::playback::{Playback, PlaybackEvent, SoundInfo};
 use crate::storage;
+use crate::ui::anim;
 use crate::ui::theme;
 
 const CARD_HEIGHT: f32 = 112.0;
@@ -158,6 +159,11 @@ pub struct App {
     undo: Option<UndoDelete>,
     last_dir: Option<PathBuf>,
     next_id: u64,
+    /// When the current page (tab / layout) started fading in.
+    page_fade: Instant,
+    /// When the settings modal was opened, used for the backdrop/rise tween.
+    settings_opened: Instant,
+    settings_was_open: bool,
     dirty: bool,
     save_failed: bool,
     last_save: Instant,
@@ -165,7 +171,6 @@ pub struct App {
     last_libraries_json: String,
     last_tip: String,
     next_tip: Instant,
-    last_window_size: Option<[f32; 2]>,
     meter_db: [f32; 2],
     meter_peak_db: [f32; 2],
     meter_peak_at: [Instant; 2],
@@ -183,6 +188,11 @@ impl App {
             warnings,
         } = loaded;
         let mut cfg = settings;
+
+        // Motion preferences: user toggle AND the OS animation preference.
+        anim::set_user(cfg.animate_ui);
+        anim::set_os(anim::os_animations_enabled());
+
         let mut statuses = Vec::new();
         let mut push_status = |kind: StatusKind, text: String| {
             statuses.push(StatusEntry {
@@ -379,6 +389,10 @@ impl App {
             undo: None,
             last_dir: None,
             next_id: 1,
+            // Starts long finished so the first frame is fully opaque.
+            page_fade: Instant::now() - Duration::from_secs(10),
+            settings_opened: Instant::now() - Duration::from_secs(10),
+            settings_was_open: false,
             dirty: theme_was_corrected,
             save_failed: false,
             last_save: Instant::now(),
@@ -386,7 +400,6 @@ impl App {
             last_libraries_json: String::new(),
             last_tip: String::new(),
             next_tip: Instant::now(),
-            last_window_size: None,
             meter_db: [-60.0; 2],
             meter_peak_db: [-60.0; 2],
             meter_peak_at: [Instant::now(); 2],
@@ -543,7 +556,7 @@ impl App {
             }
             TrayCommand::Quit => {
                 self.quit = true;
-                self.save_now(ctx);
+                self.save_now();
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
         }
@@ -552,12 +565,12 @@ impl App {
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.quit = true;
-            self.save_now(ctx);
+            self.save_now();
         }
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        self.save_now(ctx);
+        self.save_now();
         self.hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.log(
@@ -1003,6 +1016,7 @@ impl App {
             SoundLayout::Grid => SoundLayout::List,
             SoundLayout::List => SoundLayout::Grid,
         };
+        self.page_fade = Instant::now();
         self.mark_dirty();
     }
 
@@ -1048,9 +1062,6 @@ impl App {
 
     /// Write only the files whose content actually changed.
     fn persist(&mut self) -> bool {
-        if let Some(size) = self.last_window_size {
-            self.cfg.window_size = Some(size);
-        }
         self.cfg.active_library = self.active_library;
         let base = model::app_dir();
         let mut ok = true;
@@ -1095,10 +1106,7 @@ impl App {
         ok
     }
 
-    fn save_now(&mut self, ctx: &egui::Context) {
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
-            self.last_window_size = Some([rect.width(), rect.height()]);
-        }
+    fn save_now(&mut self) {
         self.last_save = Instant::now();
         if self.persist() {
             self.dirty = false;
@@ -1274,7 +1282,7 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if window_button(ui, WindowButton::Close, self.tray_available) {
                     self.quit = true;
-                    self.save_now(ctx);
+                    self.save_now();
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
                 if window_button(ui, WindowButton::Maximize, self.tray_available) {
@@ -1307,7 +1315,12 @@ impl App {
     }
 
     fn side_panel(&mut self, ui: &mut Ui) {
-        let content_height = (ui.available_height() - 84.0).max(120.0);
+        // The window starts at 960x540, so the sidebar needs a tighter rhythm
+        // on short windows or the meters end up below the fold.
+        let compact = ui.available_height() < 620.0;
+        let gap = if compact { 0.35 } else { 1.0 };
+        let reserve = if compact { 44.0 } else { 84.0 };
+        let content_height = (ui.available_height() - reserve).max(120.0);
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), content_height),
             Layout::top_down(Align::Min),
@@ -1320,20 +1333,19 @@ impl App {
                         if accent_button(ui, "Load sounds", full).clicked() {
                             self.open_file_dialog();
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(4.0 * gap);
                         self.layout_selector(ui);
 
-                        ui.add_space(6.0);
+                        ui.add_space(6.0 * gap);
                         section_line(ui);
-                        ui.add_space(4.0);
+                        ui.add_space(4.0 * gap);
 
                         ui.label(RichText::new("Monitor").size(12.5).color(theme::muted()));
                         self.device_selector(ui, Slot::Monitor);
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Monitor);
 
-                        ui.add_space(2.0);
-                        let link_rect = ui
+                        ui.add_space(2.0 * gap);                        let link_rect = ui
                             .allocate_exact_size(
                                 Vec2::new(ui.available_width(), 24.0),
                                 Sense::hover(),
@@ -1355,13 +1367,13 @@ impl App {
                         }
                         link_resp.on_hover_text("Link monitor and cable volumes");
 
-                        ui.add_space(2.0);
+                        ui.add_space(2.0 * gap);
                         ui.label(RichText::new("Cable").size(12.5).color(theme::muted()));
                         self.device_selector(ui, Slot::Cable);
                         ui.add_space(2.0);
                         self.device_volume(ui, Slot::Cable);
 
-                        ui.add_space(4.0);
+                        ui.add_space(4.0 * gap);
                         let mut gain_db = self.cfg.master_gain_db;
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
@@ -1395,94 +1407,96 @@ impl App {
                             }
                         });
 
-                        ui.add_space(6.0);
-                        section_line(ui);
-                        ui.add_space(6.0);
-                        let ram_state = self.ram_summary();
-                        let enabled = ram_state.is_some();
-                        let mixed = matches!(ram_state, Some(RamState::Mixed));
-                        let on = matches!(ram_state, Some(RamState::On));
-                        let row_height = 28.0;
-                        let row_rect = Rect::from_min_size(
-                            ui.cursor().min,
-                            Vec2::new(ui.available_width(), row_height),
-                        );
-                        let painter = ui.painter().clone();
-                        painter.text(
-                            row_rect.left_center(),
-                            Align2::LEFT_CENTER,
-                            "Load hotkey sounds into RAM",
-                            theme::ui_font(12.0),
-                            if enabled { theme::text() } else { theme::faint() },
-                        );
-                        let switch_rect = Rect::from_center_size(
-                            Pos2::new(row_rect.right() - 20.0, row_rect.center().y),
-                            Vec2::new(40.0, 22.0),
-                        );
-                        paint_switch(&painter, switch_rect, on, mixed, enabled);
-                        let refresh_rect = Rect::from_center_size(
-                            Pos2::new(row_rect.right() - 68.0, row_rect.center().y),
-                            Vec2::splat(24.0),
-                        );
-                        let response = ui.interact(
-                            row_rect,
-                            Id::new("ram_mode_toggle"),
-                            if enabled { Sense::click() } else { Sense::hover() },
-                        );
-                        let refresh = ui.interact(
-                            refresh_rect,
-                            Id::new("refresh_devices_inline"),
-                            Sense::click(),
-                        );
-                        if refresh.hovered() {
-                            painter.rect_filled(
-                                refresh_rect,
-                                CornerRadius::same(5),
-                                theme::alpha(theme::accent(), 16),
+                        ui.add_space(6.0 * gap);
+                        if !compact {
+                            section_line(ui);
+                            ui.add_space(6.0 * gap);
+                            let ram_state = self.ram_summary();
+                            let enabled = ram_state.is_some();
+                            let mixed = matches!(ram_state, Some(RamState::Mixed));
+                            let on = matches!(ram_state, Some(RamState::On));
+                            let row_height = 28.0;
+                            let row_rect = Rect::from_min_size(
+                                ui.cursor().min,
+                                Vec2::new(ui.available_width(), row_height),
                             );
-                        }
-                        paint_rotate_icon(
-                            &painter,
-                            refresh_rect,
+                            let painter = ui.painter().clone();
+                            painter.text(
+                                row_rect.left_center(),
+                                Align2::LEFT_CENTER,
+                                "Load hotkey sounds into RAM",
+                                theme::ui_font(12.0),
+                                if enabled { theme::text() } else { theme::faint() },
+                            );
+                            let switch_rect = Rect::from_center_size(
+                                Pos2::new(row_rect.right() - 20.0, row_rect.center().y),
+                                Vec2::new(40.0, 22.0),
+                            );
+                            paint_switch(&painter, switch_rect, on, mixed, enabled);
+                            let refresh_rect = Rect::from_center_size(
+                                Pos2::new(row_rect.right() - 68.0, row_rect.center().y),
+                                Vec2::splat(24.0),
+                            );
+                            let response = ui.interact(
+                                row_rect,
+                                Id::new("ram_mode_toggle"),
+                                if enabled { Sense::click() } else { Sense::hover() },
+                            );
+                            let refresh = ui.interact(
+                                refresh_rect,
+                                Id::new("refresh_devices_inline"),
+                                Sense::click(),
+                            );
                             if refresh.hovered() {
-                                theme::accent()
-                            } else {
-                                theme::muted()
-                            },
-                            true,
-                        );
-                        if refresh.clicked() {
-                            self.refresh_devices();
-                        }
-                        let refresh_hovered = refresh.hovered();
-                        refresh.on_hover_text("Refresh audio devices");
-                        if response.clicked() && enabled && !refresh_hovered {
-                            self.set_all_hotkey_ram(!on);
-                        }
-                        response.on_hover_text(if enabled {
-                            if mixed {
-                                "Some hotkey sounds are in RAM. Click to load all."
-                            } else if on {
-                                "Hotkey sounds are playing from RAM. Click to play from disk."
-                            } else {
-                                "Hotkey sounds are playing from disk. Click to load all into RAM."
+                                painter.rect_filled(
+                                    refresh_rect,
+                                    CornerRadius::same(5),
+                                    theme::alpha(theme::accent(), 16),
+                                );
                             }
-                        } else {
-                            "Assign a hotkey to a sound first"
-                        });
-                        ui.allocate_space(Vec2::new(0.0, row_height));
-                        ui.add_space(2.0);
-                        section_line(ui);
-                        ui.add_space(8.0);
-                        self.level_meter(ui);
-                        ui.add_space(6.0);
+                            paint_rotate_icon(
+                                &painter,
+                                refresh_rect,
+                                if refresh.hovered() {
+                                    theme::accent()
+                                } else {
+                                    theme::muted()
+                                },
+                                true,
+                            );
+                            if refresh.clicked() {
+                                self.refresh_devices();
+                            }
+                            let refresh_hovered = refresh.hovered();
+                            refresh.on_hover_text("Refresh audio devices");
+                            if response.clicked() && enabled && !refresh_hovered {
+                                self.set_all_hotkey_ram(!on);
+                            }
+                            response.on_hover_text(if enabled {
+                                if mixed {
+                                    "Some hotkey sounds are in RAM. Click to load all."
+                                } else if on {
+                                    "Hotkey sounds are playing from RAM. Click to play from disk."
+                                } else {
+                                    "Hotkey sounds are playing from disk. Click to load all into RAM."
+                                }
+                            } else {
+                                "Assign a hotkey to a sound first"
+                            });
+                            ui.allocate_space(Vec2::new(0.0, row_height));
+                            ui.add_space(2.0 * gap);
+                            section_line(ui);
+                            ui.add_space(8.0 * gap);
+                        }
+                        self.level_meter(ui, compact);
+                        ui.add_space(6.0 * gap);
                     });
             },
         );
 
         // Developer + Settings pinned to the bottom of the sidebar.
         ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), 84.0),
+            Vec2::new(ui.available_width(), reserve),
             Layout::bottom_up(Align::Min),
             |ui| {
                 let full = Vec2::new(ui.available_width(), 32.0);
@@ -1492,18 +1506,20 @@ impl App {
                 {
                     self.show_settings = true;
                 }
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(DEVELOPER_LINK)
-                        .size(10.0)
-                        .color(theme::faint()),
-                );
-                ui.label(
-                    RichText::new(format!("Developed by {DEVELOPER_NAME}"))
-                        .size(11.0)
-                        .color(theme::muted()),
-                );
-                ui.add_space(2.0);
+                if !compact {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(DEVELOPER_LINK)
+                            .size(10.0)
+                            .color(theme::faint()),
+                    );
+                    ui.label(
+                        RichText::new(format!("Developed by {DEVELOPER_NAME}"))
+                            .size(11.0)
+                            .color(theme::muted()),
+                    );
+                    ui.add_space(2.0);
+                }
             },
         );
     }
@@ -1524,6 +1540,18 @@ impl App {
         );
         let inner = rect.shrink(3.0);
         let half = inner.width() * 0.5;
+        let target = if self.cfg.layout == SoundLayout::Grid {
+            0.0
+        } else {
+            1.0
+        };
+        let pos = anim::tween(ui, Id::new("layout_pill"), target, 0.09);
+        let pill = Rect::from_min_size(
+            Pos2::new(inner.left() + pos * half, inner.top()),
+            Vec2::new(half, inner.height()),
+        );
+        painter.rect_filled(pill, CornerRadius::same(12), theme::accent());
+
         for (index, layout) in [SoundLayout::Grid, SoundLayout::List].into_iter().enumerate() {
             let segment = Rect::from_min_size(
                 Pos2::new(inner.left() + index as f32 * half, inner.top()),
@@ -1535,9 +1563,7 @@ impl App {
                 Id::new(("layout_segment", index)),
                 Sense::click(),
             );
-            if active {
-                painter.rect_filled(segment, CornerRadius::same(12), theme::accent());
-            } else if response.hovered() {
+            if !active && response.hovered() {
                 painter.rect_filled(
                     segment,
                     CornerRadius::same(12),
@@ -1547,7 +1573,13 @@ impl App {
             let color = if active {
                 Color32::WHITE
             } else {
-                theme::muted()
+                let hover = anim::hover(
+                    ui,
+                    Id::new(("layout_hover", index)),
+                    response.hovered(),
+                );
+                let base = theme::muted();
+                theme::mix(base, theme::text(), hover * 0.4)
             };
             let label = match layout {
                 SoundLayout::Grid => "Box",
@@ -1631,8 +1663,7 @@ impl App {
         }
     }
 
-    fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
-        let mut position = volume_to_position(self.slot_volume(slot));
+    fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {        let mut position = volume_to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
             let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
             theme::speaker_icon(ui.painter(), icon_rect, theme::muted());
@@ -1657,14 +1688,15 @@ impl App {
     }
 
     /// Compact two-output peak meter with a dBFS scale.
-    fn level_meter(&self, ui: &mut Ui) {
+    fn level_meter(&self, ui: &mut Ui, compact: bool) {
         let width = ui.available_width();
         let label_w = 48.0;
         let value_w = 28.0;
         let bar_left = label_w;
         let bar_right = (width - value_w).max(bar_left + 60.0);
         let row_h = 15.0;
-        let scale_h = 13.0;
+        // The dB scale is the first thing to go on short windows.
+        let scale_h = if compact { 0.0 } else { 13.0 };
         let (rect, _) = ui.allocate_exact_size(
             Vec2::new(width, row_h * 2.0 + scale_h),
             Sense::hover(),
@@ -1692,6 +1724,10 @@ impl App {
                 theme::ui_font(9.5),
                 theme::faint(),
             );
+        }
+
+        if compact {
+            return;
         }
 
         let scale_y = rect.top() + row_h * 2.0 + 1.0;
@@ -1760,6 +1796,15 @@ impl App {
     }
 
     fn main_page(&mut self, ui: &mut Ui) {
+        let fade = if anim::enabled() {
+            anim::ease_out(self.page_fade.elapsed().as_secs_f32() / 0.09)
+        } else {
+            1.0
+        };
+        if fade < 1.0 {
+            ui.ctx().request_repaint();
+        }
+        ui.set_opacity(fade);
         self.toolbar(ui);
         ui.add_space(6.0);
 
@@ -1911,12 +1956,17 @@ impl App {
                                         Vec2::new(width, 28.0),
                                         Sense::click(),
                                     );
+                                    let hover = anim::hover(
+                                        ui,
+                                        Id::new(("tab_hover", library.id)),
+                                        response.hovered(),
+                                    );
                                     paint_library_tab(
                                         ui.painter(),
                                         rect,
                                         &library.name,
                                         active,
-                                        response.hovered(),
+                                        hover,
                                     );
                                     if response.clicked() {
                                         switch_to = Some(library.id);
@@ -1978,6 +2028,7 @@ impl App {
         }
         self.engine.stop_all();
         self.active_library = id;
+        self.page_fade = Instant::now();
         self.search.clear();
         self.selected = None;
         self.sync_active_library();
@@ -2243,6 +2294,15 @@ impl App {
         let mut close = false;
 
         // Dim backdrop that also swallows clicks outside the settings card.
+        let t = if anim::enabled() {
+            let t = anim::ease_out(self.settings_opened.elapsed().as_secs_f32() / 0.09);
+            if t < 1.0 {
+                ctx.request_repaint();
+            }
+            t
+        } else {
+            1.0
+        };
         let overlay = egui::Area::new(Id::new("settings_backdrop"))
             .fixed_pos(screen.min)
             .order(Order::Middle)
@@ -2251,7 +2311,7 @@ impl App {
                 ui.painter().rect_filled(
                     rect,
                     CornerRadius::ZERO,
-                    theme::alpha(theme::bg(), 210),
+                    theme::alpha(theme::bg(), (210.0 * t) as u8),
                 );
                 response
             });
@@ -2260,7 +2320,7 @@ impl App {
         }
 
         egui::Window::new("settings_window")
-            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .anchor(Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - t) * 8.0))
             .order(Order::Foreground)
             .title_bar(false)
             .collapsible(false)
@@ -2320,6 +2380,37 @@ impl App {
                     .auto_shrink([false, false])
                     .max_height(max_height)
                     .show(ui, |ui| {
+                        section_label(ui, "PLAYBACK");
+                        ui.add_space(4.0);
+                        let ram_state = self.ram_summary();
+                        let enabled = ram_state.is_some();
+                        let on = matches!(ram_state, Some(RamState::On));
+                        let mut checked = on;
+                        let resp = ui.add_enabled(
+                            enabled,
+                            egui::Checkbox::new(&mut checked, "Load hotkey sounds into RAM"),
+                        );
+                        if resp.changed() {
+                            self.set_all_hotkey_ram(checked);
+                            self.mark_dirty();
+                        }
+                        ui.label(
+                            RichText::new(if enabled {
+                                "Hotkey sounds stay in memory."
+                            } else {
+                                "Assign a hotkey to a sound first."
+                            })
+                            .size(10.5)
+                            .color(theme::faint()),
+                        );
+                        ui.add_space(4.0);
+                        if ghost_button(ui, "Refresh audio devices", Vec2::new(190.0, 26.0))
+                            .clicked()
+                        {
+                            self.refresh_devices();
+                        }
+                        ui.add_space(8.0);
+
                         section_label(ui, "APPEARANCE");
                         ui.add_space(4.0);
                         let mut selected_theme = self.cfg.theme.clone();
@@ -2349,6 +2440,19 @@ impl App {
                             self.mark_dirty();
                             ctx.request_repaint();
                         }
+
+                        ui.add_space(8.0);
+                        let mut animate = self.cfg.animate_ui;
+                        if ui.checkbox(&mut animate, "Animate UI").changed() {
+                            self.cfg.animate_ui = animate;
+                            anim::set_user(animate);
+                            self.mark_dirty();
+                        }
+                        ui.label(
+                            RichText::new("Also follows the Windows animation setting.")
+                                .size(10.5)
+                                .color(theme::faint()),
+                        );
 
                         ui.add_space(4.0);
                         if ghost_button(ui, "Reload themes", Vec2::new(150.0, 26.0))
@@ -2939,7 +3043,7 @@ impl App {
         }
         if quit {
             self.quit = true;
-            self.save_now(ctx);
+            self.save_now();
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         if typing {
@@ -2970,10 +3074,7 @@ impl App {
 
     fn tick(&mut self, ctx: &egui::Context) {
         if self.dirty && self.last_save.elapsed() > Duration::from_millis(700) {
-            self.save_now(ctx);
-        }
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
-            self.last_window_size = Some([rect.width(), rect.height()]);
+            self.save_now();
         }
 
         let now = Instant::now();
@@ -3033,6 +3134,12 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Detect the modal opening so its fade starts from zero on that frame.
+        if self.show_settings && !self.settings_was_open {
+            self.settings_opened = Instant::now();
+        }
+        self.settings_was_open = self.show_settings;
+
         self.poll_events(ctx);
         self.handle_close_request(ctx);
         if self.quit {
@@ -3123,9 +3230,6 @@ impl eframe::App for App {
 
 impl Drop for App {
     fn drop(&mut self) {
-        if let Some(rect) = self.last_window_size {
-            self.cfg.window_size = Some(rect);
-        }
         self.cfg.active_library = self.active_library;
         let _ = self.persist();
     }
@@ -3233,33 +3337,44 @@ fn draw_list(
 
 fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egui::Response {
     let response = ui.interact(rect, id, Sense::click());
-    if response.hovered() {
+    let hovered = response.hovered();
+    if hovered {
         painter.rect_filled(
             rect,
             CornerRadius::same(5),
             theme::alpha(theme::red(), 26),
         );
     }
+    let press = anim::press(ui, id, response.is_pointer_button_down_on());
+    if press > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(5),
+            theme::alpha(theme::bg(), (press * 45.0) as u8),
+        );
+    }
     let stroke = Stroke::new(
         1.4_f32,
-        if response.hovered() {
+        if hovered {
             theme::red()
         } else {
             theme::muted()
         },
     );
     let center = rect.center();
+    // Both diagonals; the press squeezes them slightly toward the centre.
+    let arm = 4.0 - press * 0.6;
     painter.line_segment(
         [
-            center + Vec2::new(-4.0, -4.0),
-            center + Vec2::new(4.0, 4.0),
+            center + Vec2::new(-arm, -arm),
+            center + Vec2::new(arm, arm),
         ],
         stroke,
     );
     painter.line_segment(
         [
-            center + Vec2::new(4.0, -4.0),
-            center + Vec2::new(-4.0, 4.0),
+            center + Vec2::new(arm, -arm),
+            center + Vec2::new(-arm, arm),
         ],
         stroke,
     );
@@ -3278,6 +3393,7 @@ fn hotkey_pill(
 ) -> bool {
     let pill = ui.interact(rect, id, Sense::click());
     let has_error = sound.hotkey_error.is_some() || capture_active;
+    let hover = anim::hover(ui, id, pill.hovered());
     let border = if has_error {
         theme::red()
     } else if pill.hovered() {
@@ -3288,14 +3404,18 @@ fn hotkey_pill(
     painter.rect(
         rect,
         CornerRadius::same(6),
-        if pill.hovered() {
-            theme::alpha(theme::accent(), 20)
-        } else {
-            theme::field()
-        },
+        theme::mix(theme::field(), theme::alpha(theme::accent(), 20), hover),
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
     );
+    let press = anim::press(ui, id, pill.is_pointer_button_down_on());
+    if press > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
     let (label, color) = match sound.hotkey {
         Some(hotkey) => (
             hotkey.label(),
@@ -3345,13 +3465,22 @@ fn ram_chip(
         ("DISK", theme::faint())
     };
     let chip = ui.interact(rect, id, Sense::click());
+    let hover = anim::hover(ui, id, chip.hovered());
     painter.rect(
         rect,
         CornerRadius::same(5),
-        theme::alpha(color, if chip.hovered() { 20 } else { 10 }),
+        theme::alpha(color, (10.0 + 10.0 * hover) as u8),
         Stroke::new(1.0_f32, theme::alpha(color, 60)),
         StrokeKind::Inside,
     );
+    let press = anim::press(ui, id, chip.is_pointer_button_down_on());
+    if press > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(5),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -3428,8 +3557,9 @@ fn sound_card(
     if missing {
         fill = theme::mix(fill, theme::red(), 0.10);
     }
-    if response.hovered() {
-        fill = theme::mix(fill, theme::text(), 0.03);
+    let hover = anim::hover(ui, Id::new(("card_hover", sound.id)), response.hovered());
+    if hover > 0.0 {
+        fill = theme::mix(fill, theme::text(), 0.03 * hover);
     }
     let border = if flash {
         theme::accent()
@@ -3603,8 +3733,9 @@ fn sound_row(
     if missing {
         fill = theme::mix(fill, theme::red(), 0.08);
     }
-    if response.hovered() {
-        fill = theme::mix(fill, theme::text(), 0.03);
+    let hover = anim::hover(ui, Id::new(("row_hover", sound.id)), response.hovered());
+    if hover > 0.0 {
+        fill = theme::mix(fill, theme::text(), 0.03 * hover);
     }
     let border = if flash {
         theme::accent()
@@ -3918,7 +4049,7 @@ fn paint_library_tab(
     rect: Rect,
     name: &str,
     active: bool,
-    hovered: bool,
+    hover: f32,
 ) {
     if active {
         painter.rect_filled(
@@ -3926,11 +4057,11 @@ fn paint_library_tab(
             CornerRadius::same(6),
             theme::alpha(theme::accent(), 14),
         );
-    } else if hovered {
+    } else if hover > 0.01 {
         painter.rect_filled(
             rect,
             CornerRadius::same(6),
-            theme::alpha(theme::text(), 10),
+            theme::alpha(theme::text(), (10.0 * hover) as u8),
         );
     }
     let font = if active {
@@ -3938,10 +4069,10 @@ fn paint_library_tab(
     } else {
         theme::ui_font(13.0)
     };
-    let color = if active || hovered {
+    let color = if active {
         theme::text()
     } else {
-        theme::muted()
+        theme::mix(theme::muted(), theme::text(), hover * 0.4)
     };
     let label = theme::truncate(painter, name, font.clone(), rect.width() - 16.0);
     painter.text(
@@ -3991,16 +4122,26 @@ fn paint_list_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
     }
 }
 
-fn plus_button(ui: &mut Ui) -> bool {    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+fn plus_button(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
     let painter = ui.painter();
-    if response.hovered() {
+    let hovered = response.hovered();
+    if hovered {
         painter.rect_filled(
             rect,
             CornerRadius::same(6),
             theme::alpha(theme::accent(), 16),
         );
     }
-    let color = if response.hovered() {
+    let press = anim::press(ui, Id::new("plus"), response.is_pointer_button_down_on());
+    if press > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(6),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
+    let color = if hovered {
         theme::accent()
     } else {
         theme::muted()
@@ -4043,24 +4184,58 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     if !enabled {
         response = response.on_disabled_hover_text("Not available");
     }
+    let press = anim::press(
+        ui,
+        Id::new(("accent", text, size.x as i32, size.y as i32)),
+        response.is_pointer_button_down_on(),
+    );
+    if press > 0.01 {
+        ui.painter().rect_filled(
+            response.rect.shrink2(Vec2::new(2.0, 2.0)),
+            CornerRadius::same(8),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
     response
 }
 
 fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
-    ui.add_sized(
+    let response = ui.add_sized(
         size,
         Button::new(RichText::new(text).size(13.5).color(theme::text()))
             .fill(theme::card())
             .stroke(Stroke::new(1.0_f32, theme::border()))
             .corner_radius(8),
-    )
+    );
+    let press = anim::press(
+        ui,
+        Id::new(("ghost", text, size.x as i32, size.y as i32)),
+        response.is_pointer_button_down_on(),
+    );
+    if press > 0.01 {
+        ui.painter().rect_filled(
+            response.rect.shrink2(Vec2::new(2.0, 2.0)),
+            CornerRadius::same(8),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
+    response
 }
 
 fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
-    ui.add(
+    let response = ui.add(
         Button::new(RichText::new(text).size(11.5).color(theme::muted()))
             .frame(false),
-    )
+    );
+    let press = anim::press(ui, Id::new(("tiny", text)), response.is_pointer_button_down_on());
+    if press > 0.01 {
+        ui.painter().rect_filled(
+            response.rect,
+            CornerRadius::same(4),
+            theme::alpha(theme::bg(), (press * 30.0) as u8),
+        );
+    }
+    response
 }
 
 fn section_label(ui: &mut Ui, text: &str) {
@@ -4157,6 +4332,7 @@ fn paint_link_row(ui: &mut Ui, rect: Rect, linked: bool) {
     );
 }
 
+#[derive(Clone, Copy)]
 enum WindowButton {
     Minimize,
     Maximize,
@@ -4178,6 +4354,18 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
             },
         );
     }
+    let press = anim::press(
+        ui,
+        Id::new(("window_button", kind as i32)),
+        response.is_pointer_button_down_on(),
+    );
+    if press > 0.01 {
+        ui.painter().rect_filled(
+            rect.shrink2(Vec2::new(2.0, 2.0)),
+            CornerRadius::same(6),
+            theme::alpha(theme::bg(), (press * 40.0) as u8),
+        );
+    }
     let color = if close && hovered {
         theme::red()
     } else if hovered {
@@ -4189,8 +4377,10 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
     let stroke = Stroke::new(1.2_f32, color);
     match kind {
         WindowButton::Minimize => {
-            ui.painter()
-                .line_segment([Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x + 5.0, c.y + 4.0)], stroke);
+            ui.painter().line_segment(
+                [Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x + 5.0, c.y + 4.0)],
+                stroke,
+            );
         }
         WindowButton::Maximize => {
             ui.painter().rect_stroke(
