@@ -60,6 +60,8 @@ to go to either, both, or neither.
 | ENV-4 | No network access at runtime. No telemetry, no accounts, no update checks. |
 | ENV-5 | One instance per executable path; a second launch focuses the first and exits. |
 | ENV-6 | Audio decoding uses Symphonia only. FFmpeg is not a dependency. |
+| ENV-7 | Distribution is a zip containing SoundDeck.exe, README.md and LICENSE; no installer, no config, no audio. |
+| ENV-8 | The UI targets 100 % Windows scaling; other factors MUST remain usable, not pixel-perfect. |
 
 ## 5. Functional requirements
 
@@ -98,6 +100,8 @@ to go to either, both, or neither.
 | FR-5.3.7 | Removing a sound MUST be undoable once (`Ctrl+Z` restores the last removal at its original index). |
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
+| FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
+| FR-5.3.11 | (0.3.0) Decoded audio retained in memory MUST stay within 32 MB and 16 sounds; a sound that does not fit is played from disk and never preloaded. |
 
 ### 5.4 Playback
 
@@ -148,6 +152,7 @@ to go to either, both, or neither.
 | FR-5.7.6 | Hotkeys MUST be clearable without removing the sound. |
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
+| FR-5.7.9 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
 
 ### 5.8 Window and tray
 
@@ -335,6 +340,7 @@ top-level layer, so it cannot draw over modals or popups.
 | NFR-8.1.4 | Mixer wakeups ≤ 25/s idle | **20/s** |
 | NFR-8.1.5 | Playing audio ≤ 3 % of one core | ~2 % at 30 fps |
 | NFR-8.1.6 | Playback start latency not worse than the 0.15 s ring | unchanged |
+| NFR-8.1.7 | Trigger to audible MUST be ≤ 250 ms | ~165 ms |
 
 Rules that enforce them:
 
@@ -353,6 +359,8 @@ Rules that enforce them:
 | NFR-8.2.3 | 40 MB is an aspiration. It is not reachable with eframe/glow and requires a different UI stack (§13). |
 | NFR-8.2.4 | RAM-preloaded sounds count against the budget; the loop never does (streamed). |
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |
+| NFR-8.2.6 | (0.3.0) Retained decoded audio ≤ 32 MB and ≤ 16 sounds; the process MUST refuse work that would cross 100 MB. |
+| NFR-8.2.7 | The loop is excluded from these caps: it is streamed, not retained. |
 
 ### 8.3 Responsiveness and robustness
 
