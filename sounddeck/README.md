@@ -53,8 +53,24 @@ live in `config/` next to the executable.
   Monitor/Cable captions also collapse so the meters stay in view.
 - One instance per executable path. Launching the same exe again focuses the
   window that is already open (including one hidden in the tray).
-- Settings screen (`Ctrl+,` or the Settings button) for loop player, RAM preload,
-  theme, `Animate UI`, developer info, and opening the config folder.
+- Settings screen (`Ctrl+,` or the Settings button): full-window **Playback / Audio /
+  Appearance / About** tabs. Changes apply immediately and save automatically.
+
+## Settings
+
+The Settings button (or `Ctrl+,`) replaces the soundboard with a full-window view.
+The rail on the left switches tabs; the status bar stays available.
+
+- **Playback** — looping track (file, transport, its own volume), hotkey-sound RAM
+  preload.
+- **Audio** — Monitor and Cable devices and volumes, the link switch, master gain,
+  and a device refresh.
+- **Appearance** — theme picker, reload themes, Animate UI.
+- **About** — version, portable note, config folder, developer details.
+
+Return with **Back to soundboard**, `Esc`, or `Ctrl+,`. `Esc` closes an open dropdown
+first. There is no Save button; every change applies immediately and is written after
+a short debounce.
 
 ## Keyboard
 
@@ -66,7 +82,7 @@ live in `config/` next to the executable.
 | `Ctrl+,` | Settings |
 | `Ctrl+Z` | Undo removal |
 | `Ctrl+Q` | Quit |
-| `Esc` | Close overlay / cancel drag / clear search / stop playback |
+| `Esc` | Close popup / return from Settings / clear search / stop playback |
 | `Delete` | Remove selected |
 | `Space` | Play selected |
 | `F2` | Rename selected |

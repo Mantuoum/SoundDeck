@@ -40,6 +40,36 @@ enum RamState {
     Mixed,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Playback,
+    Audio,
+    Appearance,
+    About,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 4] = [Self::Playback, Self::Audio, Self::Appearance, Self::About];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Playback => "Playback",
+            Self::Audio => "Audio",
+            Self::Appearance => "Appearance",
+            Self::About => "About",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Self::Playback => "Playback and memory.",
+            Self::Audio => "Outputs, routing and levels.",
+            Self::Appearance => "Theme and motion.",
+            Self::About => "Version, developer and config.",
+        }
+    }
+}
+
 pub struct Sound {
     pub id: u64,
     pub name: String,
@@ -165,6 +195,8 @@ pub struct App {
     /// When the settings modal was opened, used for the backdrop/rise tween.
     settings_opened: Instant,
     settings_was_open: bool,
+    settings_tab: SettingsTab,
+    settings_tab_fade: Instant,
     dirty: bool,
     save_failed: bool,
     last_save: Instant,
@@ -397,6 +429,8 @@ impl App {
             page_fade: Instant::now() - Duration::from_secs(10),
             settings_opened: Instant::now() - Duration::from_secs(10),
             settings_was_open: false,
+            settings_tab: SettingsTab::Playback,
+            settings_tab_fade: Instant::now() - Duration::from_secs(10),
             dirty: theme_was_corrected,
             save_failed: false,
             last_save: Instant::now(),
@@ -1380,7 +1414,17 @@ impl App {
             let tabs = ui.allocate_ui_with_layout(
                 Vec2::new(tabs_width, 30.0),
                 Layout::left_to_right(Align::Center),
-                |ui| self.library_bar(ui, tabs_width),
+                |ui| {
+                    if self.show_settings {
+                        ui.label(
+                            RichText::new("Settings")
+                                .size(13.0)
+                                .color(theme::muted()),
+                        );
+                    } else {
+                        self.library_bar(ui, tabs_width);
+                    }
+                },
             );
             tabs_rect = tabs.response.rect;
 
@@ -1614,10 +1658,10 @@ impl App {
             |ui| {
                 let full = Vec2::new(ui.available_width(), 32.0);
                 if ghost_button(ui, "Settings", full)
-                    .on_hover_text("Theme, tray behaviour, about (Ctrl+,)")
+                    .on_hover_text("Playback, audio, themes, about (Ctrl+,)")
                     .clicked()
                 {
-                    self.show_settings = true;
+                    self.open_settings(ui.ctx());
                 }
                 if self.cfg.loop_enabled {
                     ui.add_space(6.0);
@@ -2665,22 +2709,78 @@ impl App {
     }
 
     fn modals(&mut self, ctx: &egui::Context) {
-        self.settings_modal(ctx);
         self.capture_modal(ctx);
         self.rename_modal(ctx);
         self.log_modal(ctx);
     }
 
-    fn settings_modal(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
-        }
-        let screen = ctx.screen_rect();
-        let mut close = false;
+    // ---------------------------------------------------------------------
+    // Settings screen
+    // ---------------------------------------------------------------------
 
-        // Dim backdrop that also swallows clicks outside the settings card.
-        let t = if anim::enabled() {
+    fn select_settings_tab(&mut self, tab: SettingsTab, ctx: &egui::Context) {
+        if self.settings_tab != tab {
+            self.settings_tab = tab;
+            self.settings_tab_fade = Instant::now();
+            ctx.request_repaint();
+        }
+    }
+
+    fn settings_rail(&mut self, ui: &mut Ui) {
+        let open = if anim::enabled() {
             let t = anim::ease_out(self.settings_opened.elapsed().as_secs_f32() / 0.09);
+            if t < 1.0 {
+                ui.ctx().request_repaint();
+            }
+            t
+        } else {
+            1.0
+        };
+        ui.set_opacity(open);
+
+        if settings_back(ui) {
+            self.close_settings(ui.ctx());
+        }
+        ui.add_space(8.0);
+        for tab in SettingsTab::ALL
+            .into_iter()
+            .filter(|tab| *tab != SettingsTab::About)
+        {
+            if settings_nav_item(ui, tab, self.settings_tab == tab) {
+                self.select_settings_tab(tab, ui.ctx());
+            }
+            ui.add_space(3.0);
+        }
+
+        // Footer pinned to the bottom: version, autosave note, About.
+        let footer_height = 82.0;
+        ui.add_space((ui.available_height() - footer_height).max(8.0));
+        if settings_nav_item(ui, SettingsTab::About, self.settings_tab == SettingsTab::About) {
+            self.select_settings_tab(SettingsTab::About, ui.ctx());
+        }
+        ui.add_space(8.0);
+        settings_rule(ui);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Changes save automatically")
+                .size(9.0)
+                .color(theme::faint()),
+        );
+        ui.label(
+            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .size(9.5)
+                .color(theme::faint()),
+        );
+    }
+
+    fn settings_content(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        let open = if anim::enabled() {
+            anim::ease_out(self.settings_opened.elapsed().as_secs_f32() / 0.09)
+        } else {
+            1.0
+        };
+        let tab_fade = if anim::enabled() {
+            let t = anim::ease_out(self.settings_tab_fade.elapsed().as_secs_f32() / 0.09);
             if t < 1.0 {
                 ctx.request_repaint();
             }
@@ -2688,222 +2788,469 @@ impl App {
         } else {
             1.0
         };
-        let overlay = egui::Area::new(Id::new("settings_backdrop"))
-            .fixed_pos(screen.min)
-            .order(Order::Middle)
-            .show(ctx, |ui| {
-                let (rect, response) = ui.allocate_exact_size(screen.size(), Sense::click());
-                ui.painter().rect_filled(
-                    rect,
-                    CornerRadius::ZERO,
-                    theme::alpha(theme::bg(), (210.0 * t) as u8),
-                );
-                response
-            });
-        if overlay.inner.clicked() {
-            close = true;
-        }
+        ui.set_opacity(open * tab_fade);
 
-        egui::Window::new("settings_window")
-            .anchor(Align2::CENTER_CENTER, Vec2::new(0.0, (1.0 - t) * 8.0))
-            .order(Order::Foreground)
-            .title_bar(false)
-            .collapsible(false)
-            .resizable(false)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel())
-                    .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(theme::RADIUS_XL)
-                    .inner_margin(Margin::same(20)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(600.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("Settings")
-                            .font(theme::medium(24.0))
-                            .color(theme::text()),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                        let painter = ui.painter().clone();
-                        let response = close_button(ui, &painter, rect, Id::new("settings_close"));
-                        if response.clicked() {
-                            close = true;
-                        }
-                        response.on_hover_text("Close settings");
-                    });
+        let tab = self.settings_tab;
+        settings_header(ui, tab);
+        ui.add_space(14.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt(("settings_scroll", tab.title()))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.scope(|ui| {
+                    ui.set_width(ui.available_width().min(780.0));
+                    match tab {
+                        SettingsTab::Playback => self.settings_page_playback(ui),
+                        SettingsTab::Audio => self.settings_page_audio(ui),
+                        SettingsTab::Appearance => self.settings_page_appearance(ctx, ui),
+                        SettingsTab::About => self.settings_page_about(ui),
+                    }
+                    ui.add_space(12.0);
                 });
-                ui.add_space(10.0);
-                section_line(ui);
-                ui.add_space(8.0);
-
-                let max_height = (screen.height() - 190.0).max(260.0);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(max_height)
-                    .show(ui, |ui| {
-                        section_label(ui, "PLAYBACK");
-                        ui.add_space(4.0);
-                        let mut loop_enabled = self.cfg.loop_enabled;
-                        if ui.checkbox(&mut loop_enabled, "Looping track").changed() {
-                            self.cfg.loop_enabled = loop_enabled;
-                            if !loop_enabled {
-                                self.engine.stop_loop();
-                                self.loop_state = LoopState::Idle;
-                            }
-                            self.loop_checked_at =
-                                Instant::now() - Duration::from_secs(10);
-                            self.refresh_loop_missing(true);
-                            self.mark_dirty();
-                        }
-                        ui.label(
-                            RichText::new("Show a loop player under the meters.")
-                                .size(10.5)
-                                .color(theme::faint()),
-                        );
-                        ui.add_space(4.0);
-                        let ram_state = self.ram_summary();
-                        let enabled = ram_state.is_some();
-                        let on = matches!(ram_state, Some(RamState::On));
-                        let mut checked = on;
-                        let resp = ui.add_enabled(
-                            enabled,
-                            egui::Checkbox::new(&mut checked, "Load hotkey sounds into RAM"),
-                        );
-                        if resp.changed() {
-                            self.set_all_hotkey_ram(checked);
-                            self.mark_dirty();
-                        }
-                        ui.label(
-                            RichText::new(if enabled {
-                                "Hotkey sounds stay in memory."
-                            } else {
-                                "Assign a hotkey to a sound first."
-                            })
-                            .size(10.5)
-                            .color(theme::faint()),
-                        );
-                        ui.add_space(4.0);
-                        if ghost_button(ui, "Refresh audio devices", Vec2::new(190.0, 26.0))
-                            .clicked()
-                        {
-                            self.refresh_devices();
-                        }
-                        ui.add_space(8.0);
-
-                        section_label(ui, "APPEARANCE");
-                        ui.add_space(4.0);
-                        let mut selected_theme = self.cfg.theme.clone();
-                        let current_name = theme::available()
-                            .iter()
-                            .find(|(id, _)| id == &selected_theme)
-                            .map(|(_, name)| name.clone())
-                            .unwrap_or_else(|| selected_theme.clone());
-                        ComboBox::from_id_salt("settings_theme")
-                            .width(ui.available_width())
-                            .selected_text(current_name)
-                            .show_ui(ui, |ui| {
-                                for (id, name) in theme::available() {
-                                    if ui
-                                        .selectable_label(selected_theme == id, name)
-                                        .clicked()
-                                    {
-                                        selected_theme = id;
-                                        ui.close_menu();
-                                    }
-                                }
-                            });
-                        if selected_theme != self.cfg.theme {
-                            self.cfg.theme = selected_theme;
-                            theme::set_theme(&self.cfg.theme);
-                            theme::apply_style(ctx);
-                            self.mark_dirty();
-                            ctx.request_repaint();
-                        }
-
-                        ui.add_space(8.0);
-                        let mut animate = self.cfg.animate_ui;
-                        if ui.checkbox(&mut animate, "Animate UI").changed() {
-                            self.cfg.animate_ui = animate;
-                            anim::set_user(animate);
-                            self.mark_dirty();
-                        }
-                        ui.label(
-                            RichText::new("Also follows the Windows animation setting.")
-                                .size(10.5)
-                                .color(theme::faint()),
-                        );
-
-                        ui.add_space(4.0);
-                        if ghost_button(ui, "Reload themes", Vec2::new(150.0, 26.0))
-                            .on_hover_text("Re-read config/themes/*.md")
-                            .clicked()
-                        {
-                            for warning in theme::reload() {
-                                self.log(StatusKind::Warning, warning);
-                            }
-                            if !theme::available()
-                                .iter()
-                                .any(|(id, _)| id == &self.cfg.theme)
-                            {
-                                self.cfg.theme = "graphite".to_string();
-                            }
-                            theme::set_theme(&self.cfg.theme);
-                            theme::apply_style(ctx);
-                            self.mark_dirty();
-                            ctx.request_repaint();
-                        }
-
-                        ui.add_space(14.0);
-                        section_line(ui);
-                        ui.add_space(8.0);
-                        section_label(ui, "ABOUT THE DEVELOPER");
-                        ui.label(
-                            RichText::new(DEVELOPER_NAME)
-                                .font(theme::medium(16.0))
-                                .color(theme::text()),
-                        );
-                        ui.label(
-                            RichText::new(DEVELOPER_ROLE)
-                                .size(11.5)
-                                .color(theme::muted()),
-                        );
-                        ui.label(
-                            RichText::new(DEVELOPER_BLURB)
-                                .size(11.5)
-                                .color(theme::faint()),
-                        );
-                        ui.label(
-                            RichText::new(DEVELOPER_LINK)
-                                .size(11.0)
-                                .color(theme::accent()),
-                        );
-
-                        ui.add_space(14.0);
-                        section_line(ui);
-                        ui.add_space(8.0);
-                        section_label(ui, "ABOUT");
-                        ui.label(
-                            RichText::new(format!("{APP_NAME} v0.1.0"))
-                                .size(12.5)
-                                .color(theme::text()),
-                        );
-                        ui.add_space(4.0);
-                        if ghost_button(ui, "Open config folder", Vec2::new(170.0, 28.0))
-                            .clicked()
-                        {
-                            let _ = std::process::Command::new("explorer")
-                                .arg(model::config_dir())
-                                .spawn();
-                        }
-                    });
             });
+    }
 
-        if close {
-            self.show_settings = false;
+    fn settings_page_playback(&mut self, ui: &mut Ui) {
+        settings_group(
+            ui,
+            "Background loop",
+            Some("One file on repeat, under the sound effects."),
+            |ui| {
+                let mut enabled = self.cfg.loop_enabled;
+                let mut toggled = false;
+                settings_row(
+                    ui,
+                    "Looping track",
+                    Some(
+                        "Follows Monitor and Cable. Keeps playing through Stop all and library switches.",
+                    ),
+                    80.0,
+                    |ui| {
+                        toggled = settings_switch(
+                            ui,
+                            Id::new("settings_loop_enabled"),
+                            &mut enabled,
+                            true,
+                        );
+                    },
+                );
+                if toggled {
+                    self.set_loop_enabled(enabled);
+                }
+                if self.cfg.loop_enabled {
+                    settings_divider(ui);
+                    self.loop_settings_body(ui);
+                }
+            },
+        );
+
+        settings_group(ui, "Hotkey sounds", None, |ui| {
+            let ram = self.ram_summary();
+            let enabled = ram.is_some();
+            let mut on = matches!(ram, Some(RamState::On));
+            let mut changed = false;
+            settings_row(
+                ui,
+                "Load hotkey sounds into RAM",
+                Some(if enabled {
+                    "Hotkey sounds stay decoded in memory."
+                } else {
+                    "Assign a hotkey to a sound first."
+                }),
+                80.0,
+                |ui| {
+                    changed =
+                        settings_switch(ui, Id::new("settings_ram"), &mut on, enabled);
+                },
+            );
+            if changed {
+                self.set_all_hotkey_ram(on);
+                self.mark_dirty();
+            }
+            let loaded = self.playback.loaded_count();
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(if loaded == 1 {
+                    "1 hotkey sound loaded.".to_string()
+                } else {
+                    format!("{loaded} hotkey sounds loaded.")
+                })
+                .size(10.5)
+                .color(theme::faint()),
+            );
+        });
+    }
+
+    fn loop_settings_body(&mut self, ui: &mut Ui) {
+        let path = self.cfg.loop_path.as_deref().map(model::resolve_path);
+        let name = path
+            .as_ref()
+            .map(|path| display_name(path))
+            .unwrap_or_else(|| "No loop file".to_string());
+        let state = self.loop_state.clone();
+        let error = state.error().map(str::to_string);
+        let active = state.is_active();
+        let missing = path.is_some() && self.loop_missing;
+        let has_file = path.is_some() && !missing;
+        let playable = has_file && error.is_none();
+        let retry = has_file && error.is_some();
+
+        ui.horizontal(|ui| {
+            let controls_width = 190.0;
+            let label_width = (ui.available_width() - controls_width - 10.0).max(120.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(label_width, 34.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    let name_color = if missing || error.is_some() {
+                        theme::red()
+                    } else if has_file {
+                        theme::text()
+                    } else {
+                        theme::faint()
+                    };
+                    ui.label(RichText::new(&name).size(12.5).color(name_color));
+                    ui.add_space(2.0);
+                    let (status, color) = if missing {
+                        ("File missing", theme::red())
+                    } else if let Some(message) = &error {
+                        (message.as_str(), theme::red())
+                    } else if active {
+                        ("Playing", theme::accent())
+                    } else if path.is_some() {
+                        ("Ready", theme::muted())
+                    } else {
+                        ("No file selected", theme::faint())
+                    };
+                    ui.label(RichText::new(status).size(10.5).color(color));
+                },
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if active {
+                    "Stop"
+                } else if retry {
+                    "Retry"
+                } else {
+                    "Play"
+                };
+                if accent_button_enabled(
+                    ui,
+                    label,
+                    Vec2::new(78.0, 26.0),
+                    playable || retry || active,
+                )
+                .clicked()
+                    && (playable || retry || active)
+                {
+                    self.toggle_loop();
+                }
+                if ghost_button(
+                    ui,
+                    if missing { "Locate" } else { "Choose file" },
+                    Vec2::new(100.0, 26.0),
+                )
+                .clicked()
+                {
+                    self.pick_loop_file();
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+        settings_row(
+            ui,
+            "Volume",
+            Some("Independent of Monitor and Cable."),
+            260.0,
+            |ui| {
+                let mut requested = None;
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::new(260.0, 24.0), Sense::hover());
+                volume::bar(
+                    ui,
+                    rect,
+                    Id::new("settings_loop_volume"),
+                    self.cfg.loop_volume,
+                    |value| requested = Some(value),
+                    false,
+                );
+                if let Some(value) = requested {
+                    self.set_loop_volume(value);
+                }
+            },
+        );
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Streamed from disk · starts stopped on launch")
+                .size(10.0)
+                .color(theme::faint()),
+        );
+    }
+
+    fn settings_page_audio(&mut self, ui: &mut Ui) {
+        if self.devices.is_empty() {
+            ui.label(
+                RichText::new("No output devices. Plug one in and refresh.")
+                    .size(11.5)
+                    .color(theme::amber()),
+            );
+            ui.add_space(10.0);
         }
+
+        settings_group(ui, "Monitor", Some("Plays on your headphones or speakers."), |ui| {
+            settings_row(ui, "Device", None, 260.0, |ui| {
+                self.device_selector(ui, Slot::Monitor);
+            });
+            settings_divider(ui);
+            settings_row(ui, "Volume", None, 260.0, |ui| {
+                self.device_volume(ui, Slot::Monitor);
+            });
+        });
+
+        settings_group(ui, "Cable", Some("The virtual output your other apps record."), |ui| {
+            settings_row(ui, "Device", None, 260.0, |ui| {
+                self.device_selector(ui, Slot::Cable);
+            });
+            settings_divider(ui);
+            settings_row(ui, "Volume", None, 260.0, |ui| {
+                self.device_volume(ui, Slot::Cable);
+            });
+        });
+
+        settings_group(ui, "Routing and gain", None, |ui| {
+            let mut linked = self.cfg.link_volumes;
+            let mut toggled = false;
+            settings_row(
+                ui,
+                "Link Monitor and Cable",
+                Some("One slider moves both outputs."),
+                80.0,
+                |ui| {
+                    toggled =
+                        settings_switch(ui, Id::new("settings_link"), &mut linked, true);
+                },
+            );
+            if toggled {
+                self.set_link_volumes(linked);
+            }
+
+            settings_divider(ui);
+            settings_row(
+                ui,
+                "Master gain",
+                Some("Applied to both outputs. Right-click the slider to reset."),
+                260.0,
+                |ui| {
+                    let mut gain = self.cfg.master_gain_db;
+                    if gain_control(ui, &mut gain, 190.0) {
+                        self.cfg.master_gain_db = gain;
+                        self.engine.set_master_gain_db(gain);
+                        self.mark_dirty();
+                    }
+                },
+            );
+
+            settings_divider(ui);
+            settings_row(
+                ui,
+                "Output devices",
+                Some("Rescan after plugging in or removing a device."),
+                200.0,
+                |ui| {
+                    if ghost_button(
+                        ui,
+                        "Refresh audio devices",
+                        Vec2::new(190.0, 26.0),
+                    )
+                    .clicked()
+                    {
+                        self.refresh_devices();
+                    }
+                },
+            );
+        });
+    }
+
+    fn settings_page_appearance(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        settings_group(ui, "Theme", None, |ui| {
+            settings_row(
+                ui,
+                "Theme",
+                Some("Shipped palettes live in config/themes/."),
+                260.0,
+                |ui| {
+                    self.theme_picker(ctx, ui, 240.0);
+                },
+            );
+            settings_divider(ui);
+            settings_row(
+                ui,
+                "Theme files",
+                Some("Markdown palettes. Reload after editing."),
+                200.0,
+                |ui| {
+                    if ghost_button(ui, "Reload themes", Vec2::new(150.0, 26.0))
+                        .on_hover_text("Re-read config/themes/*.md")
+                        .clicked()
+                    {
+                        self.reload_themes(ctx);
+                    }
+                },
+            );
+        });
+
+        settings_group(ui, "Motion", None, |ui| {
+            let mut animate = self.cfg.animate_ui;
+            let mut changed = false;
+            settings_row(
+                ui,
+                "Animate UI",
+                Some("60–90 ms transitions. Also follows the Windows animation setting."),
+                80.0,
+                |ui| {
+                    changed =
+                        settings_switch(ui, Id::new("settings_animate"), &mut animate, true);
+                },
+            );
+            if changed {
+                self.cfg.animate_ui = animate;
+                anim::set_user(animate);
+                self.mark_dirty();
+            }
+        });
+    }
+
+    fn settings_page_about(&mut self, ui: &mut Ui) {
+        settings_group(ui, "SoundDeck", None, |ui| {
+            ui.label(
+                RichText::new(APP_NAME)
+                    .font(theme::medium(17.0))
+                    .color(theme::text()),
+            );
+            ui.label(
+                RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                    .size(11.5)
+                    .color(theme::muted()),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("Portable build. Config and themes live beside the executable.")
+                    .size(10.5)
+                    .color(theme::faint()),
+            );
+            settings_divider(ui);
+            settings_row(
+                ui,
+                "Config folder",
+                Some("settings.json · libraries.json · themes/"),
+                200.0,
+                |ui| {
+                    if ghost_button(ui, "Open config folder", Vec2::new(170.0, 28.0))
+                        .clicked()
+                    {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(model::config_dir())
+                            .spawn();
+                    }
+                },
+            );
+        });
+
+        settings_group(ui, "Developer", None, |ui| {
+            ui.label(
+                RichText::new(DEVELOPER_NAME)
+                    .font(theme::medium(16.0))
+                    .color(theme::text()),
+            );
+            ui.label(
+                RichText::new(DEVELOPER_ROLE)
+                    .size(11.5)
+                    .color(theme::muted()),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(DEVELOPER_BLURB)
+                    .size(11.0)
+                    .color(theme::faint()),
+            );
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(DEVELOPER_LINK)
+                    .size(11.0)
+                    .color(theme::accent()),
+            );
+        });
+    }
+
+    fn set_loop_enabled(&mut self, enabled: bool) {
+        if self.cfg.loop_enabled == enabled {
+            return;
+        }
+        self.cfg.loop_enabled = enabled;
+        if !enabled {
+            self.engine.stop_loop();
+            self.loop_state = LoopState::Idle;
+            self.loop_missing = false;
+        }
+        self.loop_checked_at = Instant::now() - Duration::from_secs(10);
+        self.refresh_loop_missing(true);
+        self.mark_dirty();
+    }
+
+    fn set_link_volumes(&mut self, linked: bool) {
+        if self.cfg.link_volumes == linked {
+            return;
+        }
+        self.cfg.link_volumes = linked;
+        if linked {
+            let volume = self.slot_volume(Slot::Monitor);
+            self.set_slot_volume(Slot::Cable, volume);
+        }
+        self.mark_dirty();
+    }
+
+    fn theme_picker(&mut self, ctx: &egui::Context, ui: &mut Ui, width: f32) {
+        let mut selected = self.cfg.theme.clone();
+        let current_name = theme::available()
+            .iter()
+            .find(|(id, _)| id == &selected)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| selected.clone());
+        ComboBox::from_id_salt("settings_theme")
+            .width(width)
+            .selected_text(current_name)
+            .show_ui(ui, |ui| {
+                for (id, name) in theme::available() {
+                    if ui.selectable_label(selected == id, name).clicked() {
+                        selected = id;
+                        ui.close_menu();
+                    }
+                }
+            });
+        if selected != self.cfg.theme {
+            self.cfg.theme = selected;
+            theme::set_theme(&self.cfg.theme);
+            theme::apply_style(ctx);
+            self.mark_dirty();
+            ctx.request_repaint();
+        }
+    }
+
+    fn reload_themes(&mut self, ctx: &egui::Context) {
+        for warning in theme::reload() {
+            self.log(StatusKind::Warning, warning);
+        }
+        if !theme::available()
+            .iter()
+            .any(|(id, _)| id == &self.cfg.theme)
+        {
+            self.cfg.theme = "graphite".to_string();
+        }
+        theme::set_theme(&self.cfg.theme);
+        theme::apply_style(ctx);
+        self.mark_dirty();
+        ctx.request_repaint();
     }
 
     fn capture_modal(&mut self, ctx: &egui::Context) {
@@ -3302,6 +3649,9 @@ impl App {
     }
 
     fn draw_drop_overlay(&mut self, ctx: &egui::Context) {
+        if self.show_settings {
+            return;
+        }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         if !hovering || self.drag.is_some() {
             return;
@@ -3370,15 +3720,22 @@ impl App {
             return;
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Comma)) {
-            self.show_settings = true;
+            if self.show_settings {
+                self.close_settings(ctx);
+            } else {
+                self.open_settings(ctx);
+            }
             return;
         }
 
-        // Esc is a universal "back": close the current overlay, cancel a drag,
-        // clear a search, and only then stop all playback.
+        // Esc is a universal "back": close an open popup first, then the current
+        // overlay, cancel a drag, clear a search, and only then stop playback.
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if ctx.memory(|memory| memory.any_popup_open()) {
+                return;
+            }
             if self.show_settings {
-                self.show_settings = false;
+                self.close_settings(ctx);
             } else if self.show_log {
                 self.show_log = false;
             } else if self.drag.is_some() {
@@ -3390,10 +3747,6 @@ impl App {
                 self.log(StatusKind::Info, "Stopped all sounds");
             }
             ctx.request_repaint();
-            return;
-        }
-
-        if self.show_settings {
             return;
         }
 
@@ -3411,6 +3764,17 @@ impl App {
             )
         });
 
+        if quit {
+            self.quit = true;
+            self.save_now();
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+
+        if self.show_settings {
+            return;
+        }
+
         if open {
             self.open_file_dialog();
         }
@@ -3422,11 +3786,6 @@ impl App {
         }
         if undo {
             self.undo_remove();
-        }
-        if quit {
-            self.quit = true;
-            self.save_now();
-            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
         if typing {
             return;
@@ -3452,6 +3811,23 @@ impl App {
                 }
             }
         }
+    }
+
+    fn open_settings(&mut self, ctx: &egui::Context) {
+        self.show_settings = true;
+        self.settings_opened = Instant::now();
+        self.settings_tab_fade = Instant::now();
+        self.focus_search = false;
+        ctx.memory_mut(|memory| memory.stop_text_input());
+        ctx.request_repaint();
+    }
+
+    fn close_settings(&mut self, ctx: &egui::Context) {
+        self.show_settings = false;
+        self.focus_search = false;
+        ctx.memory_mut(|memory| memory.stop_text_input());
+        self.page_fade = Instant::now();
+        ctx.request_repaint();
     }
 
     fn tick(&mut self, ctx: &egui::Context) {
@@ -3526,9 +3902,12 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Detect the modal opening so its fade starts from zero on that frame.
+        // Detect the settings screen opening so its fade starts from zero.
         if self.show_settings && !self.settings_was_open {
             self.settings_opened = Instant::now();
+            self.settings_tab_fade = Instant::now();
+            self.focus_search = false;
+            ctx.memory_mut(|memory| memory.stop_text_input());
         }
         self.settings_was_open = self.show_settings;
 
@@ -3566,40 +3945,69 @@ impl eframe::App for App {
             )
             .show(ctx, |ui| self.status_bar(ctx, ui));
 
-        let side = egui::SidePanel::right("sidebar")
-            .resizable(false)
-            .exact_width(SIDEBAR_WIDTH)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel())
-                    // Extra bottom padding so the Settings button never sits
-                    // flush against the status bar.
-                    .inner_margin(Margin {
-                        left: 14,
-                        right: 14,
-                        top: 12,
-                        bottom: 22,
-                    }),
-            )
-            .show(ctx, |ui| self.side_panel(ui));
+        let side = if self.show_settings {
+            egui::SidePanel::left("settings_rail")
+                .resizable(false)
+                .exact_width(200.0)
+                .frame(
+                    Frame::NONE
+                        .fill(theme::panel_deep())
+                        .inner_margin(Margin {
+                            left: 14,
+                            right: 14,
+                            top: 14,
+                            bottom: 16,
+                        }),
+                )
+                .show(ctx, |ui| self.settings_rail(ui))
+        } else {
+            egui::SidePanel::right("sidebar")
+                .resizable(false)
+                .exact_width(SIDEBAR_WIDTH)
+                .frame(
+                    Frame::NONE
+                        .fill(theme::panel())
+                        // Extra bottom padding so the Settings button never sits
+                        // flush against the status bar.
+                        .inner_margin(Margin {
+                            left: 14,
+                            right: 14,
+                            top: 12,
+                            bottom: 22,
+                        }),
+                )
+                .show(ctx, |ui| self.side_panel(ui))
+        };
 
-        // Separator between the library and the sidebar. Clamp it to the area
+        // Separator between the rail and the content. Clamp it to the area
         // between the title bar and the status bar so it never bleeds into the
-        // status strip (which is drawn on top of the sidebar's layer).
+        // status strip (which is drawn on top of the panel's layer).
         let divider = egui::Rangef::new(
             titlebar_rect.bottom() + 1.0,
             status_rect.top(),
         );
+        let edge = if self.show_settings {
+            side.response.rect.right()
+        } else {
+            side.response.rect.left()
+        };
         ctx.layer_painter(LayerId::new(Order::Middle, Id::new("sidebar_border")))
-            .vline(
-                side.response.rect.left(),
-                divider,
-                Stroke::new(1.0_f32, theme::border()),
-            );
+            .vline(edge, divider, Stroke::new(1.0_f32, theme::border()));
 
-        egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin::symmetric(14, 10)))
-            .show(ctx, |ui| self.main_page(ui));
+        if self.show_settings {
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin {
+                    left: 28,
+                    right: 28,
+                    top: 20,
+                    bottom: 14,
+                }))
+                .show(ctx, |ui| self.settings_content(ctx, ui));
+        } else {
+            egui::CentralPanel::default()
+                .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin::symmetric(14, 10)))
+                .show(ctx, |ui| self.main_page(ui));
+        }
 
         // Window chrome: keep it below modals/drop overlays so popups are never
         // crossed by the title/status separators.
@@ -3645,6 +4053,311 @@ impl Drop for App {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+fn settings_header(ui: &mut Ui, tab: SettingsTab) {
+    ui.label(
+        RichText::new(tab.title())
+            .font(theme::medium(22.0))
+            .color(theme::text()),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(tab.subtitle())
+            .size(11.5)
+            .color(theme::faint()),
+    );
+}
+
+fn settings_group(
+    ui: &mut Ui,
+    title: &str,
+    description: Option<&str>,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    ui.label(
+        RichText::new(title)
+            .font(theme::medium(13.5))
+            .color(theme::text()),
+    );
+    if let Some(description) = description {
+        ui.add_space(2.0);
+        ui.label(
+            RichText::new(description)
+                .size(10.5)
+                .color(theme::faint()),
+        );
+    }
+    ui.add_space(8.0);
+    Frame::NONE
+        .fill(theme::card())
+        .stroke(Stroke::new(1.0_f32, theme::border_soft()))
+        .corner_radius(theme::RADIUS_LG)
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui);
+        });
+    ui.add_space(14.0);
+}
+
+fn settings_row(
+    ui: &mut Ui,
+    title: &str,
+    description: Option<&str>,
+    control_width: f32,
+    add_control: impl FnOnce(&mut Ui),
+) {
+    let width = ui.available_width();
+    if width < 620.0 {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).size(12.5).color(theme::text()));
+            if let Some(description) = description {
+                ui.add_space(2.0);
+                ui.label(
+                    RichText::new(description)
+                        .size(10.5)
+                        .color(theme::faint()),
+                );
+            }
+            ui.add_space(8.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 30.0),
+                Layout::top_down(Align::Min),
+                |ui| add_control(ui),
+            );
+        });
+    } else {
+        ui.horizontal_top(|ui| {
+            let label_width = (width - control_width - 16.0).max(160.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(label_width);
+                ui.label(RichText::new(title).size(12.5).color(theme::text()));
+                if let Some(description) = description {
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(description)
+                            .size(10.5)
+                            .color(theme::faint()),
+                    );
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(control_width, 30.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        ui.set_width(control_width);
+                        add_control(ui);
+                    },
+                );
+            });
+        });
+    }
+}
+
+fn settings_rule(ui: &mut Ui) {
+    let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 1.0));
+    ui.painter()
+        .rect_filled(rect, CornerRadius::ZERO, theme::border_soft());
+    ui.allocate_space(rect.size());
+}
+
+fn settings_divider(ui: &mut Ui) {
+    ui.add_space(12.0);
+    settings_rule(ui);
+    ui.add_space(12.0);
+}
+
+fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool {
+    let inner = ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), 22.0),
+        Layout::right_to_left(Align::Min),
+        |ui| {
+            ui.allocate_exact_size(
+                Vec2::new(40.0, 22.0),
+                if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
+            )
+        },
+    );
+    let (rect, response) = inner.inner;
+    let hover = anim::hover(ui, id.with("hover"), response.hovered() && enabled);
+    let painter = ui.painter();
+    if enabled && hover > 0.01 {
+        painter.rect_filled(
+            rect.expand(3.0),
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::accent(), (14.0 * hover) as u8),
+        );
+    }
+    paint_switch(painter, rect, *value, false, enabled);
+    let press = anim::press(ui, id.with("press"), response.is_pointer_button_down_on());
+    press_overlay(painter, rect, theme::RADIUS_MD, press);
+
+    let clicked = enabled && response.clicked();
+    if clicked {
+        *value = !*value;
+    }
+    clicked
+}
+
+fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 34.0),
+        Sense::click(),
+    );
+    let hover = anim::hover(
+        ui,
+        Id::new(("settings_nav", tab.title())),
+        response.hovered(),
+    );
+    let painter = ui.painter();
+    if active {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::accent(), 34),
+        );
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            Stroke::new(1.0_f32, theme::alpha(theme::accent(), 90)),
+            StrokeKind::Inside,
+        );
+    } else if hover > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::text(), (8.0 * hover) as u8),
+        );
+    }
+
+    let color = if active {
+        theme::accent()
+    } else if response.hovered() {
+        theme::text()
+    } else {
+        theme::muted()
+    };
+    let icon_rect = Rect::from_center_size(
+        Pos2::new(rect.left() + 18.0, rect.center().y),
+        Vec2::splat(15.0),
+    );
+    paint_settings_icon(painter, icon_rect, tab, color);
+    painter.text(
+        Pos2::new(rect.left() + 34.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        tab.title(),
+        theme::ui_font(12.5),
+        color,
+    );
+    response.clicked()
+}
+
+fn settings_back(ui: &mut Ui) -> bool {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), 26.0),
+        Sense::click(),
+    );
+    let hover = anim::hover(ui, Id::new("settings_back"), response.hovered());
+    let painter = ui.painter();
+    if hover > 0.01 {
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::text(), (7.0 * hover) as u8),
+        );
+    }
+    let color = if response.hovered() {
+        theme::text()
+    } else {
+        theme::muted()
+    };
+    let stroke = Stroke::new(1.4_f32, color);
+    let center = rect.left_center() + Vec2::new(9.0, 0.0);
+    painter.line_segment(
+        [center + Vec2::new(4.0, -4.0), center],
+        stroke,
+    );
+    painter.line_segment(
+        [center, center + Vec2::new(4.0, 4.0)],
+        stroke,
+    );
+    painter.text(
+        rect.left_center() + Vec2::new(22.0, 0.0),
+        Align2::LEFT_CENTER,
+        "Back to soundboard",
+        theme::ui_font(11.5),
+        color,
+    );
+    response
+        .on_hover_text("Back to the soundboard (Esc)")
+        .clicked()
+}
+
+fn paint_settings_icon(
+    painter: &egui::Painter,
+    rect: Rect,
+    tab: SettingsTab,
+    color: Color32,
+) {
+    let center = rect.center();
+    match tab {
+        SettingsTab::Playback => paint_play_icon(painter, rect, color),
+        SettingsTab::Audio => theme::speaker_icon(painter, rect, color),
+        SettingsTab::Appearance => {
+            painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
+            for offset in [
+                Vec2::new(-2.2, -2.0),
+                Vec2::new(2.2, -1.0),
+                Vec2::new(-1.0, 2.4),
+            ] {
+                painter.circle_filled(center + offset, 1.2, color);
+            }
+        }
+        SettingsTab::About => {
+            painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
+            painter.circle_filled(center + Vec2::new(0.0, -2.6), 1.0, color);
+            painter.line_segment(
+                [
+                    center + Vec2::new(0.0, -0.6),
+                    center + Vec2::new(0.0, 3.8),
+                ],
+                Stroke::new(1.4_f32, color),
+            );
+        }
+    }
+}
+
+fn gain_control(ui: &mut Ui, gain_db: &mut f32, slider_width: f32) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = slider_width.max(60.0);
+        let response = ui.add(
+            egui::Slider::new(gain_db, 0.0..=12.0)
+                .step_by(0.5)
+                .show_value(false)
+                .trailing_fill(true),
+        );
+        let edited = response.changed();
+        let reset = response.secondary_clicked();
+        response.on_hover_text("Master gain - both outputs. Right-click to reset.");
+        if reset {
+            *gain_db = 0.0;
+        }
+        ui.label(
+            RichText::new(format_gain_db(*gain_db))
+                .size(10.5)
+                .color(theme::muted())
+                .monospace(),
+        );
+        changed = edited || reset;
+    });
+    changed
+}
+
 fn draw_grid(
     ui: &mut Ui,
     sounds: &[Sound],
@@ -4532,15 +5245,6 @@ fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
     let press = anim::press(ui, Id::new(("tiny", text)), response.is_pointer_button_down_on());
     press_overlay(ui.painter(), response.rect, theme::RADIUS_SM, press);
     response
-}
-
-fn section_label(ui: &mut Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .size(10.5)
-            .color(theme::faint())
-            .extra_letter_spacing(1.5),
-    );
 }
 
 fn section_line(ui: &mut Ui) {
