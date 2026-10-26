@@ -39,6 +39,10 @@ pub struct Settings {
     pub loop_path: Option<String>,
     /// Linear loop level, independent of the Monitor/Cable volumes.
     pub loop_volume: f32,
+    /// Route the loop to the monitor output.
+    pub loop_on_monitor: bool,
+    /// Route the loop to the cable output.
+    pub loop_on_cable: bool,
     /// Parsed for older config files, but the window always starts at a fixed
     /// size, so this is no longer read or written.
     #[allow(dead_code)]
@@ -69,6 +73,8 @@ impl Default for Settings {
             loop_enabled: false,
             loop_path: None,
             loop_volume: 1.0,
+            loop_on_monitor: true,
+            loop_on_cable: true,
             window_size: None,
             animate_ui: true,
             minimize_to_tray: false,
@@ -338,6 +344,8 @@ mod tests {
         settings.loop_enabled = true;
         settings.loop_path = Some("C:\\loops\\rain.flac".to_string());
         settings.loop_volume = 0.42;
+        settings.loop_on_monitor = false;
+        settings.loop_on_cable = true;
         settings.minimize_to_tray = true;
         settings.show_gain_slider = false;
 
@@ -367,11 +375,22 @@ mod tests {
             Some("C:\\loops\\rain.flac")
         );
         assert!((loaded.settings.loop_volume - 0.42).abs() < 1e-6);
+        assert!(!loaded.settings.loop_on_monitor);
+        assert!(loaded.settings.loop_on_cable);
         assert!(loaded.settings.minimize_to_tray);
         assert!(!loaded.settings.show_gain_slider);
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn loop_outputs_default_to_on_for_old_files() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.loop_on_monitor);
+        assert!(settings.loop_on_cable);
+        assert!(!settings.minimize_to_tray);
+        assert!(settings.show_gain_slider);
     }
 
     #[test]

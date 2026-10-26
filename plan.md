@@ -813,7 +813,7 @@ Status: **implemented with the tray commit.** One home per control; terse copy.
 | Monitor/Cable device, volume, link | Board sidebar only |
 | Master gain | Board sidebar only (hideable) |
 | Refresh devices | Device dropdown menu |
-| Loop enable + file | Settings → Playback |
+| Loop enable + file + output routing | Settings → Playback |
 | Loop Play/Stop + volume | Board loop card only |
 | Hotkey RAM | Settings → Playback; toolbar pill stays as a quick status/toggle |
 | Theme / Reload / Animate UI | Settings → Appearance |
@@ -836,8 +836,8 @@ duplicated; loop transport/volume are not duplicated.
 ### 8.3 Layout rules
 
 - Header: title only, 10 px gap.
-- Playback: “Looping track” (Enabled switch, file row) and “Hotkey sounds”
-  (Load into RAM switch, count).
+- Playback: “Looping track” (Enabled switch, file row), “Loop outputs”
+  (Monitor/Cable switches), and “Hotkey sounds” (Load into RAM switch, count).
 - Appearance: “Theme” (dropdown, Reload) and “Motion” (Animate UI).
 - Window: “Tray” (Minimize to tray) and “Sidebar” (Show gain).
 - About: SoundDeck/version/config, Developer.
@@ -855,6 +855,21 @@ duplicated; loop transport/volume are not duplicated.
 - Single-click tray is inert; double-click toggles; right-click menu works.
 - No Settings control duplicates a sidebar control.
 - README/ARCHITECTURE updated; tests stay green.
+
+### 8.5 Loop output routing
+
+Added with this pass because it is the one place per-device control is useful:
+
+- `Settings.loop_on_monitor` and `loop_on_cable`, both default `true`.
+- Mixer now renders two buffers: voices are copied to both, the loop is written only to
+  the enabled outputs, then master gain is applied. The loop chunk is consumed even
+  when both are off, so the stream keeps time.
+- Settings → Playback has “Loop outputs”: Monitor and Cable switches. Both, either, or
+  neither can carry the loop. Sound effects still go to both.
+- Slot volumes and master gain apply per output. Loop volume remains global.
+- A silent loop (both off) keeps `Playing`; the user can re-enable an output live.
+- Tests cover monitor-only, cable-only, and both-off routing; storage defaults to on
+  for older config files.
 
 ## 9. Far-future: native UI rewrite (not scheduled)
 

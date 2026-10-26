@@ -297,6 +297,7 @@ impl App {
             cfg.master_gain_db,
         ));
         engine.set_loop_volume(cfg.loop_volume);
+        engine.set_loop_outputs(cfg.loop_on_monitor, cfg.loop_on_cable);
         if cfg.link_volumes {
             cfg.cable_volume = cfg.monitor_volume;
         }
@@ -2765,6 +2766,49 @@ impl App {
                 self.loop_settings_body(ui);
             }
         });
+
+        if self.cfg.loop_enabled {
+            settings_group(ui, "Loop outputs", |ui| {
+                let mut monitor = self.cfg.loop_on_monitor;
+                let mut monitor_changed = false;
+                settings_row(ui, "Monitor", 80.0, |ui| {
+                    monitor_changed = settings_switch(
+                        ui,
+                        Id::new("settings_loop_monitor"),
+                        &mut monitor,
+                        true,
+                    );
+                });
+                if monitor_changed {
+                    self.cfg.loop_on_monitor = monitor;
+                    self.engine.set_loop_outputs(
+                        self.cfg.loop_on_monitor,
+                        self.cfg.loop_on_cable,
+                    );
+                    self.mark_dirty();
+                }
+
+                settings_divider(ui);
+                let mut cable = self.cfg.loop_on_cable;
+                let mut cable_changed = false;
+                settings_row(ui, "Cable", 80.0, |ui| {
+                    cable_changed = settings_switch(
+                        ui,
+                        Id::new("settings_loop_cable"),
+                        &mut cable,
+                        true,
+                    );
+                });
+                if cable_changed {
+                    self.cfg.loop_on_cable = cable;
+                    self.engine.set_loop_outputs(
+                        self.cfg.loop_on_monitor,
+                        self.cfg.loop_on_cable,
+                    );
+                    self.mark_dirty();
+                }
+            });
+        }
 
         settings_group(ui, "Hotkey sounds", |ui| {
             let ram = self.ram_summary();

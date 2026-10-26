@@ -200,6 +200,8 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         loop_enabled: false,
         loop_path: None,
         loop_volume: 1.0,
+        loop_on_monitor: true,
+        loop_on_cable: true,
         animate_ui: true,
         minimize_to_tray: false,
         show_gain_slider: true,

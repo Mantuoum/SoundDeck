@@ -135,6 +135,7 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `loop_enabled` | Show the loop player |
 | `loop_path` | Loop file reference |
 | `loop_volume` | Linear `0..1` loop level, independent of outputs |
+| `loop_on_monitor` / `loop_on_cable` | Route the loop to each output independently |
 | `window_size` | Parsed for old files, ignored |
 | `animate_ui` | UI motion preference |
 | `minimize_to_tray` | Minimize hides to the tray instead of the taskbar |
@@ -220,12 +221,15 @@ Mixer
   master_gain              dB → linear
 ```
 
-`Mixer::render(out)`:
+`Mixer::render(monitor, cable)`:
 
-1. Mix each `Voice` (with a 2.5 ms fade-in and 5 ms fade-out).
-2. Mix the loop chunk, wrapping as needed, scaled by `loop_volume`.
-3. Apply `master_gain` and clamp to ±1.0.
-4. Remove finished voices.
+1. Mix each `Voice` into the common monitor buffer (2.5 ms fade-in, 5 ms fade-out).
+2. Copy it to the cable buffer.
+3. Mix the loop chunk, wrapping as needed, scaled by `loop_volume`; write it only to
+   the outputs enabled by `loop_on_monitor` / `loop_on_cable`. The chunk is consumed
+   even when both are off, so the stream keeps its position.
+4. Apply `master_gain` to both buffers and clamp to ±1.0.
+5. Remove finished voices; the ring push applies each output's volume.
 
 `Engine::play(id, samples, volume)` is **exclusive**: every current voice is told to
 fade out before the new one is pushed. `stop_all()` does the same to every voice. The
@@ -340,8 +344,9 @@ if late, and pushes to each `Ring` only when that output has a consumer.
 - Left rail: Back, Playback, Appearance, Window, About (bottom).
 - Content: fixed header + per-tab scroll; grouped cards and label/control rows.
   `SettingsTab` holds the tab metadata. Text is intentionally terse.
-- Playback owns loop enable/file and hotkey RAM; Appearance owns theme/motion; Window
-  owns minimize-to-tray and sidebar gain visibility; About owns version/config/dev.
+- Playback owns loop enable/file, loop output routing and hotkey RAM; Appearance owns
+  theme/motion; Window owns minimize-to-tray and sidebar gain visibility; About owns
+  version/config/dev.
 - Devices, output volumes, link and master gain live in the sidebar, not Settings.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
 - Shared helpers: `settings_group`, `settings_row`, `settings_switch`,
@@ -411,9 +416,9 @@ All values are persisted immediately (debounced).
 
 ### Loop
 
-Enable in Settings → Playback and choose the file there. Play/Stop and volume live on
-the board loop card; it survives tab switches, `Stop all`, and tray minimize, and
-stops on quit or when disabled.
+Enable in Settings → Playback and choose the file there; the same page routes the loop
+to Monitor and/or Cable. Play/Stop and volume live on the board loop card. It survives
+tab switches, `Stop all`, and tray minimize, and stops on quit or when disabled.
 
 ### Settings and version
 
@@ -472,9 +477,9 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 38 unit tests cover storage recovery/roundtrip, resampling (chunk invariance),
-  loop streaming (wrap, stop, file release, errors), mixer loop gain/wrap, volume
-  curve/clamps, and theme-file parsing.
+- 40 unit tests cover storage recovery/roundtrip, resampling (chunk invariance),
+  loop streaming (wrap, stop, file release, errors), mixer loop gain/wrap/routing,
+  volume curve/clamps, and theme-file parsing.
 - Tests use temporary directories named with the process/time; no user data.
 - `--diag` enumerates devices, opens Monitor/Cable, decodes a file, plays it, and
   prints WASAPI events.
