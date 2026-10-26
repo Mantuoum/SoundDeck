@@ -16,7 +16,7 @@ live in `config/` next to the executable.
 - **Libraries/tabs** in the title bar, after the app name. Add with `+`, rename
   or delete from a tab's context menu. Sounds can be moved between libraries from
   a sound's context menu, and the active library is remembered.
-- **Only the active library is live**: its hotkeys are registered and only its
+- **Only the active library is live**: its hotkeys are bound and only its
   hotkey sounds stay in RAM. Switching tabs stops playback and swaps the whole
   hotkey/RAM set. Hotkeys in background tabs never fire.
 - **Single active sound**: triggering a sound fades out whatever is playing
@@ -27,7 +27,8 @@ live in `config/` next to the executable.
   Cable, both, or neither. It plays underneath sound effects and keeps playing through
   `Stop all`, library switches, and tray minimize. No hotkey, no seeking, no progress
   bar.
-- Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...).
+- Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...). The key **passes through** to
+  the focused app, so `Shift+T` also types `T` while playing the assigned sound.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.
@@ -140,9 +141,13 @@ next start.
 
 ## Hotkey limitations
 
-`RegisterHotKey` is used, so it does not need administrator rights. Windows does
-not expose mouse buttons through this API, and Win-key combinations are not
-captured in the UI.
+Global hotkeys use a low-level keyboard hook, so they do not need administrator
+rights. The hook **always passes the key through** to the focused app: `Shift+T`
+types `T` and plays the sound. Auto-repeat fires once per press.
+
+Windows does not expose mouse buttons through this path, and Win-key combinations
+are not captured in the UI. The hook cannot see keystrokes aimed at elevated
+windows, and some security/anti-cheat tools may block keyboard hooks.
 
 ## Developer placeholders
 

@@ -28,7 +28,7 @@ service. Everything lives beside the executable.
 | Streaming loop | `src/audio/stream.rs` | Loop decoder thread and chunk channel |
 | Resampling | `src/audio/resample.rs` | Stateful 48 kHz stereo conversion |
 | Storage | `src/storage/*` | JSON schemas, atomic writes, backups, migration |
-| Hotkeys/tray | `src/hotkeys.rs` | `RegisterHotKey`, tray icon, message loop |
+| Hotkeys/tray | `src/hotkeys.rs` | Low-level keyboard hook, tray icon, message loop |
 | Theme | `src/ui/theme*.rs` | Markdown palettes, fonts, radii, icons, style |
 | Motion | `src/ui/anim.rs` | Hover/press/fade tweens, OS animation flag |
 | Volume | `src/ui/volume.rs` | Log curve, percentage, slim volume bar |
@@ -288,21 +288,24 @@ if late, and pushes to each `Ring` only when that output has a consumer.
 
 - `Hotkey` stores modifiers + a virtual-key code, parsed from strings such as `Alt+2`,
   `Ctrl+Shift+S`, `F8`.
-- The service runs one background thread with a hidden message window.
-- `set_bindings` unregisters the previous set and registers the new one with
-  `RegisterHotKey`; duplicate labels are rejected by the app before this call.
-- `WM_HOTKEY` triggers `Playback::play` directly, then sends `ServiceEvent::Pressed` so
-  the UI can flash the card.
-- Registration failures are sent back as `Registered` events and shown under the hotkey
-  pill plus the activity log.
+- The service runs one background thread with a hidden message window and a low-level
+  keyboard hook (`WH_KEYBOARD_LL`).
+- `set_bindings` updates the hook's binding list; no OS registration is involved, so a
+  hotkey never conflicts with another app. Duplicate labels are rejected by the app.
+- The hook callback looks up the modifier+key and posts `PLAY_MSG` to the hidden
+  window; the window plays the sound and sends `ServiceEvent::Pressed` for the UI flash.
+- The callback always calls `CallNextHookEx`, so the focused app receives the original
+  keystroke. Auto-repeat is ignored per key press until key-up.
+- Registration events now exist only to clear/set UI hotkey errors; the hook cannot
+  report “taken by another app”.
 - The tray icon supports double-click show/hide, right-click menu (Show/Hide, Stop
   all, Quit), and a tooltip updated with playing/RAM counts. Single left-click is
   deliberately inert.
 - Minimize follows `minimize_to_tray`: the custom button and an observed OS minimize
   hide to the tray when enabled, otherwise the window stays in the taskbar. Showing
   from the tray restores, focuses and clears stale meter peaks.
-- Only the active library's hotkeys are registered. Win-key chords and mouse buttons
-  are not supported; no administrator rights are needed.
+- Only the active library's hotkeys are bound. Win-key chords are not captured in the
+  UI and mouse buttons are unsupported; no administrator rights are needed.
 
 ---
 
@@ -477,9 +480,9 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 40 unit tests cover storage recovery/roundtrip, resampling (chunk invariance),
+- 41 unit tests cover storage recovery/roundtrip, resampling (chunk invariance),
   loop streaming (wrap, stop, file release, errors), mixer loop gain/wrap/routing,
-  volume curve/clamps, and theme-file parsing.
+  volume curve/clamps, hotkey matching, and theme-file parsing.
 - Tests use temporary directories named with the process/time; no user data.
 - `--diag` enumerates devices, opens Monitor/Cable, decodes a file, plays it, and
   prints WASAPI events.

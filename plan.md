@@ -871,6 +871,23 @@ Added with this pass because it is the one place per-device control is useful:
 - Tests cover monitor-only, cable-only, and both-off routing; storage defaults to on
   for older config files.
 
+### 8.6 Pass-through hotkeys
+
+Implemented after the tray work because the user needs to type while triggering sounds:
+
+- Replace `RegisterHotKey` with a `WH_KEYBOARD_LL` hook on the hotkey thread.
+- The callback matches modifier + VK against the active bindings, posts a `PLAY_MSG` to
+  the hidden window (which plays the sound), and always calls `CallNextHookEx`.
+- The focused app receives the original key: `Shift+T` types `T` **and** plays the
+  assigned sound. No re-injection, no recursion.
+- Auto-repeat fires once per key-down until key-up; modifiers come from
+  `GetAsyncKeyState` at the key event.
+- OS hotkey conflicts disappear (the hook observes rather than reserves). Duplicate
+  labels are still rejected by the app.
+- Limits: cannot see keys aimed at elevated windows; some security/anti-cheat tools
+  may block hooks; mouse buttons and Win-chord capture in the UI remain unsupported.
+- Tests: modifier/key matching; manual Notepad pass-through.
+
 ## 9. Far-future: native UI rewrite (not scheduled)
 
 Status: **parked.** No work in this plan. Revisit only after the current feature set is

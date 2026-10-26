@@ -1,5 +1,9 @@
-//! Global hotkeys (RegisterHotKey) + system tray, running on one background
-//! thread with a hidden Win32 message window.
+//! Global hotkeys (low-level keyboard hook) + system tray, running on one
+//! background thread with a hidden Win32 message window.
+//!
+//! The hook observes keys but always passes them to the focused app, so a
+//! `Shift+T` hotkey also types `T` in Notepad. Sounds are triggered by posting
+//! to the hidden window; the hook callback stays short.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -37,27 +41,14 @@ impl Mods {
         }
         out
     }
-
-    #[cfg(windows)]
-    fn win32_flags(self) -> u32 {
-        let mut flags = 0;
-        if self.alt {
-            flags |= 0x0001;
-        }
-        if self.ctrl {
-            flags |= 0x0002;
-        }
-        if self.shift {
-            flags |= 0x0004;
-        }
-        if self.win {
-            flags |= 0x0008;
-        }
-        flags
-    }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg(windows)]
+fn find_binding(bindings: &[(Hotkey, u64)], mods: Mods, vk: u32) -> Option<u64> {
+    bindings
+        .iter()
+        .find(|(hotkey, _)| hotkey.vk == vk && hotkey.mods == mods)
+        .map(|(_, id)| *id)
+}#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Hotkey {
     pub mods: Mods,
     pub vk: u32,
@@ -446,8 +437,9 @@ pub fn main_window_minimized() -> bool {
 #[cfg(windows)]
 mod win {
     use super::*;
-    use std::collections::HashMap;
+    use std::cell::RefCell;
     use std::mem::size_of;
+    use std::rc::Rc;
     use windows::core::{w, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, BOOL,
@@ -457,42 +449,52 @@ mod win {
         GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
-    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
     use windows::Win32::UI::Shell::{
         Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
         NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW,
-        RegisterWindowMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TrackPopupMenu,
-        TranslateMessage, CREATESTRUCTW, GWLP_USERDATA, HMENU, IDI_APPLICATION, MF_SEPARATOR,
-        MF_STRING, MSG, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WNDCLASSW, WM_APP, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY,
-        WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NULL, WM_RBUTTONUP, EnumWindows,
+        AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+        DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+        GetWindowTextW, GetWindowThreadProcessId, IsIconic, LoadIconW, PostMessageW,
+        PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
+        SetWindowLongPtrW, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
+        UnhookWindowsHookEx, CREATESTRUCTW, GWLP_USERDATA, HHOOK, HMENU, IDI_APPLICATION,
+        KBDLLHOOKSTRUCT, MF_SEPARATOR, MF_STRING, MSG, SW_RESTORE, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WM_APP, WM_CLOSE, WM_COMMAND,
+        WM_CONTEXTMENU, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NULL,
+        WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, EnumWindows,
     };
 
     pub const WAKE_MSG: u32 = WM_APP + 2;
     const TRAY_MSG: u32 = WM_APP + 1;
+    const PLAY_MSG: u32 = WM_APP + 3;
     const MENU_SHOW: usize = 1;
     const MENU_STOP: usize = 2;
     const MENU_QUIT: usize = 3;
 
+    struct HookShared {
+        bindings: Vec<(Hotkey, u64)>,
+        down: Vec<u32>,
+        hwnd: HWND,
+    }
+
+    thread_local! {
+        static HOOK: RefCell<Option<Rc<RefCell<HookShared>>>> = RefCell::new(None);
+    }
+
     struct State {
         rx: Receiver<Command>,
         tx: Sender<ServiceEvent>,
-        id_map: HashMap<i32, u64>,
-        next_id: i32,
         hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
         owns_icon: bool,
         tray_added: bool,
         tooltip: String,
         taskbar_created: u32,
-        registered: Vec<i32>,
         playback: Arc<crate::playback::Playback>,
+        hook: Rc<RefCell<HookShared>>,
+        keyboard_hook: Option<HHOOK>,
     }
 
     unsafe impl Send for State {}
@@ -533,18 +535,22 @@ mod win {
                 owns_icon = false;
             }
 
+            let hook = Rc::new(RefCell::new(HookShared {
+                bindings: Vec::new(),
+                down: Vec::new(),
+                hwnd: HWND::default(),
+            }));
             let state = Box::new(State {
                 rx,
                 tx: tx.clone(),
-                id_map: HashMap::new(),
-                next_id: 100,
                 hicon,
                 owns_icon,
                 tray_added: false,
                 tooltip,
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-                registered: Vec::new(),
                 playback,
+                hook,
+                keyboard_hook: None,
             });
             let state_ptr = Box::into_raw(state);
             let hwnd = match CreateWindowExW(
@@ -573,6 +579,22 @@ mod win {
 
             add_tray(hwnd);
             let state = &mut *state_ptr;
+            state.hook.borrow_mut().hwnd = hwnd;
+            HOOK.with(|slot| *slot.borrow_mut() = Some(state.hook.clone()));
+            state.keyboard_hook = match SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(keyboard_proc),
+                HINSTANCE::default(),
+                0,
+            ) {
+                Ok(hook) => Some(hook),
+                Err(err) => {
+                    let _ = tx.send(ServiceEvent::Fatal(format!(
+                        "Could not install the keyboard hook: {err}"
+                    )));
+                    None
+                }
+            };
             if state.tray_added {
                 let _ = tx.send(ServiceEvent::TrayReady(true));
             } else {
@@ -602,35 +624,16 @@ mod win {
         while let Ok(cmd) = state.rx.try_recv() {
             match cmd {
                 Command::SetBindings(bindings) => {
-                    for id in state.registered.drain(..) {
-                        let _ = UnregisterHotKey(hwnd, id);
-                    }
-                    state.id_map.clear();
-
+                    state.hook.borrow_mut().bindings = bindings
+                        .iter()
+                        .map(|(sound_id, hotkey)| (*hotkey, *sound_id))
+                        .collect();
                     for (sound_id, hk) in bindings {
-                        let id = state.next_id;
-                        state.next_id = state.next_id.wrapping_add(1).max(100);
-                        let flags =
-                            HOT_KEY_MODIFIERS(hk.mods.win32_flags() | 0x4000); // MOD_NOREPEAT
-                        match RegisterHotKey(hwnd, id, flags, hk.vk) {
-                            Ok(()) => {
-                                state.id_map.insert(id, sound_id);
-                                state.registered.push(id);
-                                let _ = state.tx.send(ServiceEvent::Registered {
-                                    sound_id,
-                                    hotkey: hk,
-                                    error: None,
-                                });
-                            }
-                            Err(err) => {
-                                let message = hotkey_error_text(&hk, &err);
-                                let _ = state.tx.send(ServiceEvent::Registered {
-                                    sound_id,
-                                    hotkey: hk,
-                                    error: Some(message),
-                                });
-                            }
-                        }
+                        let _ = state.tx.send(ServiceEvent::Registered {
+                            sound_id,
+                            hotkey: hk,
+                            error: None,
+                        });
                     }
                 }
                 Command::UpdateTip(tip) => {
@@ -648,16 +651,56 @@ mod win {
         }
     }
 
-    fn hotkey_error_text(hk: &Hotkey, err: &windows::core::Error) -> String {
-        let raw = err.code().0 as u32;
-        let is_taken = (raw & 0xFFFF) == 1409 || raw == 1409;
-        if is_taken {
-            format!(
-                "{} is already taken by another app or reserved by Windows",
-                hk.label()
-            )
-        } else {
-            format!("{} could not be registered: {err}", hk.label())
+    unsafe extern "system" fn keyboard_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if code >= 0 {
+            let msg = wparam.0 as u32;
+            if matches!(
+                msg,
+                WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
+            ) {
+                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                let vk = kb.vkCode;
+                let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                if let Some(shared) = HOOK.with(|slot| slot.borrow().clone()) {
+                    let mut hook = shared.borrow_mut();
+                    if is_down {
+                        if !hook.down.contains(&vk) {
+                            hook.down.push(vk);
+                            if let Some(id) =
+                                find_binding(&hook.bindings, current_mods(), vk)
+                            {
+                                let _ = PostMessageW(
+                                    hook.hwnd,
+                                    PLAY_MSG,
+                                    WPARAM(id as usize),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
+                    } else {
+                        hook.down.retain(|key| *key != vk);
+                    }
+                }
+            }
+        }
+        // Always pass the key through: the focused app sees exactly what was typed.
+        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    }
+
+    unsafe fn key_down(vk: i32) -> bool {
+        (GetAsyncKeyState(vk) as u16 & 0x8000) != 0
+    }
+
+    unsafe fn current_mods() -> Mods {
+        Mods {
+            ctrl: key_down(0x11),
+            alt: key_down(0x12),
+            shift: key_down(0x10),
+            win: key_down(0x5B) || key_down(0x5C),
         }
     }
 
@@ -670,12 +713,11 @@ mod win {
         }
         let state = ptr.as_mut();
         match msg {
-            WM_HOTKEY => {
+            PLAY_MSG => {
                 if let Some(state) = state {
-                    if let Some(sound_id) = state.id_map.get(&(wparam.0 as i32)) {
-                        state.playback.play(*sound_id);
-                        let _ = state.tx.send(ServiceEvent::Pressed(*sound_id));
-                    }
+                    let sound_id = wparam.0 as u64;
+                    state.playback.play(sound_id);
+                    let _ = state.tx.send(ServiceEvent::Pressed(sound_id));
                 }
                 LRESULT(0)
             }
@@ -726,10 +768,10 @@ mod win {
                 if let Some(state) = state {
                     remove_tray(hwnd, state);
                     let _ = state.tx.send(ServiceEvent::TrayReady(false));
-                    for id in state.registered.drain(..) {
-                        let _ = UnregisterHotKey(hwnd, id);
+                    if let Some(hook) = state.keyboard_hook.take() {
+                        let _ = UnhookWindowsHookEx(hook);
                     }
-                    state.id_map.clear();
+                    HOOK.with(|slot| *slot.borrow_mut() = None);
                     if state.owns_icon && !state.hicon.is_invalid() {
                         let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(state.hicon);
                     }
@@ -953,5 +995,24 @@ mod tests {
         assert!(Hotkey::parse("+").is_err());
         assert!(Hotkey::parse("A+B").is_err());
         assert!(Hotkey::parse("F25").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn binding_matches_modifiers_and_key() {
+        let shift_t = Hotkey::parse("Shift+T").unwrap();
+        let bindings = vec![(shift_t, 7)];
+        let shifted = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        assert_eq!(find_binding(&bindings, shifted, b'T' as u32), Some(7));
+        assert_eq!(find_binding(&bindings, Mods::default(), b'T' as u32), None);
+        assert_eq!(find_binding(&bindings, shifted, b'Y' as u32), None);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        assert_eq!(find_binding(&bindings, ctrl, b'T' as u32), None);
     }
 }
