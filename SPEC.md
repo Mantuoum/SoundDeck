@@ -104,6 +104,9 @@ to go to either, both, or neither.
 | FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. |
 | FR-5.3.12 | A sound that is not resident MUST stream from disk through a bounded channel. It MUST NOT be fully decoded into memory in order to be played once. |
 | FR-5.3.13 | The stream channel MUST default to 8 chunks of 1024 frames (~170 ms) and MUST be raised to 16 only if the `--stats` underrun counter or a listening test shows cracks. |
+| FR-5.3.14 | SoundDeck MUST NOT create, rename, move or delete audio files. Renaming a card or removing a sound changes the board only. |
+| FR-5.3.15 | Every configured file MUST be held open for reading with delete sharing denied, so Windows refuses rename and delete until the sound leaves the board or the app exits. Reads and writes by other processes stay allowed. |
+| FR-5.3.16 | If the volume disappears, a resident sound MUST play from memory; a non-resident sound MUST be reported as missing, with no panic and no loss of the other sounds. |
 
 ### 5.4 Playback
 

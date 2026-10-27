@@ -217,6 +217,7 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 | `samples` | `Some(Arc<Vec<f32>>)` when resident |
 | `loading`, `pending_play` | Preload in flight / play when it finishes |
 | `error`, `missing` | Last decode/link error; existence checked at startup and on playback when not resident |
+| `lock` | Open read handle that denies delete/rename while the sound is on the board |
 | `refused` | Why the cache declined; cleared by Reload or toggling preload |
 | `duration` | Container duration, used for stream progress |
 | `generation` | Invalidates stale loader results |
@@ -226,6 +227,9 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 - **Not resident:** `policy::route` decides between a preload job (≤ 30 s, fits the
   budget) and a stream thread. There is no full-file decode on the trigger path.
 - **Stream:** a bounded channel feeds a streamed mixer voice; memory is constant.
+- **Lock:** every configured file holds a read handle whose share mode omits
+  delete. Windows therefore refuses rename/delete until the sound is removed from
+  the board or the app exits. Decoders can still open the file.
 - The loader is a single thread reading a channel, so preload jobs are serialized.
 - `PlaybackEvent::{Loaded, Failed, Refused, Warning}` is polled by the UI.
 - Hotkeys call `Playback::play` from the hotkey thread; state is behind a `Mutex`.
@@ -599,6 +603,7 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/model.rs` | Paths, portable/relative resolution, extensions, formatting |
 | `src/playback/mod.rs` | Sound registry, preload jobs, streaming handoff, events |
 | `src/playback/policy.rs` | RAM vs stream decision, caps, LRU admission, process valve |
+| `src/playback/lock.rs` | Read lock that denies delete/rename while a sound is configured |
 | `src/hotkeys.rs` | Hotkey parse/register, stop-all binding, message window, tray, focus |
 | `src/icon.rs` | PNG decode/resize for window and tray icons |
 | `src/audio/reader.rs` | One Symphonia reader: open, decode block, resample, rewind |

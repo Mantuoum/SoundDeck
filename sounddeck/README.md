@@ -35,6 +35,11 @@ live in `config/` next to the executable.
 - **Long sounds stream from disk**: anything over 30 s, or that does not fit the
   preload budget, streams with constant memory. No file is fully decoded just to be
   played once.
+- **Files stay where they are**: SoundDeck never renames or deletes audio files.
+  Renaming a card or removing a sound changes only SoundDeck's config. While the
+  app is open, configured files are read-locked, so Windows refuses to rename or
+  delete them; remove the sound (or close the app) to release the file. The same
+  applies to ejecting a drive that holds locked sounds.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.

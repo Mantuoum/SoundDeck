@@ -204,7 +204,12 @@ impl Voice {
                 match rx.try_recv() {
                     Ok(next) => *chunk = next,
                     Err(TryRecvError::Empty) => {
-                        stats::stream_underrun();
+                        // The first render after a trigger happens before the
+                        // decoder delivers anything; that initial silence is not
+                        // an underrun. Only count starvation after audio started.
+                        if self.position > 0 {
+                            stats::stream_underrun();
+                        }
                         return None;
                     }
                     Err(TryRecvError::Disconnected) => {

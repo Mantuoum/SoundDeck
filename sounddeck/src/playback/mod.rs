@@ -7,7 +7,10 @@
 //! the answer: keep a buffer, or stream the file from disk. There is no third
 //! path where a whole file is decoded just to be played once.
 
+mod lock;
 pub mod policy;
+
+use lock::FileLock;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +29,8 @@ use policy::{Route, StreamReason, Usage};
 
 struct Playable {
     path: PathBuf,
+    /// Held for as long as the sound is on the board; denies delete and rename.
+    lock: Option<FileLock>,
     volume: f32,
     samples: Option<Arc<Vec<f32>>>,
     loading: bool,
@@ -46,6 +51,7 @@ impl Playable {
     fn new(path: PathBuf, volume: f32) -> Self {
         Self {
             path,
+            lock: None,
             volume,
             samples: None,
             loading: false,
@@ -65,6 +71,15 @@ impl Playable {
             .as_ref()
             .map(|samples| samples.len() * policy::SAMPLE_BYTES)
             .unwrap_or(0)
+    }
+
+    /// Keeps the read lock current. A stale handle (unplugged volume) is replaced
+    /// on the next attempt; failure is not fatal, playback decides what to do.
+    fn ensure_lock(&mut self) {
+        let valid = self.lock.as_ref().map(FileLock::is_valid).unwrap_or(false);
+        if !valid {
+            self.lock = FileLock::acquire(&self.path).ok();
+        }
     }
 }
 
@@ -150,6 +165,7 @@ impl Playback {
         if let Some(entry) = state.get_mut(&id) {
             if entry.path != path {
                 entry.path = path;
+                entry.lock = None;
                 entry.samples = None;
                 entry.error = None;
                 entry.loading = false;
@@ -159,10 +175,12 @@ impl Playback {
                 entry.generation += 1;
             }
             entry.volume = volume;
+            entry.ensure_lock();
             entry.missing = !entry.path.is_file();
             return;
         }
         let mut entry = Playable::new(path, volume);
+        entry.ensure_lock();
         entry.missing = !entry.path.is_file();
         state.insert(id, entry);
     }
@@ -184,6 +202,7 @@ impl Playback {
                 return;
             };
             entry.path = path;
+            entry.lock = None;
             entry.samples = None;
             entry.error = None;
             entry.loading = false;
@@ -191,6 +210,7 @@ impl Playback {
             entry.refused = None;
             entry.duration = None;
             entry.generation += 1;
+            entry.ensure_lock();
             entry.missing = !entry.path.is_file();
             if reload && entry.retain {
                 entry.loading = true;
@@ -312,6 +332,7 @@ impl Playback {
                 self.engine.play(id, samples, entry.volume);
                 return;
             }
+            entry.ensure_lock();
             entry.missing = !entry.path.is_file();
             if entry.missing {
                 entry.error = Some(format!("File not found: {}", entry.path.display()));
@@ -367,7 +388,7 @@ impl Playback {
         SoundInfo {
             loading: entry.loading,
             error: entry.error.clone(),
-            missing: entry.missing,
+            missing: entry.missing && entry.samples.is_none(),
             loaded: entry.samples.is_some(),
             refused: entry.refused.is_some(),
         }
@@ -388,7 +409,7 @@ impl Playback {
                 SoundInfo {
                     loading: entry.loading,
                     error: entry.error.clone(),
-                    missing: entry.missing,
+                    missing: entry.missing && entry.samples.is_none(),
                     loaded: entry.samples.is_some(),
                     refused: entry.refused.is_some(),
                 },
@@ -605,6 +626,7 @@ fn loader_loop(
                             }
                             entry.loading = false;
                             entry.error = None;
+                            entry.missing = false;
                             entry.duration = Some(audio.duration_secs);
                             pending = std::mem::take(&mut entry.pending_play);
                             if keep {
@@ -769,6 +791,7 @@ mod tests {
         );
         assert_eq!(playback.cache_usage().sounds, 0);
         assert!(!playback.info(1).loaded);
+        drop(playback);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -793,6 +816,7 @@ mod tests {
         assert_eq!(playback.cache_usage().sounds, 1);
         assert!(playback.cache_usage().bytes > 0);
         assert!(playback.info(1).loaded);
+        drop(playback);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -809,6 +833,7 @@ mod tests {
         playback.play(2);
         assert!(playback.cache_usage().sounds == 0);
         assert!(!playback.info(2).loaded);
+        drop(playback);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -825,5 +850,63 @@ mod tests {
                 .any(|event| matches!(event, PlaybackEvent::Failed { missing: true, .. })),
             "got {events:?}"
         );
+    }
+
+    #[test]
+    fn removing_a_sound_releases_its_file() {
+        let dir = temp_dir("unlock");
+        let path = dir.join("tone.wav");
+        write_wav(&path, 1);
+
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine);
+        playback.register(9, path.clone(), 1.0);
+
+        assert!(
+            fs::remove_file(&path).is_err(),
+            "a configured sound must be locked against deletion"
+        );
+        playback.remove(9);
+        assert!(
+            fs::remove_file(&path).is_ok(),
+            "removing the card must release the lock"
+        );
+        drop(playback);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_resident_sound_ignores_a_missing_file() {
+        let dir = temp_dir("resident-missing");
+        let path = dir.join("tone.wav");
+        write_wav(&path, 1);
+
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine.clone());
+        playback.register(4, path, 1.0);
+        playback.set_retain(4, true);
+        let events = wait_for_events(&playback, Duration::from_secs(5));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, PlaybackEvent::Loaded { .. })));
+
+        // The volume disappears: the path is unreachable, the samples are not.
+        playback.mark_missing(4, true, Some("volume disconnected".into()));
+        playback.play(4);
+
+        assert!(engine.is_playing(), "resident audio must still play");
+        assert!(
+            !playback
+                .poll_events()
+                .iter()
+                .any(|event| matches!(event, PlaybackEvent::Failed { .. })),
+            "no failure for a resident sound"
+        );
+        assert!(
+            !playback.info(4).missing,
+            "a resident sound must not look missing"
+        );
+        drop(playback);
+        let _ = fs::remove_dir_all(dir);
     }
 }
