@@ -399,14 +399,21 @@ fn loader_loop(
         // Precheck from container metadata: a long file must never be decoded
         // just to be refused afterwards.
         if retain {
-            if let Some(bytes) = probe_bytes(&job.path) {
-                if bytes > memory::PER_SOUND_RETAIN_BYTES {
+            match probe_bytes(&job.path) {
+                Some(bytes) if bytes > memory::PER_SOUND_RETAIN_BYTES => {
                     retain = false;
                     refusal = Some(format!(
                         "not preloaded because it is {:.0}s long (limit {}s)",
                         memory::seconds_for_bytes(bytes),
                         memory::RETAIN_SECONDS_CAP as u32
                     ));
+                }
+                Some(_) => {}
+                None => {
+                    // Fail closed: without a duration estimate we cannot promise
+                    // the decode stays inside the budget.
+                    retain = false;
+                    refusal = Some("not preloaded because its duration could not be read".into());
                 }
             }
         }
