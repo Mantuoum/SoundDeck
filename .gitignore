@@ -1,6 +1,9 @@
 # Rust build output
 sounddeck/target/
 
+# Release archives produced by scripts/package.ps1
+dist/
+
 # Portable review build (binary + runtime config + demo library)
 sounddeck/review/
 

@@ -1,0 +1,66 @@
+name: Release
+
+# Tagging is the release trigger: `git tag v0.2.0 && git push origin v0.2.0`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sounddeck
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          if (-not $tag.StartsWith('v')) { throw "Tag '$tag' must start with v" }
+          $manifest = Get-Content -Raw sounddeck/Cargo.toml
+          $match = [regex]::Match($manifest, '(?m)^\s*version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) { throw 'Could not read the crate version' }
+          $version = $match.Groups[1].Value
+          if ($tag.Substring(1) -ne $version) {
+            throw "Tag $tag does not match Cargo.toml version $version"
+          }
+          Write-Host "Tag $tag matches crate version $version"
+
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SoundDeck-${{ github.ref_name }}-win64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release create $tag dist/*.zip dist/*.sha256 `
+            --title "SoundDeck $tag" `
+            --generate-notes `
+            --verify-tag
