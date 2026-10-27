@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod hotkeys;
 mod icon;
+mod memory;
 mod model;
 mod playback;
 mod stats;
@@ -74,7 +75,56 @@ fn lower_process_priority() {
     }
 }
 
+/// `panic = "abort"` means a panic is a process kill with no console and no
+/// unwinding. Write the reason next to the executable so it can be reported.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed");
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string());
+        let location = info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown location".to_string());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let line = format!("[unix {stamp}] thread={name} {payload} at {location}\n");
+
+        let path = model::app_dir().join("crash.log");
+        let too_big = std::fs::metadata(&path)
+            .map(|meta| meta.len() > 64 * 1024)
+            .unwrap_or(false);
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if too_big {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        if let Ok(mut file) = options.open(&path) {
+            use std::io::Write;
+            let _ = file.write_all(line.as_bytes());
+        }
+    }));
+}
+
 fn main() -> Result<(), eframe::Error> {
+    install_panic_hook();
+
     // 1 ms timer resolution keeps the mixer's 5 ms tick stable. Since Windows
     // 10 2004 this only affects this process, not the whole system.
     unsafe {

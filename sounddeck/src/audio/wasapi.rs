@@ -360,6 +360,7 @@ fn render_loop(
         let step = SAMPLE_RATE as f64 / format.rate as f64;
 
         let mut result = Ok(());
+        let mut timeouts = 0u32;
         loop {
             if stop.load(Ordering::SeqCst) {
                 break;
@@ -367,8 +368,16 @@ fn render_loop(
 
             let wait = WaitForSingleObject(event, 50);
             if wait == WAIT_TIMEOUT {
+                // A live device signals the event continuously. Forty silent
+                // timeouts (~2 s) mean the endpoint is gone, not slow.
+                timeouts += 1;
+                if timeouts > 40 {
+                    result = Err("Audio device stopped responding".into());
+                    break;
+                }
                 continue;
             }
+            timeouts = 0;
             if wait != WAIT_OBJECT_0 {
                 result = Err("Audio device stopped responding".into());
                 break;

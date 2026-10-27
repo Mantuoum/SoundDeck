@@ -22,6 +22,40 @@ pub struct DecodedAudio {
     pub duration_secs: f32,
 }
 
+/// Estimated canonical size of a file, from its container metadata only.
+///
+/// Used before decoding to decide whether a sound is even eligible for the
+/// preload cache, so a long file never costs a 400 MB decode just to be refused.
+/// Returns `None` when the container does not expose a frame count; the caller
+/// then has to fall back to decoding.
+pub fn probe_bytes(path: &Path) -> Option<usize> {
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = probed.format.default_track()?;
+    let params = &track.codec_params;
+    let frames = params.n_frames?;
+    let time_base = params.time_base?;
+    let time = time_base.calc_time(frames);
+    let seconds = time.seconds as f64 + time.frac;
+    let bytes = crate::memory::bytes_for_seconds(seconds as f32);
+    if bytes == 0 {
+        return None;
+    }
+    Some(bytes)
+}
+
 /// Decode any supported file into interleaved stereo f32 @ 48 kHz.
 pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
     if !path.exists() {

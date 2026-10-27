@@ -174,8 +174,7 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         file.libraries[0].id
     };
 
-    let settings = Settings {
-        version: super::SETTINGS_VERSION,
+    let mut settings = Settings {
         active_library,
         theme: legacy
             .theme
@@ -197,15 +196,12 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         link_volumes: legacy.link_volumes,
         preload_hotkey_sounds: legacy.preload_hotkey_sounds,
         window_size: legacy.window_size,
-        loop_enabled: false,
-        loop_path: None,
-        loop_volume: 1.0,
-        loop_on_monitor: true,
-        loop_on_cable: true,
-        animate_ui: true,
-        minimize_to_tray: false,
-        show_gain_slider: true,
+        // Everything else takes the current default, so a new field never
+        // silently imports as zero from a legacy file.
+        ..Settings::default()
     };
+    // The legacy file is unvalidated JSON: clamp it exactly like a normal load.
+    settings.normalize();
 
     let libraries_path = super::libraries_path(base);
     let settings_path = super::settings_path(base);

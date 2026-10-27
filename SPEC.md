@@ -101,7 +101,7 @@ to go to either, both, or neither.
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
 | FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
-| FR-5.3.11 | (0.3.0) Decoded audio retained in memory MUST stay within 32 MB and 16 sounds; a sound that does not fit is played from disk and never preloaded. |
+| FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. |
 
 ### 5.4 Playback
 
@@ -179,6 +179,7 @@ to go to either, both, or neither.
 | FR-5.9.6 | About MUST show the application name, version, config folder, licence and project links, plus the author credit. |
 | FR-5.9.7 | Every control MUST save immediately (debounced), with no Apply/Cancel step. |
 | FR-5.9.8 | Spacing MUST stay compact: group gap 5/8 px, card padding 10 px, divider 7 px, row control height 28 px. |
+| FR-5.9.9 | RAM/disk state (card chips, counts, toolbar pill) is hidden by default; a Playback switch reveals it. |
 
 ### 5.10 Themes and appearance
 
@@ -212,6 +213,7 @@ to go to either, both, or neither.
 | FR-5.12.2 | `--stats` MUST append one line every 5 s to `%TEMP%\sounddeck-stats.log`: fps, frame time, repaint interval, hidden flag, mixer wakeups, ring underruns, voices, loop state. |
 | FR-5.12.3 | `--settings` MUST open the app on the Settings screen. |
 | FR-5.12.4 | The activity log MUST record load failures, device errors, save problems and hotkey conflicts. |
+| FR-5.12.5 | A panic MUST write a line to `crash.log` next to the executable before the process aborts. |
 
 ## 6. Data formats
 
@@ -359,7 +361,7 @@ Rules that enforce them:
 | NFR-8.2.3 | 40 MB is an aspiration. It is not reachable with eframe/glow and requires a different UI stack (§13). |
 | NFR-8.2.4 | RAM-preloaded sounds count against the budget; the loop never does (streamed). |
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |
-| NFR-8.2.6 | (0.3.0) Retained decoded audio ≤ 32 MB and ≤ 16 sounds; the process MUST refuse work that would cross 100 MB. |
+| NFR-8.2.6 | Retained decoded audio ≤ 32 MB and ≤ 16 sounds; the process refuses work that would cross its commit ceiling. Measured after hardening. |
 | NFR-8.2.7 | The loop is excluded from these caps: it is streamed, not retained. |
 
 ### 8.3 Responsiveness and robustness

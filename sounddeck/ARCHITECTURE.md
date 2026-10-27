@@ -21,7 +21,8 @@ service. Everything lives beside the executable.
 | Entry point | `src/main.rs` | Single instance, window, diagnostics, eframe startup |
 | Application/UI | `src/app.rs` | State, actions, panels, board, Settings, modals |
 | Domain helpers | `src/model.rs` | App paths, supported files, formatting, layout enum |
-| Sound registry | `src/playback.rs` | RAM/disk sounds, decode jobs, per-sound volume |
+| Sound registry | `src/playback.rs` | Decode jobs, budgeted preload cache, per-sound volume |
+| Memory budget | `src/memory.rs` | Cache caps, admission rules, process commit query |
 | Audio device I/O | `src/audio/wasapi.rs` | Device enumeration and render threads |
 | Mixer | `src/audio/engine.rs` | Voices, loop, rings, gains, metering |
 | Decoding | `src/audio/decode.rs` | File → 48 kHz stereo f32, one shot |
@@ -45,6 +46,20 @@ service. Everything lives beside the executable.
 | WASAPI render | `spawn_render`, once per output | While the device is open | Pull the ring, convert to the device format, write WASAPI |
 | Hotkey/tray window | `HotkeyService::start` | App lifetime | Message-only window: hotkeys, tray, focus |
 | Device enumeration | `wasapi::list_devices` | One call | COM enumeration on a short-lived thread |
+
+### Preload cache and memory limits (`memory.rs`, `playback.rs`)
+
+- Retained decoded audio: **32 MB**, **16 sounds**, **30 s** per sound.
+- A longer sound is refused for preload *before* decoding (container probe) and
+  plays from disk; the log says why.
+- Admission is LRU: the not-currently-playing buffer with the oldest `last_used`
+  is dropped to make room. The playing sound is never evicted.
+- A process commit ceiling (125 MB) is the last-resort valve; if the query fails,
+  the cache fails closed and refuses to grow.
+- `show_ram_state` (default off) controls the chips, counts and toolbar pill; the
+  per-sound retention control lives in the context menu and Settings.
+- A panic writes `crash.log` next to the executable before aborting
+  (`panic = "abort"` leaves no other trail).
 
 ### Data flow
 
@@ -575,7 +590,8 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/main.rs` | Process start, single instance, viewport, `--diag`, eframe |
 | `src/app.rs` | All UI/state/actions; board, Settings, modals, helpers |
 | `src/model.rs` | Paths, portable/relative resolution, extensions, formatting |
-| `src/playback.rs` | Sound registry, RAM/disk decode jobs, loader thread, events |
+| `src/playback.rs` | Sound registry, budgeted decode jobs, loader thread, events |
+| `src/memory.rs` | Preload caps (32 MB / 16 sounds / 30 s), LRU admission, panic-free limits |
 | `src/hotkeys.rs` | Hotkey parse/register, message window, tray, focus |
 | `src/icon.rs` | PNG decode/resize for window and tray icons |
 | `src/audio/decode.rs` | One-shot Symphonia decode to 48 kHz stereo, 20-min cap |

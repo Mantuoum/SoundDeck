@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,7 @@ use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{main_window_minimized, Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
+use crate::memory;
 use crate::model::{
     self, display_name, format_bytes, format_duration, is_supported_file, Layout as SoundLayout,
     APP_NAME, SUPPORTED_EXTENSIONS,
@@ -28,6 +29,9 @@ use crate::ui::volume;
 const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
+
+/// Hard cap on rendered search results; protects a pathological library.
+const MAX_SEARCH_RESULTS: usize = 500;
 
 const DEVELOPER_NAME: &str = "Mantum";
 
@@ -86,6 +90,8 @@ pub struct Sound {
     /// from disk.
     pub ram: bool,
     pub library_id: u64,
+    /// Lower-cased name + file name, built once so search never re-allocates.
+    pub search_key: String,
     pub flash_until: Option<Instant>,
 }
 
@@ -192,6 +198,10 @@ pub struct App {
     last_interval_ms: u32,
     quit: bool,
     search: String,
+    /// Debounced, lower-cased needle the list is actually filtered by.
+    filter_needle: String,
+    /// When the text box last changed; None means the filter is current.
+    search_pending: Option<Instant>,
     focus_search: bool,
     selected: Option<u64>,
     statuses: Vec<StatusEntry>,
@@ -287,6 +297,7 @@ impl App {
                     None => None,
                 };
                 let ram = hotkey.is_some() && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
+                let key = search_key(&sound.name, &path);
                 sounds.push(Sound {
                     id: sound.id,
                     name: sound.name.clone(),
@@ -296,6 +307,7 @@ impl App {
                     volume: sound.volume.clamp(0.0, 1.0),
                     ram,
                     library_id: library.id,
+                    search_key: key,
                     flash_until: None,
                 });
             }
@@ -424,12 +436,14 @@ impl App {
             device_note: [None, None],
             tray_available: false,
             hidden: false,
-            restored_at: Instant::now() - Duration::from_secs(10),
+            restored_at: since(10),
             was_minimized: false,
-            minimize_checked_at: Instant::now() - Duration::from_secs(10),
+            minimize_checked_at: since(10),
             last_interval_ms: 0,
             quit: false,
             search: String::new(),
+            filter_needle: String::new(),
+            search_pending: None,
             focus_search: false,
             selected: None,
             statuses,
@@ -444,11 +458,11 @@ impl App {
             last_dir: None,
             next_id: 1,
             // Starts long finished so the first frame is fully opaque.
-            page_fade: Instant::now() - Duration::from_secs(10),
-            settings_opened: Instant::now() - Duration::from_secs(10),
+            page_fade: since(10),
+            settings_opened: since(10),
             settings_was_open: false,
             settings_tab: SettingsTab::Playback,
-            settings_tab_fade: Instant::now() - Duration::from_secs(10),
+            settings_tab_fade: since(10),
             dirty: theme_was_corrected,
             save_failed: false,
             last_save: Instant::now(),
@@ -461,13 +475,13 @@ impl App {
             meter_peak_at: [Instant::now(); 2],
             loop_state: LoopState::Idle,
             loop_missing: false,
-            loop_checked_at: Instant::now() - Duration::from_secs(10),
+            loop_checked_at: since(10),
         };
 
         // Fingerprints so a slider move never rewrites the library file.
-        app.last_settings_json = storage::serialize_settings(&app.cfg);
+        app.last_settings_json = storage::serialize_settings(&app.cfg).unwrap_or_default();
         let libraries = app.storage_libraries();
-        app.last_libraries_json = storage::serialize_libraries(&libraries);
+        app.last_libraries_json = storage::serialize_libraries(&libraries).unwrap_or_default();
         app.next_id = app.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1;
 
         app.sync_active_library();
@@ -493,7 +507,7 @@ impl App {
                         self.log(
                             StatusKind::Success,
                             format!(
-                                "Loaded \"{label}\" into RAM ({}, {})",
+                                "Loaded \"{label}\" ({}, {})",
                                 format_bytes(bytes),
                                 format_duration(duration)
                             ),
@@ -512,6 +526,13 @@ impl App {
                         format!("Could not load \"{label}\": {message}")
                     };
                     self.log(StatusKind::Error, text);
+                }
+                PlaybackEvent::Refused { id, message } => {
+                    let label = self.sound_name(id);
+                    self.log(
+                        StatusKind::Warning,
+                        format!("\"{label}\" plays from disk: {message}"),
+                    );
                 }
             }
             ctx.request_repaint();
@@ -925,7 +946,7 @@ impl App {
         self.cfg.loop_path = Some(stored);
         self.mark_dirty();
         self.loop_missing = false;
-        self.loop_checked_at = Instant::now() - Duration::from_secs(10);
+        self.loop_checked_at = since(10);
 
         if was_active {
             match self.engine.start_loop(path) {
@@ -1068,6 +1089,7 @@ impl App {
                 volume,
                 ram: false,
                 library_id: self.active_library,
+                search_key: search_key(&name, &path),
                 flash_until: None,
             };
             self.playback.register(id, path, volume);
@@ -1282,7 +1304,19 @@ impl App {
         let base = model::app_dir();
         let mut ok = true;
 
-        let settings_json = storage::serialize_settings(&self.cfg);
+        let settings_json = match storage::serialize_settings(&self.cfg) {
+            Ok(json) => json,
+            Err(err) => {
+                if !self.save_failed {
+                    self.save_failed = true;
+                    self.log(
+                        StatusKind::Warning,
+                        format!("Could not serialize settings: {err}"),
+                    );
+                }
+                return false;
+            }
+        };
         if settings_json != self.last_settings_json {
             let path = storage::settings_path(&base);
             match storage::io::write_json_atomic(&path, &settings_json) {
@@ -1301,7 +1335,19 @@ impl App {
         }
 
         let libraries = self.storage_libraries();
-        let libraries_json = storage::serialize_libraries(&libraries);
+        let libraries_json = match storage::serialize_libraries(&libraries) {
+            Ok(json) => json,
+            Err(err) => {
+                if !self.save_failed {
+                    self.save_failed = true;
+                    self.log(
+                        StatusKind::Warning,
+                        format!("Could not serialize libraries: {err}"),
+                    );
+                }
+                return false;
+            }
+        };
         if libraries_json != self.last_libraries_json {
             let path = storage::libraries_path(&base);
             match storage::io::write_json_atomic(&path, &libraries_json) {
@@ -2319,6 +2365,7 @@ impl App {
                             allow_drag,
                             capture_id,
                             self.selected,
+                            self.cfg.show_ram_state,
                             &mut rects,
                             &mut actions,
                         ),
@@ -2332,6 +2379,7 @@ impl App {
                             allow_drag,
                             capture_id,
                             self.selected,
+                            self.cfg.show_ram_state,
                             &mut rows,
                             &mut actions,
                         ),
@@ -2594,74 +2642,77 @@ impl App {
                 }
 
                 ui.add_space(gap);
-                let state = self.ram_summary();
-                let (label, color, enabled) = match state {
-                    None => ("No hotkeys".to_string(), theme::faint(), false),
-                    Some(RamState::On) => ("Hotkey sounds: RAM".to_string(), theme::accent(), true),
-                    Some(RamState::Off) => {
-                        ("Hotkey sounds: DISK".to_string(), theme::muted(), true)
+                if self.cfg.show_ram_state {
+                    let state = self.ram_summary();
+                    let (label, color, enabled) = match state {
+                        None => ("No hotkeys".to_string(), theme::faint(), false),
+                        Some(RamState::On) => {
+                            ("Hotkey sounds: RAM".to_string(), theme::accent(), true)
+                        }
+                        Some(RamState::Off) => {
+                            ("Hotkey sounds: DISK".to_string(), theme::muted(), true)
+                        }
+                        Some(RamState::Mixed) => {
+                            ("Hotkey sounds: MIXED".to_string(), theme::purple(), true)
+                        }
+                    };
+                    let (rect, _) =
+                        ui.allocate_exact_size(Vec2::new(pill_width, 28.0), Sense::hover());
+                    let response = ui.interact(
+                        rect,
+                        Id::new("ram_status_pill"),
+                        if enabled {
+                            Sense::click()
+                        } else {
+                            Sense::hover()
+                        },
+                    );
+                    let painter = ui.painter();
+                    painter.rect(
+                        rect,
+                        CornerRadius::same(theme::RADIUS_XL),
+                        theme::alpha(color, 16),
+                        Stroke::new(1.0_f32, theme::alpha(color, 70)),
+                        StrokeKind::Inside,
+                    );
+                    painter.text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        label,
+                        theme::ui_font(11.5),
+                        color,
+                    );
+                    if enabled && response.clicked() {
+                        self.toggle_global_ram();
                     }
-                    Some(RamState::Mixed) => {
-                        ("Hotkey sounds: MIXED".to_string(), theme::purple(), true)
-                    }
-                };
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(pill_width, 28.0), Sense::hover());
-                let response = ui.interact(
-                    rect,
-                    Id::new("ram_status_pill"),
-                    if enabled {
-                        Sense::click()
-                    } else {
-                        Sense::hover()
-                    },
-                );
-                let painter = ui.painter();
-                painter.rect(
-                    rect,
-                    CornerRadius::same(theme::RADIUS_XL),
-                    theme::alpha(color, 16),
-                    Stroke::new(1.0_f32, theme::alpha(color, 70)),
-                    StrokeKind::Inside,
-                );
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    label,
-                    theme::ui_font(11.5),
-                    color,
-                );
-                if enabled && response.clicked() {
-                    self.toggle_global_ram();
+                    response.on_hover_text(match state {
+                        None => "Assign a hotkey to a sound first",
+                        Some(RamState::On) => "Click to play hotkey sounds from disk",
+                        Some(RamState::Off) => "Click to load hotkey sounds into RAM",
+                        Some(RamState::Mixed) => "Mixed. Click to load all hotkey sounds into RAM",
+                    });
                 }
-                response.on_hover_text(match state {
-                    None => "Assign a hotkey to a sound first",
-                    Some(RamState::On) => "Click to play hotkey sounds from disk",
-                    Some(RamState::Off) => "Click to load hotkey sounds into RAM",
-                    Some(RamState::Mixed) => "Mixed. Click to load all hotkey sounds into RAM",
-                });
             },
         );
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
-        let needle = self.search.trim().to_lowercase();
-        self.sounds
-            .iter()
-            .enumerate()
-            .filter(|(_, sound)| sound.library_id == self.active_library)
-            .filter(|(_, sound)| {
-                needle.is_empty()
-                    || sound.name.to_lowercase().contains(&needle)
-                    || sound
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_lowercase().contains(&needle))
-                        .unwrap_or(false)
-            })
-            .map(|(index, _)| index)
-            .collect()
+        let needle = self.filter_needle.trim();
+        let mut out = Vec::new();
+        for (index, sound) in self.sounds.iter().enumerate() {
+            if sound.library_id != self.active_library {
+                continue;
+            }
+            if !needle.is_empty() && !sound.search_key.contains(needle) {
+                continue;
+            }
+            out.push(index);
+            if out.len() >= MAX_SEARCH_RESULTS {
+                break;
+            }
+        }
+        out
     }
-
     fn empty_state(&mut self, ui: &mut Ui) {
         let available = ui.available_size();
         ui.allocate_ui_with_layout(available, Layout::top_down(Align::Center), |ui| {
@@ -2872,17 +2923,32 @@ impl App {
                 self.set_all_hotkey_ram(on);
                 self.mark_dirty();
             }
-            let loaded = self.playback.loaded_count();
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(if loaded == 1 {
-                    "1 in RAM".to_string()
-                } else {
-                    format!("{loaded} in RAM")
-                })
-                .size(10.5)
-                .color(theme::faint()),
-            );
+            settings_divider(ui);
+            let mut show_state = self.cfg.show_ram_state;
+            let mut state_changed = false;
+            settings_row(ui, "Show RAM state", 80.0, |ui| {
+                state_changed =
+                    settings_switch(ui, Id::new("settings_show_ram"), &mut show_state, true);
+            });
+            if state_changed {
+                self.cfg.show_ram_state = show_state;
+                self.mark_dirty();
+            }
+            if self.cfg.show_ram_state {
+                let usage = self.playback.cache_usage();
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} of {} MB - {} of {} sounds",
+                        usage.bytes / (1024 * 1024),
+                        memory::RETAINED_BYTES_CAP / (1024 * 1024),
+                        usage.sounds,
+                        memory::RETAINED_SOUND_CAP
+                    ))
+                    .size(10.5)
+                    .color(theme::faint()),
+                );
+            }
         });
     }
 
@@ -3084,7 +3150,7 @@ impl App {
             self.loop_state = LoopState::Idle;
             self.loop_missing = false;
         }
-        self.loop_checked_at = Instant::now() - Duration::from_secs(10);
+        self.loop_checked_at = since(10);
         self.refresh_loop_missing(true);
         self.mark_dirty();
     }
@@ -3381,6 +3447,7 @@ impl App {
                     let mut old_name = None;
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
                         old_name = Some(std::mem::replace(&mut sound.name, name));
+                        sound.search_key = search_key(&sound.name, &sound.path);
                     }
                     if let Some(old) = old_name {
                         self.log(StatusKind::Info, format!("Renamed \"{old}\""));
@@ -3819,7 +3886,6 @@ impl App {
             return;
         }
         self.next_tip = now + Duration::from_secs(3);
-        let loaded = self.playback.loaded_count();
         let playing = self
             .engine
             .active()
@@ -3828,12 +3894,9 @@ impl App {
             .collect::<HashSet<_>>()
             .len();
         let tip = if playing > 0 {
-            format!("{APP_NAME} - {playing} playing - {loaded} in RAM")
+            format!("{APP_NAME} - {playing} playing")
         } else {
-            format!(
-                "{APP_NAME} - {} sounds - {loaded} in RAM",
-                self.sounds.len()
-            )
+            format!("{APP_NAME} - {} sounds", self.sounds.len())
         };
         if tip != self.last_tip {
             self.hotkeys.set_tooltip(tip.clone());
@@ -3854,6 +3917,27 @@ impl eframe::App for App {
         }
         self.settings_was_open = self.show_settings;
 
+        // Debounce filtering: typing must never re-scan the whole library per
+        // keystroke, and a huge library must never block the frame.
+        let typed = self.search.trim().to_lowercase();
+        if typed.is_empty() {
+            self.filter_needle.clear();
+            self.search_pending = None;
+        } else if typed != self.filter_needle {
+            match self.search_pending {
+                Some(started) if started.elapsed() >= Duration::from_millis(120) => {
+                    self.filter_needle = typed;
+                    self.search_pending = None;
+                }
+                Some(_) => ctx.request_repaint_after(Duration::from_millis(60)),
+                None => {
+                    self.search_pending = Some(Instant::now());
+                    ctx.request_repaint_after(Duration::from_millis(120));
+                }
+            }
+        } else {
+            self.search_pending = None;
+        }
         self.poll_events(ctx);
         self.handle_close_request(ctx);
         if self.quit {
@@ -4019,7 +4103,24 @@ impl Drop for App {
 // Card / list drawing
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+/// `now - seconds`, or `now` when the machine has not been up that long.
+///
+/// `Instant::sub` panics if the result would be before the clock's origin, which
+/// is reachable on a freshly booted Windows machine.
+fn since(seconds: u64) -> Instant {
+    Instant::now()
+        .checked_sub(Duration::from_secs(seconds))
+        .unwrap_or_else(Instant::now)
+}
+
+/// Lower-cased haystack for search: display name plus file name.
+fn search_key(name: &str, path: &Path) -> String {
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    format!("{} {}", name.to_lowercase(), file)
+}
 fn settings_header(ui: &mut Ui, tab: SettingsTab) {
     ui.label(
         RichText::new(tab.title())
@@ -4299,6 +4400,7 @@ fn draw_grid(
     drag_enabled: bool,
     capture_id: Option<u64>,
     selected: Option<u64>,
+    show_ram: bool,
     rects: &mut Vec<(usize, Rect)>,
     actions: &mut Vec<Action>,
 ) {
@@ -4330,6 +4432,7 @@ fn draw_grid(
                         drag_enabled,
                         capture_id == Some(sound.id),
                         selected == Some(sound.id),
+                        show_ram,
                         index,
                         libraries,
                     );
@@ -4353,6 +4456,7 @@ fn draw_list(
     drag_enabled: bool,
     capture_id: Option<u64>,
     selected: Option<u64>,
+    show_ram: bool,
     rects: &mut Vec<(usize, Rect)>,
     actions: &mut Vec<Action>,
 ) {
@@ -4375,6 +4479,7 @@ fn draw_list(
                     drag_enabled,
                     capture_id == Some(sound.id),
                     selected == Some(sound.id),
+                    show_ram,
                     index,
                     libraries,
                 );
@@ -4509,10 +4614,11 @@ fn ram_chip(
     sound: &Sound,
     info: &SoundInfo,
     font_size: f32,
+    show_ram: bool,
 ) -> Option<Action> {
     let missing = is_missing(info);
     let has_hotkey = sound.hotkey.is_some();
-    if !has_hotkey && !missing {
+    if !missing && (!has_hotkey || !show_ram) {
         return None;
     }
     let ram_active = has_hotkey && sound.ram;
@@ -4650,6 +4756,7 @@ fn sound_card(
     drag_enabled: bool,
     capture_active: bool,
     selected: bool,
+    show_ram: bool,
     index: usize,
     libraries: &[Library],
 ) -> (Rect, Vec<Action>) {
@@ -4714,6 +4821,7 @@ fn sound_card(
         sound,
         info,
         10.5,
+        show_ram,
     ) {
         actions.push(action);
     }
@@ -4811,6 +4919,7 @@ fn sound_row(
     drag_enabled: bool,
     capture_active: bool,
     selected: bool,
+    show_ram: bool,
     index: usize,
     libraries: &[Library],
 ) -> (Rect, Vec<Action>) {
@@ -4857,7 +4966,11 @@ fn sound_row(
 
     // Controls on the right: chip, hotkey pill and close.
     let pill_width = if has_hotkey { 110.0 } else { 118.0 };
-    let indicator_width = if has_hotkey || missing { 70.0 } else { 0.0 };
+    let indicator_width = if (has_hotkey && show_ram) || missing {
+        70.0
+    } else {
+        0.0
+    };
     let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
 
     // Name column; the volume track uses the remaining space up to the controls
@@ -4916,6 +5029,7 @@ fn sound_row(
             sound,
             info,
             11.0,
+            show_ram,
         ) {
             actions.push(action);
         }

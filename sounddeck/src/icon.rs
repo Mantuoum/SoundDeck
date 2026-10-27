@@ -44,6 +44,9 @@ pub fn decode_png(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
 
 /// Cheap box-filter downscale, used to create the 32x32 tray icon.
 pub fn resize_rgba(src: &[u8], sw: u32, sh: u32, dst: u32) -> Vec<u8> {
+    if sw == 0 || sh == 0 || dst == 0 {
+        return Vec::new();
+    }
     if sw == dst && sh == dst {
         return src.to_vec();
     }

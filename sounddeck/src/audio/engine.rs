@@ -188,6 +188,9 @@ impl Mixer {
 
     fn render(&mut self, monitor: &mut [f32], cable: &mut [f32]) {
         debug_assert_eq!(monitor.len(), cable.len());
+        if monitor.len() != cable.len() {
+            return;
+        }
         let frames = monitor.len() / CHANNELS;
         for voice in &mut self.voices {
             let total = voice.frames();
@@ -322,6 +325,15 @@ impl DeviceHandle {
             let _ = join.join();
         }
     }
+
+    /// A handle whose thread already exited must not be treated as a live
+    /// device, otherwise a failed endpoint can never be reopened.
+    fn alive(&self) -> bool {
+        self.join
+            .as_ref()
+            .map(|join| !join.is_finished())
+            .unwrap_or(false)
+    }
 }
 
 pub struct Engine {
@@ -408,7 +420,11 @@ impl Engine {
             let index = slot.index();
             let wanted_id = desired[index].as_ref().map(|r| r.id.clone());
             let current_id = devices[index].as_ref().map(|d| d.id.clone());
-            if current_id == wanted_id {
+            let current_alive = devices[index]
+                .as_ref()
+                .map(DeviceHandle::alive)
+                .unwrap_or(false);
+            if current_id == wanted_id && current_alive {
                 continue;
             }
             if let Some(mut old) = devices[index].take() {
@@ -432,6 +448,12 @@ impl Engine {
     }
 
     pub fn play(&self, sound_id: u64, samples: Arc<Vec<f32>>, volume: f32) {
+        if !crate::memory::is_valid_buffer(&samples) {
+            let _ = self.events_tx.send(AudioEvent::Warning(format!(
+                "Refused to play sound {sound_id}: invalid sample buffer"
+            )));
+            return;
+        }
         {
             let Ok(mut mixer) = self.mixer.lock() else {
                 return;
@@ -574,6 +596,16 @@ impl Engine {
             .lock()
             .map(|mixer| !mixer.voices.is_empty())
             .unwrap_or(false)
+    }
+
+    /// Whether this specific sound is currently sounding. Used by the cache to
+    /// avoid evicting a buffer the mixer is still reading. Fails closed: if the
+    /// mixer lock is poisoned the caller is told "yes, playing".
+    pub fn is_playing_sound(&self, sound_id: u64) -> bool {
+        self.mixer
+            .lock()
+            .map(|mixer| mixer.voices.iter().any(|voice| voice.sound_id == sound_id))
+            .unwrap_or(true)
     }
 
     /// Peak level per output since the previous call, as linear amplitude.

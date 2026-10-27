@@ -52,6 +52,8 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     /// Show the master-gain slider in the board sidebar.
     pub show_gain_slider: bool,
+    /// Show RAM/disk state (card chips, counts, toolbar pill). Off by default.
+    pub show_ram_state: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +81,7 @@ impl Default for Settings {
             animate_ui: true,
             minimize_to_tray: false,
             show_gain_slider: true,
+            show_ram_state: false,
         }
     }
 }
@@ -88,9 +91,9 @@ impl Settings {
         if self.version < SETTINGS_VERSION {
             self.version = SETTINGS_VERSION;
         }
-        self.monitor_volume = self.monitor_volume.clamp(0.0, 1.0);
-        self.cable_volume = self.cable_volume.clamp(0.0, 1.0);
-        self.master_gain_db = self.master_gain_db.clamp(0.0, 12.0);
+        self.monitor_volume = finite_or(self.monitor_volume, 1.0).clamp(0.0, 1.0);
+        self.cable_volume = finite_or(self.cable_volume, 1.0).clamp(0.0, 1.0);
+        self.master_gain_db = finite_or(self.master_gain_db, 0.0).clamp(0.0, 12.0);
         self.loop_path = self.loop_path.take().and_then(|path| {
             let trimmed = path.trim();
             if trimmed.is_empty() {
@@ -99,7 +102,17 @@ impl Settings {
                 Some(trimmed.to_string())
             }
         });
-        self.loop_volume = self.loop_volume.clamp(0.0, 1.0);
+        self.loop_volume = finite_or(self.loop_volume, 1.0).clamp(0.0, 1.0);
+    }
+}
+
+/// NaN and infinity from a hand-edited file would otherwise reach the mixer and
+/// the meters, where they turn into silent audio and broken layout.
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
     }
 }
 
@@ -212,7 +225,7 @@ impl LibrariesFile {
                     next_sound += 1;
                     seen_sounds.insert(sound.id);
                 }
-                sound.volume = sound.volume.clamp(0.0, 1.0);
+                sound.volume = finite_or(sound.volume, 1.0).clamp(0.0, 1.0);
                 if sound.name.trim().is_empty() {
                     sound.name = "Untitled sound".to_string();
                 }
@@ -293,16 +306,16 @@ pub fn save_libraries(path: &Path, libraries: &[LibraryConfig]) -> anyhow::Resul
     io::write_json_atomic(path, &json)
 }
 
-pub fn serialize_settings(settings: &Settings) -> String {
-    serde_json::to_string_pretty(settings).unwrap_or_default()
+pub fn serialize_settings(settings: &Settings) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(settings)?)
 }
 
-pub fn serialize_libraries(libraries: &[LibraryConfig]) -> String {
+pub fn serialize_libraries(libraries: &[LibraryConfig]) -> anyhow::Result<String> {
     let file = LibrariesFile {
         version: LIBRARIES_VERSION,
         libraries: libraries.to_vec(),
     };
-    serde_json::to_string_pretty(&file).unwrap_or_default()
+    Ok(serde_json::to_string_pretty(&file)?)
 }
 
 #[cfg(test)]

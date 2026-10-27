@@ -167,6 +167,12 @@ MIT. See [`LICENSE`](../LICENSE) at the repository root.
 Enumerates output devices, opens the monitor/cable streams, decodes the file,
 plays it, and prints progress plus WASAPI events.
 
+`--stats` writes fps, frame time, mixer wakeups and ring underruns to
+`%TEMP%\sounddeck-stats.log` every five seconds.
+
+If the app ever closes without warning, `crash.log` next to the executable has
+the thread, message and source location.
+
 ## Developers
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the module map, audio pipeline, storage

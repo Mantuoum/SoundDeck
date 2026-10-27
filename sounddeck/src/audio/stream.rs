@@ -292,10 +292,10 @@ fn decode_loop(path: &Path, tx: &Sender<Vec<f32>>, stop: &AtomicBool) -> Result<
             let mut buffer = SampleBuffer::<f32>::new(frames, spec);
             buffer.copy_interleaved_ref(decoded);
 
-            let out = resampler
-                .as_mut()
-                .expect("resampler is created above")
-                .push(buffer.samples());
+            let Some(resampler) = resampler.as_mut() else {
+                bail!("internal: resampler missing for the loop track");
+            };
+            let out = resampler.push(buffer.samples());
             produced_frames += out.len() / CHANNELS;
             send_pcm(tx, stop, out)?;
         }
