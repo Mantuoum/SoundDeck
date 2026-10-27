@@ -146,17 +146,7 @@ enum SampleKind {
     I32,
 }
 
-impl SampleKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::F32 => "float32",
-            Self::F64 => "float64",
-            Self::I16 => "int16",
-            Self::I24 => "int24",
-            Self::I32 => "int32",
-        }
-    }
-}
+impl SampleKind {}
 
 #[derive(Clone, Copy, Debug)]
 struct Format {
@@ -236,6 +226,8 @@ pub fn spawn_render(
 ) -> Option<JoinHandle<()>> {
     ring.add_consumer();
     let consumer_ring = ring.clone();
+    let error_tx = events.clone();
+    let error_name = device_name.clone();
     let result = thread::Builder::new()
         .name(format!("sounddeck-render-{}", slot.index()))
         .spawn(move || {
@@ -251,10 +243,7 @@ pub fn spawn_render(
             ) {
                 Ok(()) => {
                     if !stop.load(Ordering::SeqCst) {
-                        let _ = events.send(AudioEvent::Stopped {
-                            slot,
-                            name: device_name,
-                        });
+                        let _ = events.send(AudioEvent::Stopped { slot });
                     }
                 }
                 Err(message) => {
@@ -268,6 +257,14 @@ pub fn spawn_render(
         });
     if result.is_err() {
         ring.remove_consumer();
+        // A render thread that never starts is otherwise a silent "no audio".
+        if let Err(err) = &result {
+            let _ = error_tx.send(AudioEvent::DeviceError {
+                slot,
+                name: error_name,
+                message: format!("Could not start the render thread: {err}"),
+            });
+        }
     }
     result.ok()
 }
@@ -282,7 +279,7 @@ impl Drop for ConsumerGuard {
 
 fn render_loop(
     device_id: &str,
-    device_name: &str,
+    _device_name: &str,
     slot: Slot,
     ring: &Ring,
     events: &Sender<AudioEvent>,
@@ -342,16 +339,7 @@ fn render_loop(
             .Start()
             .map_err(|e| format!("Could not start audio stream: {e}"))?;
 
-        let _ = events.send(AudioEvent::DeviceStarted {
-            slot,
-            name: device_name.to_string(),
-            detail: format!(
-                "{} Hz | {} ch | {}",
-                format.rate,
-                format.channels,
-                format.kind.label()
-            ),
-        });
+        let _ = events.send(AudioEvent::DeviceStarted { slot });
 
         let max_frames = buffer_size as usize;
         let mut stereo = vec![0.0f32; max_frames * 2];

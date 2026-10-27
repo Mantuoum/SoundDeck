@@ -14,11 +14,11 @@ use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{main_window_minimized, Hotkey, HotkeyService, ServiceEvent, TrayCommand};
 use crate::icon;
-use crate::memory;
 use crate::model::{
     self, display_name, format_bytes, format_duration, is_supported_file, Layout as SoundLayout,
     APP_NAME, SUPPORTED_EXTENSIONS,
 };
+use crate::playback::policy;
 use crate::playback::{Playback, PlaybackEvent, SoundInfo};
 use crate::stats;
 use crate::storage;
@@ -126,8 +126,14 @@ struct StatusEntry {
     at: Instant,
 }
 
+#[derive(Clone, Copy)]
+enum CaptureTarget {
+    Sound(u64),
+    StopAll,
+}
+
 struct CaptureState {
-    sound_id: u64,
+    target: CaptureTarget,
     current: Option<Hotkey>,
 }
 
@@ -208,6 +214,8 @@ pub struct App {
     show_log: bool,
     show_settings: bool,
     capture: Option<CaptureState>,
+    /// Global stop-all binding, parsed from settings.
+    stop_all: Option<Hotkey>,
     renaming: Option<RenameState>,
     drag: Option<DragState>,
     card_rects: Vec<(usize, Rect)>,
@@ -276,6 +284,21 @@ impl App {
             cfg.theme = "graphite".to_string();
             theme::set_theme("graphite");
         }
+
+        // The stop-all binding is stored as a label string like every other
+        // hotkey; a hand-edited file must not take the app down.
+        let stop_all = match cfg.stop_all_hotkey.as_deref().map(Hotkey::parse) {
+            Some(Ok(hotkey)) => Some(hotkey),
+            Some(Err(err)) => {
+                push_status(
+                    StatusKind::Warning,
+                    format!("Stop-all hotkey is invalid: {err}"),
+                );
+                cfg.stop_all_hotkey = None;
+                None
+            }
+            None => None,
+        };
         let mut sounds = Vec::new();
         let mut libraries = Vec::new();
         for library in &stored_libraries {
@@ -449,6 +472,7 @@ impl App {
             show_log: false,
             show_settings: open_settings,
             capture: None,
+            stop_all,
             renaming: None,
             drag: None,
             card_rects: Vec::new(),
@@ -528,10 +552,16 @@ impl App {
                 }
                 PlaybackEvent::Refused { id, message } => {
                     let label = self.sound_name(id);
+                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                        sound.ram = false;
+                    }
                     self.log(
                         StatusKind::Warning,
                         format!("\"{label}\" plays from disk: {message}"),
                     );
+                }
+                PlaybackEvent::Warning(message) => {
+                    self.log(StatusKind::Warning, message);
                 }
             }
             ctx.request_repaint();
@@ -568,6 +598,12 @@ impl App {
 
         while let Some(event) = self.hotkeys.try_recv() {
             match event {
+                ServiceEvent::StopAll => {
+                    // Audio has already stopped on the hotkey thread; this is
+                    // only the visible acknowledgement.
+                    self.log(StatusKind::Info, "Stopped all sounds");
+                    ctx.request_repaint();
+                }
                 ServiceEvent::Pressed(id) => {
                     #[cfg(debug_assertions)]
                     eprintln!("[hotkey] pressed sound {id}");
@@ -747,7 +783,7 @@ impl App {
                 Action::SetHotkey(id) => {
                     if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                         self.capture = Some(CaptureState {
-                            sound_id: id,
+                            target: CaptureTarget::Sound(id),
                             current: sound.hotkey,
                         });
                     }
@@ -1173,6 +1209,26 @@ impl App {
             used.insert(label);
             bindings.push((sound.id, hotkey));
         }
+        if self.cfg.stop_all_hotkey_enabled {
+            if let Some(hotkey) = self.stop_all {
+                let label = hotkey.label();
+                if used.contains(&label) {
+                    self.log(
+                        StatusKind::Warning,
+                        format!("Stop-all hotkey {label} is used by a sound; cleared"),
+                    );
+                    self.stop_all = None;
+                } else {
+                    used.insert(label);
+                }
+            }
+        }
+        self.hotkeys
+            .set_stop_all(if self.cfg.stop_all_hotkey_enabled {
+                self.stop_all
+            } else {
+                None
+            });
         self.hotkeys.set_bindings(bindings);
     }
 
@@ -1312,6 +1368,7 @@ impl App {
     /// Write only the files whose content actually changed.
     fn persist(&mut self) -> bool {
         self.cfg.active_library = self.active_library;
+        self.cfg.stop_all_hotkey = self.stop_all.map(|hotkey| hotkey.label());
         let base = model::app_dir();
         let mut ok = true;
 
@@ -1629,7 +1686,16 @@ impl App {
         } else {
             0.0
         };
-        let reserve = (if compact { 44.0 } else { 84.0 }) + loop_reserve;
+        // Meters and the stop-all widget are pinned: they must stay visible when
+        // the device column scrolls on a short window.
+        let meter_reserve = if compact { 36.0 } else { 49.0 };
+        let stop_all_reserve = if self.cfg.stop_all_hotkey_enabled {
+            38.0
+        } else {
+            0.0
+        };
+        let reserve =
+            (if compact { 44.0 } else { 84.0 }) + loop_reserve + meter_reserve + stop_all_reserve;
         let content_height = (ui.available_height() - reserve).max(120.0);
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), content_height),
@@ -1724,8 +1790,6 @@ impl App {
                         }
 
                         ui.add_space(6.0 * gap);
-                        self.level_meter(ui, compact);
-                        ui.add_space(6.0 * gap);
                     });
             },
         );
@@ -1742,6 +1806,12 @@ impl App {
                 {
                     self.open_settings(ui.ctx());
                 }
+                ui.add_space(6.0);
+                self.level_meter(ui, compact);
+                if self.cfg.stop_all_hotkey_enabled {
+                    ui.add_space(6.0);
+                    self.stop_all_card(ui);
+                }
                 if self.cfg.loop_enabled {
                     ui.add_space(6.0);
                     self.loop_card(ui, compact);
@@ -1757,6 +1827,72 @@ impl App {
                 }
             },
         );
+    }
+
+    /// Sidebar widget: stop everything now, and own the stop-all hotkey.
+    fn stop_all_card(&mut self, ui: &mut Ui) {
+        Frame::NONE
+            .fill(theme::card())
+            .stroke(Stroke::new(1.0_f32, theme::border_soft()))
+            .corner_radius(theme::RADIUS_MD)
+            .inner_margin(Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    let body = ui.add(
+                        egui::Label::new(RichText::new("Stop all").size(12.0).color(theme::text()))
+                            .sense(Sense::click()),
+                    );
+                    let stopped = body.clicked();
+                    body.on_hover_text("Stop every playing sound now");
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let unset = self.stop_all.is_none();
+                        let label = self
+                            .stop_all
+                            .map(|hotkey| hotkey.label())
+                            .unwrap_or_else(|| "Set hotkey".to_string());
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(96.0, 24.0), Sense::click());
+                        let painter = ui.painter();
+                        // Same surface as the hotkey pill on a sound card.
+                        painter.rect(
+                            rect,
+                            CornerRadius::same(theme::RADIUS_MD),
+                            theme::field(),
+                            Stroke::new(1.0_f32, theme::border_soft()),
+                            StrokeKind::Inside,
+                        );
+                        painter.text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            label,
+                            theme::ui_font(11.0),
+                            if unset {
+                                theme::faint()
+                            } else {
+                                theme::muted()
+                            },
+                        );
+                        if response.clicked() {
+                            self.capture = Some(CaptureState {
+                                target: CaptureTarget::StopAll,
+                                current: self.stop_all,
+                            });
+                        }
+                        if response.secondary_clicked() && self.stop_all.is_some() {
+                            self.stop_all = None;
+                            self.sync_active_library();
+                            self.mark_dirty();
+                        }
+                        response.on_hover_text("Click to set, right-click to clear");
+                    });
+
+                    if stopped {
+                        self.engine.stop_all();
+                        self.log(StatusKind::Info, "Stopped all sounds");
+                    }
+                });
+            });
     }
 
     /// Pill-shaped Box/List segmented control.
@@ -2296,17 +2432,6 @@ impl App {
                 if tiny_button(ui, "Activity log").clicked() {
                     self.show_log = true;
                 }
-                if ui
-                    .add(
-                        Button::new(RichText::new("Stop all").size(11.5).color(theme::red()))
-                            .frame(false),
-                    )
-                    .on_hover_text("Stop every playing sound (Esc)")
-                    .clicked()
-                {
-                    self.engine.stop_all();
-                    self.log(StatusKind::Info, "Stopped all sounds");
-                }
             });
         });
         let _ = ctx;
@@ -2336,19 +2461,23 @@ impl App {
         }
 
         // Only query playback state for sounds that are actually on screen.
-        let infos: HashMap<u64, SoundInfo> = filtered
+        let ids: Vec<u64> = filtered
             .iter()
-            .map(|&index| {
-                let sound = &self.sounds[index];
-                (sound.id, self.playback.info(sound.id))
-            })
+            .map(|&index| self.sounds[index].id)
             .collect();
+        let infos = self.playback.info_map(&ids);
 
         let mut actions = Vec::new();
         let mut rects: Vec<(usize, Rect)> = Vec::new();
         let mut rows: Vec<(usize, Rect)> = Vec::new();
         let allow_drag = self.search.trim().is_empty();
-        let capture_id = self.capture.as_ref().map(|c| c.sound_id);
+        let capture_id = self
+            .capture
+            .as_ref()
+            .and_then(|capture| match capture.target {
+                CaptureTarget::Sound(id) => Some(id),
+                CaptureTarget::StopAll => None,
+            });
 
         if self.sounds.is_empty()
             || !self
@@ -2621,8 +2750,11 @@ impl App {
                 // Zero item spacing so the widths add up exactly and the pill
                 // ends flush with the search field's right edge.
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let pill_width = 164.0;
-                let gap = 10.0;
+                // The pill is optional: with RAM state hidden the field gets the
+                // whole row instead of leaving a 174 px hole.
+                let show_pill = self.cfg.show_ram_state;
+                let pill_width = if show_pill { 164.0 } else { 0.0 };
+                let gap = if show_pill { 10.0 } else { 0.0 };
                 let search_width = (ui.available_width() - pill_width - gap).max(160.0);
                 let response = ui
                     .scope(|ui| {
@@ -2652,8 +2784,8 @@ impl App {
                     self.focus_search = false;
                 }
 
-                ui.add_space(gap);
                 if self.cfg.show_ram_state {
+                    ui.add_space(gap);
                     let state = self.ram_summary();
                     let (label, color, enabled) = match state {
                         None => ("No hotkeys".to_string(), theme::faint(), false),
@@ -2952,13 +3084,55 @@ impl App {
                     RichText::new(format!(
                         "{} of {} MB - {} of {} sounds",
                         usage.bytes / (1024 * 1024),
-                        memory::RETAINED_BYTES_CAP / (1024 * 1024),
+                        policy::RETAINED_BYTES_CAP / (1024 * 1024),
                         usage.sounds,
-                        memory::RETAINED_SOUND_CAP
+                        policy::RETAINED_SOUND_CAP
                     ))
                     .size(10.5)
                     .color(theme::faint()),
                 );
+            }
+        });
+
+        settings_group(ui, "Output devices", |ui| {
+            for (index, slot) in [Slot::Monitor, Slot::Cable].into_iter().enumerate() {
+                let (text, color) = if self.device_ready[slot.index()] {
+                    (format!("{}: ready", slot.label()), theme::accent())
+                } else if let Some(note) = self.device_note[slot.index()].as_deref() {
+                    (format!("{}: {note}", slot.label()), theme::red())
+                } else {
+                    (format!("{}: not connected", slot.label()), theme::muted())
+                };
+                ui.horizontal(|ui| {
+                    status_dot(ui, color);
+                    ui.label(RichText::new(text).size(11.0).color(color));
+                });
+                if index == 0 {
+                    settings_divider(ui);
+                }
+            }
+        });
+
+        settings_group(ui, "Stop everything", |ui| {
+            let mut enabled = self.cfg.stop_all_hotkey_enabled;
+            let mut changed = false;
+            settings_row(ui, "Stop-all hotkey", 80.0, |ui| {
+                changed = settings_switch(ui, Id::new("settings_stop_all"), &mut enabled, true);
+            });
+            if changed {
+                self.cfg.stop_all_hotkey_enabled = enabled;
+                self.sync_active_library();
+                self.mark_dirty();
+            }
+            if self.cfg.stop_all_hotkey_enabled {
+                ui.add_space(4.0);
+                let detail = match self.stop_all {
+                    Some(hotkey) => {
+                        format!("Key: {}. Set or change it in the sidebar.", hotkey.label())
+                    }
+                    None => "Set the key in the sidebar widget.".to_string(),
+                };
+                ui.label(RichText::new(detail).size(10.5).color(theme::faint()));
             }
         });
     }
@@ -3242,10 +3416,25 @@ impl App {
             }
         }
 
-        let sound_name = self.sound_name(capture.sound_id);
-        let conflict = capture.current.and_then(|hk| {
-            self.find_conflict(hk, capture.sound_id)
-                .map(|s| s.name.clone())
+        let (title, subject) = match capture.target {
+            CaptureTarget::Sound(id) => ("Set hotkey", format!("\"{}\"", self.sound_name(id))),
+            CaptureTarget::StopAll => (
+                "Set stop-all hotkey",
+                "Stops every playing sound".to_string(),
+            ),
+        };
+        let conflict = capture.current.and_then(|hotkey| match capture.target {
+            CaptureTarget::Sound(id) => {
+                if self.cfg.stop_all_hotkey_enabled && self.stop_all == Some(hotkey) {
+                    Some("Stop all".to_string())
+                } else {
+                    self.find_conflict(hotkey, id)
+                        .map(|sound| sound.name.clone())
+                }
+            }
+            CaptureTarget::StopAll => self
+                .find_conflict(hotkey, u64::MAX)
+                .map(|sound| sound.name.clone()),
         });
 
         let modal_area = egui::Modal::default_area(Id::new("capture_modal"))
@@ -3262,12 +3451,8 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.set_width(400.0);
-                modal_header(ui, "Set hotkey", Id::new("capture_close"), &mut close);
-                ui.label(
-                    RichText::new(format!("\"{sound_name}\""))
-                        .size(13.0)
-                        .color(theme::muted()),
-                );
+                modal_header(ui, title, Id::new("capture_close"), &mut close);
+                ui.label(RichText::new(subject).size(13.0).color(theme::muted()));
                 ui.add_space(12.0);
 
                 let box_rect =
@@ -3346,27 +3531,38 @@ impl App {
         }
         if save {
             let mut log_line = None;
-            if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == capture.sound_id) {
-                let had_hotkey = sound.hotkey.is_some();
-                sound.hotkey = capture.current;
-                sound.hotkey_error = None;
-                if capture.current.is_some() {
-                    if !had_hotkey {
-                        sound.ram = self.cfg.preload_hotkey_sounds;
+            match capture.target {
+                CaptureTarget::Sound(id) => {
+                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                        let had_hotkey = sound.hotkey.is_some();
+                        sound.hotkey = capture.current;
+                        sound.hotkey_error = None;
+                        if capture.current.is_some() {
+                            if !had_hotkey {
+                                sound.ram = self.cfg.preload_hotkey_sounds;
+                            }
+                        } else {
+                            sound.ram = false;
+                        }
+                        let label = sound
+                            .hotkey
+                            .map(|h| h.label())
+                            .unwrap_or_else(|| "none".into());
+                        let name = sound.name.clone();
+                        log_line = Some(if capture.current.is_some() {
+                            format!("Hotkey {label} assigned to \"{name}\"")
+                        } else {
+                            format!("Hotkey cleared for \"{name}\"")
+                        });
                     }
-                } else {
-                    sound.ram = false;
                 }
-                let label = sound
-                    .hotkey
-                    .map(|h| h.label())
-                    .unwrap_or_else(|| "none".into());
-                let name = sound.name.clone();
-                log_line = Some(if capture.current.is_some() {
-                    format!("Hotkey {label} assigned to \"{name}\"")
-                } else {
-                    format!("Hotkey cleared for \"{name}\"")
-                });
+                CaptureTarget::StopAll => {
+                    self.stop_all = capture.current;
+                    log_line = Some(match capture.current {
+                        Some(hotkey) => format!("Stop-all hotkey set to {}", hotkey.label()),
+                        None => "Stop-all hotkey cleared".to_string(),
+                    });
+                }
             }
             if let Some(line) = log_line {
                 self.log(StatusKind::Info, line);
@@ -3376,10 +3572,18 @@ impl App {
             return;
         }
         if clear {
-            if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == capture.sound_id) {
-                sound.hotkey = None;
-                sound.hotkey_error = None;
-                sound.ram = false;
+            match capture.target {
+                CaptureTarget::Sound(id) => {
+                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                        sound.hotkey = None;
+                        sound.hotkey_error = None;
+                        sound.ram = false;
+                    }
+                }
+                CaptureTarget::StopAll => {
+                    self.stop_all = None;
+                    self.log(StatusKind::Info, "Stop-all hotkey cleared");
+                }
             }
             self.sync_active_library();
             self.mark_dirty();
@@ -4635,7 +4839,7 @@ fn ram_chip(
     if !missing && (!has_hotkey || !show_ram) {
         return None;
     }
-    let ram_active = has_hotkey && sound.ram;
+    let ram_active = has_hotkey && info.loaded;
     let (label, color) = if missing {
         ("MISSING", theme::red())
     } else if info.loading {
@@ -4668,6 +4872,8 @@ fn ram_chip(
         "File is missing - click to locate"
     } else if ram_active {
         "In RAM - click to play from disk"
+    } else if info.refused {
+        "Too long or over the preload budget - always plays from disk"
     } else {
         "Playing from disk - click to keep in RAM"
     });
@@ -4779,7 +4985,7 @@ fn sound_card(
     let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
-    let ram_active = has_hotkey && sound.ram;
+    let ram_active = has_hotkey && info.loaded;
     let playing = progress.is_some();
     let missing = is_missing(info);
     let flash = sound
@@ -4945,7 +5151,7 @@ fn sound_row(
     let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
-    let ram_active = has_hotkey && sound.ram;
+    let ram_active = has_hotkey && info.loaded;
     let missing = is_missing(info);
     let playing = progress.is_some();
     let flash = sound

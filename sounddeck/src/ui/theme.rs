@@ -77,15 +77,12 @@ fn embedded_entries() -> Vec<ThemeEntry> {
 
 /// Theme ids and display names for the settings dropdown, Graphite first.
 pub fn available() -> Vec<(String, String)> {
-    themes_lock()
-        .read()
-        .map(|themes| {
-            themes
-                .iter()
-                .map(|theme| (theme.id.clone(), theme.name.clone()))
-                .collect()
-        })
-        .unwrap_or_default()
+    read_themes(|themes| {
+        themes
+            .iter()
+            .map(|theme| (theme.id.clone(), theme.name.clone()))
+            .collect()
+    })
 }
 
 pub fn palette() -> Palette {
@@ -96,18 +93,26 @@ pub fn palette() -> Palette {
 
 /// Select a parsed theme. Unknown ids (or a deleted theme) fall back to Graphite.
 pub fn set_theme(id: &str) {
-    let palette = themes_lock()
-        .read()
-        .ok()
-        .and_then(|themes| {
-            themes
-                .iter()
-                .find(|theme| theme.id == id)
-                .map(|theme| theme.palette)
-        })
-        .unwrap_or_else(theme_defaults::graphite);
-    if let Ok(mut current) = current_lock().write() {
-        *current = palette;
+    let palette = read_themes(|themes| {
+        themes
+            .iter()
+            .find(|theme| theme.id == id)
+            .map(|theme| theme.palette)
+    })
+    .unwrap_or_else(theme_defaults::graphite);
+    let mut current = match current_lock().write() {
+        Ok(current) => current,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *current = palette;
+}
+
+/// One poisoning policy for both theme locks: a stale palette is better than a
+/// crash, so an unwound writer is ignored instead of propagated.
+fn read_themes<T>(read: impl FnOnce(&[ThemeEntry]) -> T) -> T {
+    match themes_lock().read() {
+        Ok(themes) => read(&themes),
+        Err(poisoned) => read(&poisoned.into_inner()),
     }
 }
 

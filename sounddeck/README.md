@@ -17,8 +17,8 @@ live in `config/` next to the executable.
   or delete from a tab's context menu. Sounds can be moved between libraries from
   a sound's context menu, and the active library is remembered.
 - **Only the active library is live**: its hotkeys are bound and only its
-  hotkey sounds stay in RAM. Switching tabs stops playback and swaps the whole
-  hotkey/RAM set. Hotkeys in background tabs never fire.
+  hotkey sounds are preloaded. Switching tabs stops playback and swaps the whole
+  hotkey set. Hotkeys in background tabs never fire.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
 - **Looping track** (opt-in): enable it in Settings → Playback to show a loop
@@ -29,6 +29,12 @@ live in `config/` next to the executable.
   bar.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...). The key **passes through** to
   the focused app, so `Shift+T` also types `T` while playing the assigned sound.
+- **Stop-all hotkey** (off by default): enable it in Settings → Playback, then set a
+  key on the sidebar widget above the meters. Clicking the widget stops everything;
+  the key works while hidden and still reaches the focused app.
+- **Long sounds stream from disk**: anything over 30 s, or that does not fit the
+  preload budget, streams with constant memory. No file is fully decoded just to be
+  played once.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear.
@@ -66,7 +72,7 @@ The Settings button (or `Ctrl+,`) replaces the soundboard with a full-window vie
 The rail on the left switches tabs; the status bar stays available.
 
 - **Playback** — enable the looping track, choose its file, route it to Monitor and/or
-  Cable; load hotkey sounds into RAM.
+  Cable; load hotkey sounds into RAM; enable the stop-all hotkey.
 - **Appearance** — theme, reload themes, Animate UI.
 - **Window** — minimize-to-tray and whether the sidebar shows the master-gain slider.
 - **About** — version, config folder, developer details.

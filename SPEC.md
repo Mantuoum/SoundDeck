@@ -102,6 +102,8 @@ to go to either, both, or neither.
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
 | FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
 | FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. |
+| FR-5.3.12 | A sound that is not resident MUST stream from disk through a bounded channel. It MUST NOT be fully decoded into memory in order to be played once. |
+| FR-5.3.13 | The stream channel MUST default to 8 chunks of 1024 frames (~170 ms) and MUST be raised to 16 only if the `--stats` underrun counter or a listening test shows cracks. |
 
 ### 5.4 Playback
 
@@ -127,12 +129,13 @@ to go to either, both, or neither.
 | FR-5.5.5 | Sound effects MUST go to both slots equally; only the loop is routed per slot. |
 | FR-5.5.6 | Peak metering MUST be measured where the device consumes samples, so it reflects what is heard. |
 | FR-5.5.7 | A slot whose device disappears MUST stop consuming, MUST report the failure, and MUST be restartable without restarting the app. |
+| FR-5.5.8 | Settings MUST show whether each output is ready, with the last error when it is not. |
 
 ### 5.6 Looping track
 
 | ID | Requirement |
 | --- | --- |
-| FR-5.6.1 | The loop MUST be streamed from disk with bounded memory (16 chunks of 1024 frames, ~341 ms) for any file length. |
+| FR-5.6.1 | The loop MUST be streamed from disk with bounded memory (8 chunks of 1024 frames, ~170 ms) for any file length. |
 | FR-5.6.2 | It MUST have its own linear volume in `0..=1`, independent of the slot volumes. |
 | FR-5.6.3 | Routing MUST be independent per slot (`loop_on_monitor`, `loop_on_cable`); both off is a valid state. |
 | FR-5.6.4 | The mixer MUST keep consuming the stream while both routes are off, so re-enabling is seamless. |
@@ -152,6 +155,7 @@ to go to either, both, or neither.
 | FR-5.7.6 | Hotkeys MUST be clearable without removing the sound. |
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
+| FR-5.7.9 | An optional global stop-all hotkey MUST be off by default, own a sidebar widget above the meters when enabled, pass the key through, and work while hidden. |
 | FR-5.7.9 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
 
 ### 5.8 Window and tray
@@ -363,6 +367,7 @@ Rules that enforce them:
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |
 | NFR-8.2.6 | Retained decoded audio ≤ 32 MB and ≤ 16 sounds; the process refuses work that would cross its commit ceiling. Measured after hardening. |
 | NFR-8.2.7 | The loop is excluded from these caps: it is streamed, not retained. |
+| NFR-8.2.8 | One-shot playback is also excluded: streamed voices hold one bounded channel (130 KB) regardless of file length. No playback path decodes a whole file into RAM. |
 
 ### 8.3 Responsiveness and robustness
 

@@ -21,12 +21,13 @@ service. Everything lives beside the executable.
 | Entry point | `src/main.rs` | Single instance, window, diagnostics, eframe startup |
 | Application/UI | `src/app.rs` | State, actions, panels, board, Settings, modals |
 | Domain helpers | `src/model.rs` | App paths, supported files, formatting, layout enum |
-| Sound registry | `src/playback.rs` | Decode jobs, budgeted preload cache, per-sound volume |
-| Memory budget | `src/memory.rs` | Cache caps, admission rules, process commit query |
+| Sound registry | `src/playback/mod.rs` | Jobs, cache, streaming handoff, per-sound volume |
+| Playback policy | `src/playback/policy.rs` | RAM vs stream decisions, caps, admission, process valve |
 | Audio device I/O | `src/audio/wasapi.rs` | Device enumeration and render threads |
 | Mixer | `src/audio/engine.rs` | Voices, loop, rings, gains, metering |
-| Decoding | `src/audio/decode.rs` | File → 48 kHz stereo f32, one shot |
-| Streaming loop | `src/audio/stream.rs` | Loop decoder thread and chunk channel |
+| Decoding | `src/audio/reader.rs` | One Symphonia reader for preload, loop and one-shot streams |
+| Decoding (full) | `src/audio/decode.rs` | Collect the reader into RAM, preload only |
+| Streaming | `src/audio/stream.rs` | Loop and one-shot decoder threads, chunk channel |
 | Resampling | `src/audio/resample.rs` | Stateful 48 kHz stereo conversion |
 | Storage | `src/storage/*` | JSON schemas, atomic writes, backups, migration |
 | Hotkeys/tray | `src/hotkeys.rs` | Low-level keyboard hook, tray icon, message loop |
@@ -47,15 +48,17 @@ service. Everything lives beside the executable.
 | Hotkey/tray window | `HotkeyService::start` | App lifetime | Message-only window: hotkeys, tray, focus |
 | Device enumeration | `wasapi::list_devices` | One call | COM enumeration on a short-lived thread |
 
-### Preload cache and memory limits (`memory.rs`, `playback.rs`)
+### Preload cache and memory limits (`playback/policy.rs`, `playback/mod.rs`)
 
 - Retained decoded audio: **32 MB**, **16 sounds**, **30 s** per sound.
 - A longer sound is refused for preload *before* decoding (container probe) and
-  plays from disk; the log says why.
+  streams from disk; the log says why.
 - Admission is LRU: the not-currently-playing buffer with the oldest `last_used`
   is dropped to make room. The playing sound is never evicted.
 - A process commit ceiling (125 MB) is the last-resort valve; if the query fails,
   the cache fails closed and refuses to grow.
+- Everything that is not resident streams: one bounded channel (8 × 1024 frames,
+  ~130 KB) regardless of file length. No playback path decodes a whole file.
 - `show_ram_state` (default off) controls the chips, counts and toolbar pill; the
   per-sound retention control lives in the context menu and Settings.
 - A panic writes `crash.log` next to the executable before aborting
@@ -68,9 +71,10 @@ Mouse/keyboard ──► App::update ──► Action / direct call ──► Pl
 Global hotkey  ──► hotkey thread ──► Playback::play ─────────┘
 Loop Play      ──► Engine::start_loop ──► LoopStream thread ──► channel ──┐
                                                                           ▼
-Playback::play ──► cached samples? ──► Engine::play ──► Mixer (voices) ──► Mixer::render
-                                                              │
-                                                    master gain, then rings
+Playback::play ──► resident? ──► Engine::play ──► Mixer (buffer voice) ──┐
+                └► stream  ──► stream thread ──► channel ──► Mixer (stream voice) ─┤
+                                                                                  ▼
+                                                                    master gain, then rings
                                                               │
                                               WASAPI thread (per output) ──► speakers
 ```
@@ -108,7 +112,7 @@ loop open) hand it to one of the threads above.
 - `App::on_exit` stops the loop decoder.
 - `Drop for App` stops the loop again and persists settings/libraries.
 - `Drop for Engine` closes the loop, shuts down WASAPI threads, stops the mixer thread.
-- `HotkeyService::shutdown` unregisters hotkeys and removes the tray icon.
+- `HotkeyService::shutdown` unregisters hotkeys (including stop-all) and removes the tray icon.
 - Saving is debounced during normal use; quitting forces one last write.
 
 ---
@@ -203,24 +207,27 @@ any supported file with Symphonia and converts it once; `audio/resample.rs` perf
 stateful linear interpolation with an absolute output-frame counter, so the result does
 not depend on decode block size. Sound effects are capped at 20 minutes.
 
-### Playback registry (`playback.rs`)
+### Playback registry (`playback/mod.rs`)
 
 `Playback` maps sound IDs to `Playable` entries:
 
 | Field | Meaning |
 | --- | --- |
 | `path`, `volume` | Current file and gain |
-| `samples` | `Some(Arc<Vec<f32>>)` when kept in RAM |
-| `loading`, `pending_play` | Decode in flight / play when it finishes |
-| `error` | Last decode/link error |
+| `samples` | `Some(Arc<Vec<f32>>)` when resident |
+| `loading`, `pending_play` | Preload in flight / play when it finishes |
+| `error`, `missing` | Last decode/link error; filesystem check cached for 2 s |
+| `refused` | Why the cache declined; cleared by Reload or toggling preload |
+| `duration` | Container duration, used for stream progress |
 | `generation` | Invalidates stale loader results |
-| `retain` | Keep decoded samples after playing |
+| `retain` | Per-sound preload toggle |
 
-- **RAM sound:** trigger plays the cached `Arc` immediately.
-- **Disk sound:** trigger queues a `Job`; the loader decodes, plays if
-  `pending_play`, and drops the samples unless `retain`.
-- The loader is a single thread reading a channel, so jobs are serialized.
-- `PlaybackEvent::{Loaded, Failed}` is polled by the UI for logs.
+- **Resident:** trigger plays the cached `Arc` immediately.
+- **Not resident:** `policy::route` decides between a preload job (≤ 30 s, fits the
+  budget) and a stream thread. There is no full-file decode on the trigger path.
+- **Stream:** a bounded channel feeds a streamed mixer voice; memory is constant.
+- The loader is a single thread reading a channel, so preload jobs are serialized.
+- `PlaybackEvent::{Loaded, Failed, Refused, Warning}` is polled by the UI.
 - Hotkeys call `Playback::play` from the hotkey thread; state is behind a `Mutex`.
 
 RAM is assigned only to sounds that have a hotkey and are in the active tab. Switching
@@ -590,14 +597,15 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/main.rs` | Process start, single instance, viewport, `--diag`, eframe |
 | `src/app.rs` | All UI/state/actions; board, Settings, modals, helpers |
 | `src/model.rs` | Paths, portable/relative resolution, extensions, formatting |
-| `src/playback.rs` | Sound registry, budgeted decode jobs, loader thread, events |
-| `src/memory.rs` | Preload caps (32 MB / 16 sounds / 30 s), LRU admission, panic-free limits |
-| `src/hotkeys.rs` | Hotkey parse/register, message window, tray, focus |
+| `src/playback/mod.rs` | Sound registry, preload jobs, streaming handoff, events |
+| `src/playback/policy.rs` | RAM vs stream decision, caps, LRU admission, process valve |
+| `src/hotkeys.rs` | Hotkey parse/register, stop-all binding, message window, tray, focus |
 | `src/icon.rs` | PNG decode/resize for window and tray icons |
-| `src/audio/decode.rs` | One-shot Symphonia decode to 48 kHz stereo, 20-min cap |
+| `src/audio/reader.rs` | One Symphonia reader: open, decode block, resample, rewind |
+| `src/audio/decode.rs` | Collect the reader into RAM (preload only), early length cap |
 | `src/audio/resample.rs` | Stateful resampler (chunk-invariant) |
-| `src/audio/stream.rs` | Loop decoder thread, 16-chunk channel, states |
-| `src/audio/engine.rs` | Mixer, voices, loop, rings, gains, meter peaks, routes |
+| `src/audio/stream.rs` | Loop and one-shot decoder threads, bounded chunk channel |
+| `src/audio/engine.rs` | Mixer, buffer and stream voices, loop, rings, gains, routes |
 | `src/audio/wasapi.rs` | Device enumeration, shared-mode render threads |
 | `src/storage/mod.rs` | Settings/libraries schemas, normalize, load/save |
 | `src/storage/io.rs` | Atomic writes, BOM, rolling backup, recovery, tmp sweep |

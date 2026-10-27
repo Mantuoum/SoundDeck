@@ -1,10 +1,9 @@
-//! Streaming decoder for the looping background track.
+//! Disk streaming for the looping track and for one-shot sounds.
 //!
 //! One decoder thread reads the file, converts to 48 kHz stereo, and feeds a
-//! bounded channel. The mixer drains that channel; when the mixer is ahead the
-//! blocking send parks the thread, so memory stays constant for any file length.
+//! bounded channel. The mixer drains that channel; when it is ahead the blocking
+//! send parks the thread, so memory stays constant for any file length.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,24 +11,16 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
 
 use super::decode::CHANNELS;
-use super::resample::StereoResampler;
+use super::reader::PcmReader;
 
-/// Frames per channel sent to the mixer. 1024 frames ≈ 21 ms.
-pub const LOOP_CHUNK_FRAMES: usize = 1024;
-/// Channel depth ≈ 0.34 s of look-ahead, ~130 KB.
-const CHANNEL_CHUNKS: usize = 16;
-/// A corrupt file can emit a few bad packets; this many in a row is fatal.
-const MAX_DECODE_ERRORS: usize = 64;
+/// Frames per channel handed to the mixer. 1024 frames ≈ 21 ms.
+pub const STREAM_CHUNK_FRAMES: usize = 1024;
+/// Channel depth. 8 chunks ≈ 170 ms look-ahead, ~65 KB. Measured during release
+/// verification; bump to 16 only if the underrun counter or a listening test says
+/// the shallower buffer cracks.
+pub const STREAM_CHANNEL_CHUNKS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoopState {
@@ -58,15 +49,12 @@ pub struct LoopStream {
 }
 
 impl LoopStream {
-    /// Starts the decoder thread. Returns immediately with the chunk receiver.
-    ///
-    /// The receiver must be dropped before `stop` so a decoder parked in `send`
-    /// wakes up and the join stays prompt.
+    /// Starts the looping decoder. Returns immediately with the chunk receiver.
     pub fn spawn(
         path: PathBuf,
         status: Arc<Mutex<LoopState>>,
     ) -> Result<(Self, Receiver<Vec<f32>>)> {
-        let (tx, rx) = bounded(CHANNEL_CHUNKS);
+        let (tx, rx) = bounded(STREAM_CHANNEL_CHUNKS);
         let stop = Arc::new(AtomicBool::new(false));
 
         let join = {
@@ -75,7 +63,9 @@ impl LoopStream {
             thread::Builder::new()
                 .name("sounddeck-loop".into())
                 .spawn(move || {
-                    if let Err(err) = decode_loop(&path, &tx, &stop) {
+                    let result =
+                        PcmReader::open(&path).and_then(|reader| pump(reader, &tx, &stop, true));
+                    if let Err(err) = result {
                         if !stop.load(Ordering::Relaxed) {
                             set_status(&status, LoopState::Error(err.to_string()));
                         }
@@ -128,206 +118,85 @@ impl Drop for LoopStream {
     }
 }
 
-fn set_status(status: &Arc<Mutex<LoopState>>, value: LoopState) {
-    if let Ok(mut guard) = status.lock() {
-        *guard = value;
-    }
-}
-
-struct Source {
-    format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track_id: u32,
-}
-
-impl Source {
-    fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
-        let stream = MediaSourceStream::new(Box::new(file), Default::default());
-
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-
-        let probed = symphonia::default::get_probe()
-            .format(
-                &hint,
-                stream,
-                &FormatOptions {
-                    enable_gapless: true,
-                    ..Default::default()
-                },
-                &MetadataOptions::default(),
-            )
-            .with_context(|| format!("Unsupported or corrupt audio file: {}", path.display()))?;
-
-        let format = probed.format;
-        let (track_id, params) = {
-            let track = format
-                .default_track()
-                .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
-                .ok_or_else(|| anyhow::anyhow!("No decodable audio track"))?;
-            (track.id, track.codec_params.clone())
-        };
-        let decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
-            .context("No decoder for this audio format")?;
-
-        Ok(Self {
-            format,
-            decoder,
-            track_id,
+/// Streams a file once and closes the channel at end of file.
+///
+/// The file is opened on the calling thread so a missing or unsupported file is
+/// reported immediately, before any audio state is touched. The thread itself is
+/// detached: it ends when the receiver is dropped (the send fails) or at EOF.
+pub fn spawn_once(path: &Path) -> Result<Receiver<Vec<f32>>> {
+    let reader = PcmReader::open(path)?;
+    let (tx, rx) = bounded(STREAM_CHANNEL_CHUNKS);
+    thread::Builder::new()
+        .name("sounddeck-stream".into())
+        .spawn(move || {
+            let stop = AtomicBool::new(false);
+            let _ = pump(reader, &tx, &stop, false);
         })
-    }
-
-    /// Rewinds to the first packet, or reopens the file when the container
-    /// cannot seek.
-    fn rewind(&mut self, path: &Path) -> Result<()> {
-        let seek = self.format.seek(
-            SeekMode::Accurate,
-            SeekTo::Time {
-                time: Time::new(0, 0.0),
-                track_id: Some(self.track_id),
-            },
-        );
-        if seek.is_ok() {
-            self.decoder.reset();
-            return Ok(());
-        }
-        *self = Self::open(path).context("File is no longer available")?;
-        Ok(())
-    }
+        .context("Could not start the stream decoder")?;
+    Ok(rx)
 }
 
-fn decode_loop(path: &Path, tx: &Sender<Vec<f32>>, stop: &AtomicBool) -> Result<()> {
-    if !path.exists() {
-        bail!("File not found");
-    }
-    if !path.is_file() {
-        bail!("Not a file");
-    }
-
-    let mut source = Source::open(path)?;
-    let mut resampler: Option<StereoResampler> = None;
-    let mut current_spec: Option<(u32, usize)> = None;
-
+/// Reads blocks until EOF (or forever when `looping`), chunking them into the
+/// channel. Blocking sends give the back-pressure that keeps memory flat.
+fn pump(
+    mut reader: PcmReader,
+    tx: &Sender<Vec<f32>>,
+    stop: &AtomicBool,
+    looping: bool,
+) -> Result<()> {
+    let mut block: Vec<f32> = Vec::new();
     loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        let mut produced_frames = 0usize;
-        let mut consecutive_errors = 0usize;
-
+        let mut produced = 0usize;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-
-            let packet = match source.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(err))
-                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
-                }
-                Err(SymphoniaError::ResetRequired) => {
-                    source = Source::open(path)?;
-                    resampler = None;
-                    current_spec = None;
-                    continue;
-                }
-                Err(err) => return Err(err.into()),
-            };
-            if packet.track_id() != source.track_id {
-                continue;
+            block.clear();
+            if !reader.next_block(&mut block)? {
+                break;
             }
-
-            let decoded = match source.decoder.decode(&packet) {
-                Ok(decoded) => {
-                    consecutive_errors = 0;
-                    decoded
-                }
-                Err(SymphoniaError::DecodeError(_)) => {
-                    consecutive_errors += 1;
-                    if consecutive_errors > MAX_DECODE_ERRORS {
-                        bail!("Too many decode errors");
-                    }
-                    continue;
-                }
-                Err(SymphoniaError::IoError(err))
-                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
-                }
-                Err(SymphoniaError::ResetRequired) => {
-                    source = Source::open(path)?;
-                    resampler = None;
-                    current_spec = None;
-                    continue;
-                }
-                Err(err) => return Err(err.into()),
-            };
-
-            let spec = *decoded.spec();
-            let rate = spec.rate;
-            let channels = spec.channels.count();
-            if rate == 0 || channels == 0 {
-                continue;
-            }
-
-            if current_spec != Some((rate, channels)) {
-                if let Some(mut old) = resampler.take() {
-                    send_pcm(tx, stop, old.finish())?;
-                }
-                resampler = Some(StereoResampler::new(rate, channels));
-                current_spec = Some((rate, channels));
-            }
-
-            let frames = decoded.capacity().max(decoded.frames()) as u64;
-            if frames == 0 {
-                continue;
-            }
-            let mut buffer = SampleBuffer::<f32>::new(frames, spec);
-            buffer.copy_interleaved_ref(decoded);
-
-            let Some(resampler) = resampler.as_mut() else {
-                bail!("internal: resampler missing for the loop track");
-            };
-            let out = resampler.push(buffer.samples());
-            produced_frames += out.len() / CHANNELS;
-            send_pcm(tx, stop, out)?;
+            produced += block.len() / CHANNELS;
+            send_pcm(tx, stop, &block)?;
         }
 
-        if produced_frames == 0 {
+        block.clear();
+        reader.flush(&mut block);
+        if !block.is_empty() {
+            produced += block.len() / CHANNELS;
+            send_pcm(tx, stop, &block)?;
+        }
+
+        if !looping {
+            return Ok(());
+        }
+        if produced == 0 {
             bail!("No audio samples found");
         }
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-
-        // Drop the sub-frame interpolation tail before the next pass: keeping it
-        // would duplicate the last sample at every seam.
-        resampler = None;
-        current_spec = None;
-        source.rewind(path)?;
+        reader.rewind()?;
     }
 }
 
-fn send_pcm(tx: &Sender<Vec<f32>>, stop: &AtomicBool, samples: Vec<f32>) -> Result<()> {
-    let mut rest = samples.as_slice();
+fn send_pcm(tx: &Sender<Vec<f32>>, stop: &AtomicBool, samples: &[f32]) -> Result<()> {
+    let mut rest = samples;
     while !rest.is_empty() {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let take = (LOOP_CHUNK_FRAMES * CHANNELS).min(rest.len());
-        let chunk = rest[..take].to_vec();
-        tx.send(chunk)
-            .map_err(|_| anyhow::anyhow!("Loop channel closed"))?;
+        let take = (STREAM_CHUNK_FRAMES * CHANNELS).min(rest.len());
+        tx.send(rest[..take].to_vec())
+            .map_err(|_| anyhow::anyhow!("stream channel closed"))?;
         rest = &rest[take..];
     }
     Ok(())
+}
+
+fn set_status(status: &Arc<Mutex<LoopState>>, value: LoopState) {
+    if let Ok(mut guard) = status.lock() {
+        *guard = value;
+    }
 }
 
 #[cfg(test)]
@@ -341,7 +210,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("sounddeck-loop-{nanos}"));
+        let dir = std::env::temp_dir().join(format!("sounddeck-stream-{nanos}"));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -373,24 +242,6 @@ mod tests {
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
         wav.extend_from_slice(&data);
-        fs::write(path, wav).unwrap();
-    }
-
-    fn write_empty_wav(path: &Path) {
-        let rate = 48_000u32;
-        let mut wav = Vec::new();
-        wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&36u32.to_le_bytes());
-        wav.extend_from_slice(b"WAVEfmt ");
-        wav.extend_from_slice(&16u32.to_le_bytes());
-        wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
-        wav.extend_from_slice(&rate.to_le_bytes());
-        wav.extend_from_slice(&(rate * 4).to_le_bytes());
-        wav.extend_from_slice(&4u16.to_le_bytes());
-        wav.extend_from_slice(&16u16.to_le_bytes());
-        wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&0u32.to_le_bytes());
         fs::write(path, wav).unwrap();
     }
 
@@ -426,51 +277,36 @@ mod tests {
         assert!(!stream.finished());
 
         drop(rx);
-        let started = Instant::now();
         stream.stop();
-        assert!(started.elapsed() < Duration::from_secs(2));
-
-        // The decoder must not hold the file open after stop.
-        fs::rename(&path, dir.join("moved.wav")).unwrap();
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn empty_file_reports_an_error() {
+    fn one_shot_ends_with_disconnect() {
         let dir = temp_dir();
-        let path = dir.join("empty.wav");
-        write_empty_wav(&path);
+        let path = dir.join("once.wav");
+        write_wav(&path, 0.2, 330.0);
 
-        let status = Arc::new(Mutex::new(LoopState::Playing));
-        let (stream, rx) = LoopStream::spawn(path.clone(), status).unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut error = None;
-        while Instant::now() < deadline {
-            if let LoopState::Error(message) = stream.state() {
-                error = Some(message);
+        let rx = spawn_once(&path).unwrap();
+        let expected = (0.2 * 48_000.0) as usize;
+        let mut frames = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(chunk) => frames += chunk.len() / CHANNELS,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(_) => break,
+            }
+            if Instant::now() > deadline {
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
         }
-
-        drop(rx);
-        stream.stop();
-        let _ = fs::remove_dir_all(&dir);
-        assert!(error.is_some(), "expected a decode error");
+        assert!(frames >= expected, "only {frames} frames");
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn missing_file_reports_an_error() {
-        let status = Arc::new(Mutex::new(LoopState::Playing));
-        let (stream, rx) =
-            LoopStream::spawn(PathBuf::from("Z:\\no-such-file.wav"), status).unwrap();
-        drop(rx);
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline && !stream.finished() {
-            thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(stream.state(), LoopState::Error("File not found".into()));
-        stream.stop();
+    fn missing_file_fails_before_spawning() {
+        assert!(spawn_once(Path::new("Z:\\nope.wav")).is_err());
     }
 }

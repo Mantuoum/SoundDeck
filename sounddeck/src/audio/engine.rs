@@ -42,13 +42,10 @@ pub struct DeviceRoute {
     pub name: String,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum AudioEvent {
     DeviceStarted {
         slot: Slot,
-        name: String,
-        detail: String,
     },
     DeviceError {
         slot: Slot,
@@ -58,7 +55,6 @@ pub enum AudioEvent {
     Warning(String),
     Stopped {
         slot: Slot,
-        name: String,
     },
 }
 
@@ -148,18 +144,86 @@ impl Ring {
     }
 }
 
+enum VoiceSource {
+    /// Samples held in RAM.
+    Buffer(Arc<Vec<f32>>),
+    /// Samples pulled from a disk stream as the mixer consumes them.
+    Stream {
+        rx: Receiver<Vec<f32>>,
+        chunk: Vec<f32>,
+        pos: usize,
+        ended: bool,
+    },
+}
+
 struct Voice {
     sound_id: u64,
-    samples: Arc<Vec<f32>>,
+    source: VoiceSource,
+    /// Frames rendered so far. Drives fades, stop points and progress.
     position: usize,
     gain: f32,
     stop_at: Option<usize>,
     finished: bool,
+    total_frames: Option<usize>,
 }
 
 impl Voice {
-    fn frames(&self) -> usize {
-        self.samples.len() / CHANNELS
+    fn total_frames(&self) -> Option<usize> {
+        match &self.source {
+            VoiceSource::Buffer(samples) => Some(samples.len() / CHANNELS),
+            VoiceSource::Stream { .. } => self.total_frames,
+        }
+    }
+
+    fn next_frame(&mut self) -> Option<(f32, f32)> {
+        match &mut self.source {
+            VoiceSource::Buffer(samples) => {
+                let index = self.position * CHANNELS;
+                if index + 1 < samples.len() {
+                    Some((samples[index], samples[index + 1]))
+                } else {
+                    None
+                }
+            }
+            VoiceSource::Stream {
+                rx,
+                chunk,
+                pos,
+                ended,
+            } => loop {
+                if *pos + 1 < chunk.len() {
+                    let frame = (chunk[*pos], chunk[*pos + 1]);
+                    *pos += 2;
+                    return Some(frame);
+                }
+                chunk.clear();
+                *pos = 0;
+                if *ended {
+                    return None;
+                }
+                match rx.try_recv() {
+                    Ok(next) => *chunk = next,
+                    Err(TryRecvError::Empty) => {
+                        stats::stream_underrun();
+                        return None;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        *ended = true;
+                        return None;
+                    }
+                }
+            },
+        }
+    }
+
+    /// Nothing left to play, regardless of stop fades.
+    fn exhausted(&self) -> bool {
+        match &self.source {
+            VoiceSource::Buffer(samples) => self.position * CHANNELS + 1 >= samples.len(),
+            VoiceSource::Stream {
+                chunk, pos, ended, ..
+            } => *ended && *pos + 1 >= chunk.len(),
+        }
     }
 }
 
@@ -193,15 +257,12 @@ impl Mixer {
         }
         let frames = monitor.len() / CHANNELS;
         for voice in &mut self.voices {
-            let total = voice.frames();
-            if voice.position >= total {
-                voice.finished = true;
-                continue;
-            }
-            let start = voice.position;
-            let count = (total - start).min(frames);
-            for i in 0..count {
-                let frame = start + i;
+            let mut produced = 0usize;
+            while produced < frames {
+                let Some((left, right)) = voice.next_frame() else {
+                    break;
+                };
+                let frame = voice.position;
                 let mut env = 1.0f32;
                 if (frame as f32) < FADE_IN_FRAMES {
                     env *= frame as f32 / FADE_IN_FRAMES;
@@ -212,19 +273,22 @@ impl Mixer {
                         env *= (1.0 - faded).max(0.0);
                     }
                 }
-                let src = frame * CHANNELS;
-                let dst = i * CHANNELS;
-                let g = voice.gain * env;
-                monitor[dst] += voice.samples[src] * g;
-                monitor[dst + 1] += voice.samples[src + 1] * g;
-                if let Some(stop_at) = voice.stop_at {
-                    if frame >= stop_at + FADE_OUT_FRAMES as usize {
-                        voice.finished = true;
-                    }
-                }
+                let dst = produced * CHANNELS;
+                let gain = voice.gain * env;
+                monitor[dst] += left * gain;
+                monitor[dst + 1] += right * gain;
+                voice.position += 1;
+                produced += 1;
             }
-            voice.position = start + count;
-            if voice.position >= total {
+
+            let fade_done = voice
+                .stop_at
+                .map(|stop_at| voice.position >= stop_at + FADE_OUT_FRAMES as usize)
+                .unwrap_or(false);
+            // A starved stream during a stop fade would otherwise hold the voice
+            // forever, because its position never advances.
+            let stalled_stop = voice.stop_at.is_some() && produced == 0;
+            if fade_done || stalled_stop || voice.exhausted() {
                 voice.finished = true;
             }
         }
@@ -297,7 +361,7 @@ impl Mixer {
             .iter()
             .filter(|v| !v.finished && v.stop_at.is_none())
             .map(|v| {
-                let total = v.frames().max(1) as f32;
+                let total = v.total_frames().unwrap_or(0).max(1) as f32;
                 ActiveSound {
                     sound_id: v.sound_id,
                     progress: (v.position as f32 / total).clamp(0.0, 1.0),
@@ -373,13 +437,18 @@ impl Engine {
             let mixer = mixer.clone();
             let rings = rings.clone();
             let stop = mixer_stop.clone();
-            thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name("sounddeck-mixer".into())
                 .spawn(move || {
                     super::raise_thread_priority();
                     mixer_loop(mixer, rings, stop, mixer_wake_rx)
-                })
-                .ok()
+                });
+            if let Err(err) = &spawned {
+                let _ = events_tx.send(AudioEvent::Warning(format!(
+                    "Could not start the audio mixer: {err}. No sounds will play."
+                )));
+            }
+            spawned.ok()
         };
 
         Self {
@@ -448,7 +517,7 @@ impl Engine {
     }
 
     pub fn play(&self, sound_id: u64, samples: Arc<Vec<f32>>, volume: f32) {
-        if !crate::memory::is_valid_buffer(&samples) {
+        if !is_valid_buffer(&samples) {
             let _ = self.events_tx.send(AudioEvent::Warning(format!(
                 "Refused to play sound {sound_id}: invalid sample buffer"
             )));
@@ -467,15 +536,52 @@ impl Engine {
             }
             mixer.voices.push(Voice {
                 sound_id,
-                samples,
+                source: VoiceSource::Buffer(samples),
                 position: 0,
                 gain: volume.clamp(0.0, 1.0),
                 stop_at: None,
                 finished: false,
+                total_frames: None,
             });
         }
         // Publish after the lock is released so the mixer cannot wake, block on
         // the lock and then find stale state.
+        self.wake_mixer();
+    }
+
+    /// Plays a sound straight from a disk stream. Same exclusive-playback rules
+    /// as [`Engine::play`]; memory is one bounded channel, whatever the length.
+    pub fn play_stream(
+        &self,
+        sound_id: u64,
+        rx: Receiver<Vec<f32>>,
+        volume: f32,
+        total_frames: Option<usize>,
+    ) {
+        {
+            let Ok(mut mixer) = self.mixer.lock() else {
+                return;
+            };
+            for voice in &mut mixer.voices {
+                if voice.stop_at.is_none() {
+                    voice.stop_at = Some(voice.position);
+                }
+            }
+            mixer.voices.push(Voice {
+                sound_id,
+                source: VoiceSource::Stream {
+                    rx,
+                    chunk: Vec::new(),
+                    pos: 0,
+                    ended: false,
+                },
+                position: 0,
+                gain: volume.clamp(0.0, 1.0),
+                stop_at: None,
+                finished: false,
+                total_frames,
+            });
+        }
         self.wake_mixer();
     }
 
@@ -673,6 +779,11 @@ impl Drop for Engine {
             }
         }
     }
+}
+
+/// Samples accepted by the mixer: non-empty and an even number of samples.
+fn is_valid_buffer(samples: &[f32]) -> bool {
+    !samples.is_empty() && samples.len() % CHANNELS == 0
 }
 
 fn db_to_gain(db: f32) -> f32 {
@@ -955,13 +1066,50 @@ mod loop_tests {
         let mut mixer = idle_mixer(None);
         mixer.voices.push(Voice {
             sound_id: 1,
-            samples: Arc::new(vec![0.1f32; MIX_CHUNK_FRAMES * CHANNELS]),
+            source: VoiceSource::Buffer(Arc::new(vec![0.1f32; MIX_CHUNK_FRAMES * CHANNELS])),
             position: 0,
             gain: 1.0,
             stop_at: None,
             finished: false,
+            total_frames: None,
         });
         assert!(mixer.has_work());
+    }
+
+    #[test]
+    fn a_stream_voice_mixes_and_ends() {
+        let mut mixer = idle_mixer(None);
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        mixer.voices.push(Voice {
+            sound_id: 7,
+            source: VoiceSource::Stream {
+                rx,
+                chunk: Vec::new(),
+                pos: 0,
+                ended: false,
+            },
+            position: 0,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+            total_frames: Some(MIX_CHUNK_FRAMES),
+        });
+        tx.send(vec![0.25f32; MIX_CHUNK_FRAMES * CHANNELS]).unwrap();
+
+        let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        mixer.render(&mut monitor, &mut cable);
+        assert!(monitor.iter().any(|sample| sample.abs() > 0.001));
+        assert!(cable.iter().any(|sample| sample.abs() > 0.001));
+
+        drop(tx);
+        for _ in 0..4 {
+            mixer.render(&mut monitor, &mut cable);
+            if mixer.voices.is_empty() {
+                break;
+            }
+        }
+        assert!(mixer.voices.is_empty(), "stream voice never finished");
     }
 
     #[test]

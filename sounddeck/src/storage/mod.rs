@@ -43,10 +43,6 @@ pub struct Settings {
     pub loop_on_monitor: bool,
     /// Route the loop to the cable output.
     pub loop_on_cable: bool,
-    /// Parsed for older config files, but the window always starts at a fixed
-    /// size, so this is no longer read or written.
-    #[allow(dead_code)]
-    pub window_size: Option<[f32; 2]>,
     pub animate_ui: bool,
     /// Minimize hides to the tray instead of the taskbar.
     pub minimize_to_tray: bool,
@@ -54,6 +50,10 @@ pub struct Settings {
     pub show_gain_slider: bool,
     /// Show RAM/disk state (card chips, counts, toolbar pill). Off by default.
     pub show_ram_state: bool,
+    /// Enables the global stop-all hotkey and its sidebar widget.
+    pub stop_all_hotkey_enabled: bool,
+    /// Label form of the stop-all hotkey, e.g. "Ctrl+Alt+S".
+    pub stop_all_hotkey: Option<String>,
 }
 
 impl Default for Settings {
@@ -77,11 +77,12 @@ impl Default for Settings {
             loop_volume: 1.0,
             loop_on_monitor: true,
             loop_on_cable: true,
-            window_size: None,
             animate_ui: true,
             minimize_to_tray: false,
             show_gain_slider: true,
             show_ram_state: false,
+            stop_all_hotkey_enabled: false,
+            stop_all_hotkey: None,
         }
     }
 }
@@ -103,6 +104,14 @@ impl Settings {
             }
         });
         self.loop_volume = finite_or(self.loop_volume, 1.0).clamp(0.0, 1.0);
+        self.stop_all_hotkey = self.stop_all_hotkey.take().and_then(|label| {
+            let trimmed = label.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     }
 }
 

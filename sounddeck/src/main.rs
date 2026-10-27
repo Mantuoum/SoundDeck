@@ -4,7 +4,6 @@ mod app;
 mod audio;
 mod hotkeys;
 mod icon;
-mod memory;
 mod model;
 mod playback;
 mod stats;

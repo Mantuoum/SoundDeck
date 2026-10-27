@@ -27,6 +27,9 @@ static POP_CALLS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 static POP_EMPTY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 static VOICES: AtomicU32 = AtomicU32::new(0);
+/// Voice underruns: a stream voice asked the mixer for samples and the channel
+/// was empty. Non-zero means the disk buffer is too shallow.
+static STREAM_UNDERRUNS: AtomicU64 = AtomicU64::new(0);
 /// 0 = idle, 1 = playing, 2 = error.
 static LOOP: AtomicU32 = AtomicU32::new(0);
 
@@ -77,6 +80,7 @@ fn report(elapsed: f64) -> String {
         POP_EMPTY[0].swap(0, Ordering::Relaxed),
         POP_EMPTY[1].swap(0, Ordering::Relaxed),
     ];
+    let stream_underruns = STREAM_UNDERRUNS.swap(0, Ordering::Relaxed);
 
     let fps = frames as f64 / elapsed;
     let avg_ms = if frames == 0 {
@@ -92,7 +96,7 @@ fn report(elapsed: f64) -> String {
     format!(
         "[stats] fps={fps:.1} frame_avg_ms={avg_ms:.2} frame_max_ms={:.2} hidden={} repaint={}ms \
          mixer_iters={:.0} mixer_renders={:.0} mixer_sleeps={:.0} \
-         pop0={:.0}/{:.0} pop1={:.0}/{:.0} voices={} loop={loop_label}",
+         pop0={:.0}/{:.0} pop1={:.0}/{:.0} voices={} loop={loop_label} stream_underruns={}",
         frame_max as f64 / 1_000_000.0,
         HIDDEN.load(Ordering::Relaxed) as u8,
         REPAINT_MS.load(Ordering::Relaxed),
@@ -104,7 +108,15 @@ fn report(elapsed: f64) -> String {
         pop[1] as f64 / elapsed,
         empty[1] as f64 / elapsed,
         VOICES.load(Ordering::Relaxed),
+        stream_underruns,
     )
+}
+
+/// One stream voice found the channel empty when it wanted samples.
+pub fn stream_underrun() {
+    if enabled() {
+        STREAM_UNDERRUNS.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub fn record_frame(duration: Duration, hidden: bool, repaint_ms: u32) {

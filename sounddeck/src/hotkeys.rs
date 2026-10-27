@@ -308,6 +308,7 @@ pub enum TrayCommand {
 #[derive(Clone, Debug)]
 pub enum ServiceEvent {
     Pressed(u64),
+    StopAll,
     Registered {
         sound_id: u64,
         hotkey: Hotkey,
@@ -320,6 +321,7 @@ pub enum ServiceEvent {
 
 enum Command {
     SetBindings(Vec<(u64, Hotkey)>),
+    SetStopAll(Option<Hotkey>),
     UpdateTip(String),
     Shutdown,
 }
@@ -344,7 +346,8 @@ impl HotkeyService {
         let thread_id = Arc::new(AtomicU32::new(0));
         let tid = thread_id.clone();
 
-        let thread = thread::Builder::new()
+        let fail_tx = event_tx.clone();
+        let spawned = thread::Builder::new()
             .name("sounddeck-hotkeys".into())
             .spawn(move || {
                 #[cfg(windows)]
@@ -357,8 +360,13 @@ impl HotkeyService {
                         rx, event_tx, ctx, tid, tray_rgba, tray_size, tooltip, playback,
                     );
                 }
-            })
-            .ok();
+            });
+        if let Err(err) = &spawned {
+            let _ = fail_tx.send(ServiceEvent::Fatal(format!(
+                "Could not start the hotkey thread: {err}. Hotkeys and the tray are unavailable."
+            )));
+        }
+        let thread = spawned.ok();
 
         Self {
             tx,
@@ -370,6 +378,11 @@ impl HotkeyService {
 
     pub fn set_bindings(&self, bindings: Vec<(u64, Hotkey)>) {
         let _ = self.tx.send(Command::SetBindings(bindings));
+        self.wake();
+    }
+
+    pub fn set_stop_all(&self, hotkey: Option<Hotkey>) {
+        let _ = self.tx.send(Command::SetStopAll(hotkey));
         self.wake();
     }
 
@@ -479,12 +492,14 @@ mod win {
     pub const WAKE_MSG: u32 = WM_APP + 2;
     const TRAY_MSG: u32 = WM_APP + 1;
     const PLAY_MSG: u32 = WM_APP + 3;
+    const STOP_MSG: u32 = WM_APP + 4;
     const MENU_SHOW: usize = 1;
     const MENU_STOP: usize = 2;
     const MENU_QUIT: usize = 3;
 
     struct HookShared {
         bindings: Vec<(Hotkey, u64)>,
+        stop_all: Option<Hotkey>,
         down: Vec<u32>,
         hwnd: HWND,
     }
@@ -560,6 +575,7 @@ mod win {
 
             let hook = Rc::new(RefCell::new(HookShared {
                 bindings: Vec::new(),
+                stop_all: None,
                 down: Vec::new(),
                 hwnd: HWND::default(),
             }));
@@ -669,6 +685,9 @@ mod win {
                         });
                     }
                 }
+                Command::SetStopAll(hotkey) => {
+                    state.hook.borrow_mut().stop_all = hotkey;
+                }
                 Command::UpdateTip(tip) => {
                     state.tooltip = tip;
                     if state.tray_added {
@@ -697,7 +716,14 @@ mod win {
                     if is_down {
                         if !hook.down.contains(&vk) {
                             hook.down.push(vk);
-                            if let Some(id) = find_binding(&hook.bindings, current_mods(), vk) {
+                            let mods = current_mods();
+                            if hook
+                                .stop_all
+                                .map(|hotkey| hotkey.vk == vk && hotkey.mods == mods)
+                                .unwrap_or(false)
+                            {
+                                let _ = PostMessageW(hook.hwnd, STOP_MSG, WPARAM(0), LPARAM(0));
+                            } else if let Some(id) = find_binding(&hook.bindings, mods, vk) {
                                 let _ = PostMessageW(
                                     hook.hwnd,
                                     PLAY_MSG,
@@ -748,6 +774,13 @@ mod win {
                     let sound_id = wparam.0 as u64;
                     state.playback.play(sound_id);
                     state.emit(ServiceEvent::Pressed(sound_id));
+                }
+                LRESULT(0)
+            }
+            STOP_MSG => {
+                if let Some(state) = state {
+                    state.playback.stop_all();
+                    state.emit(ServiceEvent::StopAll);
                 }
                 LRESULT(0)
             }

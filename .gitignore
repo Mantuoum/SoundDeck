@@ -19,6 +19,7 @@ References/
 sounddeck/check.txt
 context.md
 plan.md
+plan-*.md
 
 # Local agent tooling / skills (never commit or publish)
 .agents/

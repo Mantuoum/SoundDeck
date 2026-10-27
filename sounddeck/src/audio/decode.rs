@@ -1,17 +1,15 @@
-use std::fs::File;
+//! Full-file decode, used only by the preload cache.
+//!
+//! Playback never comes through here any more: sounds that are not preloaded are
+//! streamed. That keeps this path bounded by the preload limits (30 s), so the
+//! old 460 MB transient decode of a long file no longer exists.
+
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use anyhow::{bail, Result};
 
-use super::resample::StereoResampler;
+use super::reader::PcmReader;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -22,198 +20,84 @@ pub struct DecodedAudio {
     pub duration_secs: f32,
 }
 
-/// Estimated canonical size of a file, from its container metadata only.
+/// Decode a file into interleaved stereo f32 at 48 kHz.
 ///
-/// Used before decoding to decide whether a sound is even eligible for the
-/// preload cache, so a long file never costs a 400 MB decode just to be refused.
-/// Returns `None` when the container does not expose a frame count; the caller
-/// then has to fall back to decoding.
-pub fn probe_bytes(path: &Path) -> Option<usize> {
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .ok()?;
-    let track = probed.format.default_track()?;
-    let params = &track.codec_params;
-    let frames = params.n_frames?;
-    let time_base = params.time_base?;
-    let time = time_base.calc_time(frames);
-    let seconds = time.seconds as f64 + time.frac;
-    let bytes = crate::memory::bytes_for_seconds(seconds as f32);
-    if bytes == 0 {
-        return None;
-    }
-    Some(bytes)
-}
-
-/// Decode any supported file into interleaved stereo f32 @ 48 kHz.
+/// The length limit is checked while collecting, not afterwards, so a 40-minute
+/// file cannot fill memory before being rejected.
 pub fn decode_file(path: &Path) -> Result<DecodedAudio> {
-    if !path.exists() {
-        bail!("File not found: {}", path.display());
-    }
-    if !path.is_file() {
-        bail!("Not a file: {}", path.display());
-    }
+    let mut reader = PcmReader::open(path)?;
+    let max_samples = (MAX_SECONDS * SAMPLE_RATE as f32) as usize * CHANNELS;
+    let mut samples = Vec::new();
 
-    let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
-        )
-        .with_context(|| format!("Unsupported or corrupt audio file: {}", path.display()))?;
-
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .filter(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| anyhow::anyhow!("No decodable audio track"))?;
-    let track_id = track.id;
-    let params = track.codec_params.clone();
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
-        .context("No decoder for this audio format")?;
-
-    // Decoded audio is collected per (sample-rate, channel-count) segment, in case
-    // the stream changes format mid-file (rare, but legal).
-    let mut segments: Vec<(Vec<f32>, usize, u32)> = Vec::new();
-    let mut current: Option<(Vec<f32>, usize, u32)> = None;
-
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(SymphoniaError::ResetRequired) => break,
-            Err(err) => return Err(err).context("Failed while reading audio packets"),
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(err) => return Err(err).context("Failed while decoding audio"),
-        };
-
-        let spec = *decoded.spec();
-        let channels = spec.channels.count();
-        let rate = spec.rate;
-        if channels == 0 || rate == 0 {
-            continue;
-        }
-
-        let frames = decoded.capacity().max(decoded.frames()) as u64;
-        if frames == 0 {
-            continue;
-        }
-        let mut buf = SampleBuffer::<f32>::new(frames, spec);
-        buf.copy_interleaved_ref(decoded);
-
-        match &mut current {
-            Some((samples, ch, r)) if *ch == channels && *r == rate => {
-                samples.extend_from_slice(buf.samples());
-            }
-            Some(_) => {
-                if let Some(segment) = current.take() {
-                    segments.push(segment);
-                }
-                current = Some((buf.samples().to_vec(), channels, rate));
-            }
-            None => {
-                current = Some((buf.samples().to_vec(), channels, rate));
-            }
-        }
-    }
-
-    if let Some(segment) = current.take() {
-        segments.push(segment);
-    }
-    if segments.is_empty() {
-        bail!("No audio samples found");
-    }
-
-    let mut canonical: Vec<f32> = Vec::new();
-    for (samples, channels, rate) in segments {
-        canonical.extend_from_slice(&to_canonical(&samples, channels, rate));
-        let seconds = canonical.len() as f32 / (CHANNELS as f32 * SAMPLE_RATE as f32);
-        if seconds > MAX_SECONDS {
+    while reader.next_block(&mut samples)? {
+        if samples.len() > max_samples {
             bail!("Sound is longer than 20 minutes; not loading");
         }
     }
-    if canonical.is_empty() {
+    reader.flush(&mut samples);
+
+    if samples.is_empty() {
         bail!("Decoded audio is empty");
     }
-
-    let duration_secs = canonical.len() as f32 / (CHANNELS as f32 * SAMPLE_RATE as f32);
+    let duration_secs = samples.len() as f32 / (CHANNELS as f32 * SAMPLE_RATE as f32);
     Ok(DecodedAudio {
-        samples: Arc::new(canonical),
+        samples: Arc::new(samples),
         duration_secs,
     })
-}
-
-/// Convert interleaved source audio to 48 kHz stereo with linear interpolation.
-fn to_canonical(src: &[f32], channels: usize, rate: u32) -> Vec<f32> {
-    let mut resampler = StereoResampler::new(rate, channels);
-    let mut out = resampler.push(src);
-    out.extend(resampler.finish());
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    #[test]
-    fn mono_is_duplicated() {
-        let src = vec![0.5f32, -0.5, 0.25];
-        let out = to_canonical(&src, 1, SAMPLE_RATE);
-        assert_eq!(out.len(), src.len() * 2);
-        assert!((out[0] - 0.5).abs() < 1e-6);
-        assert!((out[1] - 0.5).abs() < 1e-6);
+    fn write_wav(path: &Path, seconds: f32) {
+        let rate = 48_000u32;
+        let frames = (rate as f32 * seconds) as u32;
+        let mut data = Vec::new();
+        for _ in 0..frames {
+            data.extend_from_slice(&0i16.to_le_bytes());
+            data.extend_from_slice(&0i16.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&data);
+        fs::write(path, wav).unwrap();
     }
 
     #[test]
-    fn resamples_length() {
-        let src = vec![0.0f32; 44100]; // 1 second of mono 44.1 kHz
-        let out = to_canonical(&src, 1, 44100);
-        assert!((out.len() as f32 / 2.0 - 48000.0).abs() <= 1.0);
+    fn decodes_a_short_wav() {
+        let dir = std::env::temp_dir().join(format!(
+            "sounddeck-decode-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.wav");
+        write_wav(&path, 0.25);
+
+        let decoded = decode_file(&path).unwrap();
+        assert!((decoded.duration_secs - 0.25).abs() < 0.01);
+        assert_eq!(decoded.samples.len(), 48_000 / 4 * 2);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn empty_input() {
-        assert!(to_canonical(&[], 2, 48000).is_empty());
+    fn missing_file_is_an_error() {
+        assert!(decode_file(Path::new("Z:\\nope.wav")).is_err());
     }
 }

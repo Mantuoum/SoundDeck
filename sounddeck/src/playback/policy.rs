@@ -1,27 +1,21 @@
-//! Memory budgets for decoded audio.
+//! Every decision about RAM versus disk lives here.
 //!
-//! Everything that keeps samples alive goes through here, so there is exactly
-//! one place that decides whether a buffer is allowed to stay resident.
-//!
-//! The numbers are deliberately conservative: the base process is ~75 MB and the
-//! product ceiling is 105 MB, so the audio cache can never be the reason the app
-//! grows without bound.
+//! The registry, the loader and the UI all ask this module, so there is exactly
+//! one definition of "eligible", "too long", "full" and "cannot read the
+//! process size". No other file is allowed to guess.
 
-/// Bytes per sample in the canonical format (48 kHz stereo f32).
+use crate::audio::decode::{CHANNELS, SAMPLE_RATE};
+
+/// Bytes per sample in the canonical format.
 pub const SAMPLE_BYTES: usize = std::mem::size_of::<f32>();
-pub const CHANNELS: usize = 2;
-pub const BYTES_PER_SECOND: usize = 48_000 * CHANNELS * SAMPLE_BYTES; // 384 000
+pub const BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * CHANNELS * SAMPLE_BYTES;
 
 /// Total decoded audio that may stay resident, across all sounds.
 pub const RETAINED_BYTES_CAP: usize = 32 * 1024 * 1024;
-
 /// Maximum number of resident sounds.
 pub const RETAINED_SOUND_CAP: usize = 16;
-
-/// Longest single sound that may be kept resident. Longer sounds always play
-/// from disk; preloading them is refused before any decoding happens.
+/// Longest single sound that may be kept resident. Longer sounds always stream.
 pub const RETAIN_SECONDS_CAP: f32 = 30.0;
-
 /// Bytes a single sound may occupy to be eligible for preloading.
 pub const PER_SOUND_RETAIN_BYTES: usize = (RETAIN_SECONDS_CAP as usize) * BYTES_PER_SECOND;
 
@@ -29,8 +23,7 @@ pub const PER_SOUND_RETAIN_BYTES: usize = (RETAIN_SECONDS_CAP as usize) * BYTES_
 ///
 /// Windows does not expose "private working set" cheaply, so the valve uses
 /// commit (`PrivateUsage`), which runs ~12 MB above the working-set number the
-/// product promise quotes. 125 MB of commit corresponds to roughly 105 MB in
-/// Task Manager with the default audio cache.
+/// product promise quotes.
 pub const PROCESS_CEILING: usize = 125 * 1024 * 1024;
 pub const PROCESS_HEADROOM: usize = 4 * 1024 * 1024;
 
@@ -41,7 +34,7 @@ pub struct Usage {
     pub sounds: usize,
 }
 
-/// Canonical decoded size for a duration, used for the pre-decode estimate.
+/// Canonical decoded size for a duration, used for pre-decode estimates.
 pub fn bytes_for_seconds(seconds: f32) -> usize {
     if !seconds.is_finite() || seconds <= 0.0 {
         return 0;
@@ -49,14 +42,59 @@ pub fn bytes_for_seconds(seconds: f32) -> usize {
     (seconds * BYTES_PER_SECOND as f32).ceil() as usize
 }
 
-pub fn seconds_for_bytes(bytes: usize) -> f32 {
-    bytes as f32 / BYTES_PER_SECOND as f32
+/// Why a sound is going to the disk path instead of the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamReason {
+    PreloadOff,
+    TooLong,
+    UnknownDuration,
+    BudgetFull,
+}
+
+/// What to do with a sound that is not already resident.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Decode once, keep it, then play.
+    Preload,
+    /// Play straight from disk; memory stays flat.
+    Stream(StreamReason),
+}
+
+/// Inputs to [`route`]. Deliberately plain data so the rules are unit-testable.
+#[derive(Clone, Copy, Debug)]
+pub struct Request {
+    pub retain: bool,
+    pub duration: Option<f32>,
+    pub usage: Usage,
+    pub process_bytes: Option<usize>,
+}
+
+/// The single decision function. `None` means "already resident" and never
+/// reaches here.
+pub fn route(request: &Request) -> Route {
+    if !request.retain {
+        return Route::Stream(StreamReason::PreloadOff);
+    }
+    let Some(duration) = request.duration else {
+        return Route::Stream(StreamReason::UnknownDuration);
+    };
+    if duration > RETAIN_SECONDS_CAP {
+        return Route::Stream(StreamReason::TooLong);
+    }
+    if !admit(
+        request.usage,
+        bytes_for_seconds(duration),
+        request.process_bytes,
+    ) {
+        return Route::Stream(StreamReason::BudgetFull);
+    }
+    Route::Preload
 }
 
 /// Whether a sound of `bytes` may be added to `usage` without breaking a cap.
 ///
-/// `process_bytes` is the current private working set when known. `None` means
-/// the platform refused to tell us, and the caller must fail closed.
+/// `process_bytes` is the current private commit when known. `None` means the
+/// platform refused to tell us, and the caller must fail closed.
 pub fn admit(usage: Usage, bytes: usize, process_bytes: Option<usize>) -> bool {
     if bytes == 0 || bytes > PER_SOUND_RETAIN_BYTES {
         return false;
@@ -109,7 +147,7 @@ pub fn refusal_reason(usage: Usage, bytes: usize, process_bytes: Option<usize>) 
 ///
 /// `None` when the query fails; callers treat that as "do not grow".
 #[cfg(windows)]
-pub fn private_bytes() -> Option<usize> {
+pub fn process_bytes() -> Option<usize> {
     use windows::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
@@ -128,23 +166,21 @@ pub fn private_bytes() -> Option<usize> {
 }
 
 #[cfg(not(windows))]
-pub fn private_bytes() -> Option<usize> {
+pub fn process_bytes() -> Option<usize> {
     None
-}
-
-/// Sample count accepted by the mixer: non-empty and an even number of samples.
-pub fn is_valid_buffer(samples: &[f32]) -> bool {
-    !samples.is_empty() && samples.len() % CHANNELS == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn seconds_and_bytes_round_trip() {
-        assert_eq!(bytes_for_seconds(1.0), 384_000);
-        assert!((seconds_for_bytes(384_000) - 1.0).abs() < 1e-6);
+    fn request(duration: Option<f32>) -> Request {
+        Request {
+            retain: true,
+            duration,
+            usage: Usage::default(),
+            process_bytes: Some(60 * 1024 * 1024),
+        }
     }
 
     #[test]
@@ -155,14 +191,42 @@ mod tests {
     }
 
     #[test]
-    fn a_long_sound_is_refused() {
-        let bytes = bytes_for_seconds(31.0);
-        assert!(!admit(Usage::default(), bytes, Some(60 * 1024 * 1024)));
+    fn a_short_hotkey_sound_preloads() {
+        assert_eq!(route(&request(Some(2.0))), Route::Preload);
     }
 
     #[test]
-    fn a_short_sound_fits() {
-        assert!(admit(Usage::default(), 2_000_000, Some(60 * 1024 * 1024)));
+    fn the_thirty_second_boundary_is_inclusive() {
+        assert_eq!(route(&request(Some(30.0))), Route::Preload);
+        assert_eq!(
+            route(&request(Some(30.01))),
+            Route::Stream(StreamReason::TooLong)
+        );
+    }
+
+    #[test]
+    fn unknown_duration_streams() {
+        assert_eq!(
+            route(&request(None)),
+            Route::Stream(StreamReason::UnknownDuration)
+        );
+    }
+
+    #[test]
+    fn preload_off_streams() {
+        let mut req = request(Some(2.0));
+        req.retain = false;
+        assert_eq!(route(&req), Route::Stream(StreamReason::PreloadOff));
+    }
+
+    #[test]
+    fn a_full_cache_streams() {
+        let mut req = request(Some(2.0));
+        req.usage = Usage {
+            bytes: RETAINED_BYTES_CAP - 1000,
+            sounds: 1,
+        };
+        assert_eq!(route(&req), Route::Stream(StreamReason::BudgetFull));
     }
 
     #[test]
@@ -175,29 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn the_byte_cap_binds() {
-        let usage = Usage {
-            bytes: RETAINED_BYTES_CAP - 1000,
-            sounds: 1,
-        };
-        assert!(!admit(usage, 500_000, Some(60 * 1024 * 1024)));
-    }
-
-    #[test]
     fn an_unreadable_process_size_fails_closed() {
         assert!(!admit(Usage::default(), 1_000_000, None));
+        let mut req = request(Some(2.0));
+        req.process_bytes = None;
+        assert_eq!(route(&req), Route::Stream(StreamReason::BudgetFull));
     }
 
     #[test]
     fn the_process_ceiling_binds() {
         let near = PROCESS_CEILING - PROCESS_HEADROOM - 1000;
         assert!(!admit(Usage::default(), 1_000_000, Some(near)));
-    }
-
-    #[test]
-    fn buffers_must_be_even_and_non_empty() {
-        assert!(is_valid_buffer(&[0.0, 0.0]));
-        assert!(!is_valid_buffer(&[]));
-        assert!(!is_valid_buffer(&[0.0]));
     }
 }

@@ -60,7 +60,6 @@ struct LegacyConfig {
     preload_hotkey_sounds: bool,
     theme: Option<String>,
     layout: Option<String>,
-    window_size: Option<[f32; 2]>,
 }
 
 impl Default for LegacyConfig {
@@ -81,7 +80,6 @@ impl Default for LegacyConfig {
             preload_hotkey_sounds: true,
             theme: None,
             layout: None,
-            window_size: None,
         }
     }
 }
@@ -187,7 +185,6 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         master_gain_db: legacy.master_gain_db,
         link_volumes: legacy.link_volumes,
         preload_hotkey_sounds: legacy.preload_hotkey_sounds,
-        window_size: legacy.window_size,
         // Everything else takes the current default, so a new field never
         // silently imports as zero from a legacy file.
         ..Settings::default()
