@@ -216,7 +216,7 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 | `path`, `volume` | Current file and gain |
 | `samples` | `Some(Arc<Vec<f32>>)` when resident |
 | `loading`, `pending_play` | Preload in flight / play when it finishes |
-| `error`, `missing` | Last decode/link error; filesystem check cached for 2 s |
+| `error`, `missing` | Last decode/link error; existence checked at startup and on playback when not resident |
 | `refused` | Why the cache declined; cleared by Reload or toggling preload |
 | `duration` | Container duration, used for stream progress |
 | `generation` | Invalidates stale loader results |

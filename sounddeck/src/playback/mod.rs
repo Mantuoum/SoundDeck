@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
@@ -24,9 +24,6 @@ use crate::audio::stream;
 
 use policy::{Route, StreamReason, Usage};
 
-/// Filesystem checks are throttled rather than run per frame.
-const MISSING_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-
 struct Playable {
     path: PathBuf,
     volume: f32,
@@ -35,7 +32,6 @@ struct Playable {
     pending_play: bool,
     error: Option<String>,
     missing: bool,
-    missing_checked_at: Instant,
     /// Set when the cache refused this sound; it streams instead of retrying.
     refused: Option<StreamReason>,
     /// Container duration, once probed. Used for stream progress.
@@ -56,21 +52,12 @@ impl Playable {
             pending_play: false,
             error: None,
             missing: false,
-            missing_checked_at: Instant::now(),
             refused: None,
             duration: None,
             generation: 0,
             retain: false,
             last_used: Instant::now(),
         }
-    }
-
-    fn refresh_missing(&mut self, force: bool) {
-        if !force && self.missing_checked_at.elapsed() < MISSING_CHECK_INTERVAL {
-            return;
-        }
-        self.missing = !self.path.is_file();
-        self.missing_checked_at = Instant::now();
     }
 
     fn bytes(&self) -> usize {
@@ -172,11 +159,11 @@ impl Playback {
                 entry.generation += 1;
             }
             entry.volume = volume;
-            entry.refresh_missing(true);
+            entry.missing = !entry.path.is_file();
             return;
         }
         let mut entry = Playable::new(path, volume);
-        entry.refresh_missing(true);
+        entry.missing = !entry.path.is_file();
         state.insert(id, entry);
     }
 
@@ -204,7 +191,7 @@ impl Playback {
             entry.refused = None;
             entry.duration = None;
             entry.generation += 1;
-            entry.refresh_missing(true);
+            entry.missing = !entry.path.is_file();
             if reload && entry.retain {
                 entry.loading = true;
                 job = Some(Job {
@@ -297,7 +284,7 @@ impl Playback {
             entry.duration = None;
             entry.generation += 1;
             entry.loading = true;
-            entry.refresh_missing(true);
+            entry.missing = !entry.path.is_file();
             Job {
                 id,
                 generation: entry.generation,
@@ -325,7 +312,7 @@ impl Playback {
                 self.engine.play(id, samples, entry.volume);
                 return;
             }
-            entry.refresh_missing(false);
+            entry.missing = !entry.path.is_file();
             if entry.missing {
                 entry.error = Some(format!("File not found: {}", entry.path.display()));
                 let _ = self.events_tx.send(PlaybackEvent::Failed {
@@ -377,7 +364,6 @@ impl Playback {
         let Some(entry) = state.get_mut(&id) else {
             return SoundInfo::default();
         };
-        entry.refresh_missing(false);
         SoundInfo {
             loading: entry.loading,
             error: entry.error.clone(),
@@ -397,7 +383,6 @@ impl Playback {
             let Some(entry) = state.get_mut(id) else {
                 continue;
             };
-            entry.refresh_missing(false);
             out.insert(
                 *id,
                 SoundInfo {
@@ -416,7 +401,6 @@ impl Playback {
         if let Ok(mut state) = self.state.lock() {
             if let Some(entry) = state.get_mut(&id) {
                 entry.missing = missing;
-                entry.missing_checked_at = Instant::now();
                 if missing {
                     entry.error = message;
                 } else if entry.error.is_some() {
@@ -715,7 +699,7 @@ fn start_stream_from(
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn write_wav(path: &std::path::Path, seconds: u32) {
         let rate = 48_000u32;
