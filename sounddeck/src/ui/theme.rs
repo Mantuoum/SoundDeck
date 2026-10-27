@@ -473,7 +473,7 @@ pub fn truncate(painter: &Painter, text: &str, font: FontId, max_width: f32) -> 
     let mut low = 0usize;
     let mut high = chars.len();
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let candidate: String = chars[..mid].iter().collect::<String>() + "...";
         let width = painter
             .layout_no_wrap(candidate, font.clone(), measure_color)

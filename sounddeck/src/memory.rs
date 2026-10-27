@@ -124,7 +124,7 @@ pub fn private_bytes() -> Option<usize> {
         )
     }
     .ok()?;
-    usize::try_from(counters.PrivateUsage).ok()
+    Some(counters.PrivateUsage)
 }
 
 #[cfg(not(windows))]

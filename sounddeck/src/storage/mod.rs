@@ -143,20 +143,11 @@ impl Default for SoundConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct LibraryConfig {
     pub id: u64,
     pub name: String,
     pub sounds: Vec<SoundConfig>,
-}
-
-impl Default for LibraryConfig {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            name: String::new(),
-            sounds: Vec::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -347,17 +338,19 @@ mod tests {
     #[test]
     fn roundtrip_settings_and_libraries() {
         let base = temp_base("roundtrip");
-        let mut settings = Settings::default();
-        settings.active_library = 2;
-        settings.master_gain_db = 3.5;
-        settings.animate_ui = false;
-        settings.loop_enabled = true;
-        settings.loop_path = Some("C:\\loops\\rain.flac".to_string());
-        settings.loop_volume = 0.42;
-        settings.loop_on_monitor = false;
-        settings.loop_on_cable = true;
-        settings.minimize_to_tray = true;
-        settings.show_gain_slider = false;
+        let settings = Settings {
+            active_library: 2,
+            master_gain_db: 3.5,
+            animate_ui: false,
+            loop_enabled: true,
+            loop_path: Some("C:\\loops\\rain.flac".to_string()),
+            loop_volume: 0.42,
+            loop_on_monitor: false,
+            loop_on_cable: true,
+            minimize_to_tray: true,
+            show_gain_slider: false,
+            ..Settings::default()
+        };
 
         let libraries = vec![
             LibraryConfig {
@@ -526,8 +519,10 @@ mod tests {
     #[test]
     fn tolerates_bom_and_keeps_one_backup() {
         let base = temp_base("bom");
-        let mut settings = Settings::default();
-        settings.master_gain_db = 1.0;
+        let settings = Settings {
+            master_gain_db: 1.0,
+            ..Settings::default()
+        };
         let json = format!(
             "\u{feff}{}",
             serde_json::to_string_pretty(&settings).unwrap()

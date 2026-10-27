@@ -412,7 +412,6 @@ impl App {
         );
 
         let icon_rgba = icon::decode_png(include_bytes!("../assets/icon.png"))
-            .map(|(rgba, w, h)| (rgba, w, h))
             .unwrap_or_else(|_| (vec![0, 0, 0, 255], 1, 1));
         let tray_icon = icon::resize_rgba(&icon_rgba.0, icon_rgba.1, icon_rgba.2, 32);
         let hotkeys = HotkeyService::start(
@@ -812,8 +811,20 @@ impl App {
                                 .find(|(_, rect)| rect.contains(pointer))
                                 .map(|(index, _)| *index);
                             if let Some(target) = target {
-                                if target != drag.from && target < self.sounds.len() {
-                                    let sound = self.sounds.remove(drag.from);
+                                // Resolve the source by id. `from` was captured
+                                // when the drag started; if anything shifted the
+                                // list since, that index would move the wrong
+                                // sound.
+                                let from = self
+                                    .sounds
+                                    .iter()
+                                    .position(|sound| sound.id == drag.sound_id)
+                                    .unwrap_or(drag.from);
+                                if from != target
+                                    && from < self.sounds.len()
+                                    && target < self.sounds.len()
+                                {
+                                    let sound = self.sounds.remove(from);
                                     self.sounds.insert(target, sound);
                                     self.selected = Some(drag.sound_id);
                                     self.mark_dirty();
@@ -1875,7 +1886,7 @@ impl App {
                 ui.separator();
                 for device in &self.devices {
                     let active = current_id.as_deref() == Some(device.id.as_str());
-                    let label = format!("{}", device.name);
+                    let label = device.name.to_string();
                     if ui.selectable_label(active, label).clicked() {
                         chosen = Some(Some(device.id.clone()));
                         ui.close_menu();
@@ -3783,9 +3794,10 @@ impl App {
         let levels = self.engine.take_levels();
         let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.2);
         let now = Instant::now();
-        for slot in 0..2 {
-            let target = if levels[slot] > 0.000_01 {
-                (20.0 * levels[slot].log10()).clamp(-60.0, 0.0)
+        for (slot, level) in levels.iter().enumerate() {
+            let level = *level;
+            let target = if level > 0.000_01 {
+                (20.0 * level.log10()).clamp(-60.0, 0.0)
             } else {
                 -60.0
             };
@@ -4390,6 +4402,7 @@ fn paint_settings_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, co
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_grid(
     ui: &mut Ui,
     sounds: &[Sound],
@@ -4606,6 +4619,7 @@ fn hotkey_pill(
 }
 
 /// RAM / disk / missing chip. Returns the action for a click, if any.
+#[allow(clippy::too_many_arguments)]
 fn ram_chip(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -4747,6 +4761,7 @@ fn play_progress(painter: &egui::Painter, track: Rect, progress: f32, alpha: u8)
     painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sound_card(
     ui: &mut Ui,
     size: Vec2,
@@ -4911,6 +4926,7 @@ fn sound_card(
     (rect, actions)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sound_row(
     ui: &mut Ui,
     sound: &Sound,
@@ -5148,11 +5164,9 @@ fn sound_context_menu(
             ui.close_menu();
         }
     }
-    if info.error.is_some() || info.missing {
-        if ui.button("Locate file...").clicked() {
-            actions.push(Action::Locate(sound.id));
-            ui.close_menu();
-        }
+    if (info.error.is_some() || info.missing) && ui.button("Locate file...").clicked() {
+        actions.push(Action::Locate(sound.id));
+        ui.close_menu();
     }
     if ui.button("Show in Explorer").clicked() {
         actions.push(Action::ShowInExplorer(sound.id));
@@ -5532,7 +5546,7 @@ fn format_gain_db(db: f32) -> String {
 }
 
 fn level_x(bar: Rect, db: f32) -> f32 {
-    let t = ((db.clamp(-60.0, 0.0) + 60.0) / 60.0) as f32;
+    let t = (db.clamp(-60.0, 0.0) + 60.0) / 60.0;
     bar.left() + bar.width() * t
 }
 

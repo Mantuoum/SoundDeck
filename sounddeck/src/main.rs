@@ -43,7 +43,7 @@ fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
     let name = HSTRING::from(format!("Local\\SoundDeck-{:016x}", path_hash(&exe)));
 
     unsafe {
-        let _ = SetLastError(WIN32_ERROR(0));
+        SetLastError(WIN32_ERROR(0));
         let handle = CreateMutexW(None, BOOL(0), PCWSTR(name.as_ptr())).ok()?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(handle);

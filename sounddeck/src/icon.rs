@@ -91,14 +91,16 @@ pub fn hicon_from_rgba(
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
     unsafe {
-        let mut bmi = BITMAPINFO::default();
-        bmi.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size as i32,
-            biHeight: -(size as i32), // top-down
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: 0, // BI_RGB
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size as i32,
+                biHeight: -(size as i32), // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0, // BI_RGB
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -122,7 +124,7 @@ pub fn hicon_from_rgba(
         }
 
         // 1bpp AND mask, all zero -> fully opaque; the alpha channel does the work.
-        let mask_stride = ((size + 31) / 32 * 4) as usize;
+        let mask_stride = (size.div_ceil(32) * 4) as usize;
         let mask_bytes = vec![0u8; mask_stride * size as usize];
         let mask: HBITMAP = CreateBitmap(
             size as i32,

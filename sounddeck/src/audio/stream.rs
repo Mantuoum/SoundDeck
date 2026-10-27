@@ -192,7 +192,7 @@ impl Source {
             },
         );
         if seek.is_ok() {
-            let _ = self.decoder.reset();
+            self.decoder.reset();
             return Ok(());
         }
         *self = Self::open(path).context("File is no longer available")?;

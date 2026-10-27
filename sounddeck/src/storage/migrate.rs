@@ -36,18 +36,10 @@ impl Default for LegacySound {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 struct LegacyLibrary {
     id: u64,
     name: String,
-}
-
-impl Default for LegacyLibrary {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            name: String::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

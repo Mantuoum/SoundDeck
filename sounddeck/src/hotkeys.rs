@@ -490,7 +490,7 @@ mod win {
     }
 
     thread_local! {
-        static HOOK: RefCell<Option<Rc<RefCell<HookShared>>>> = RefCell::new(None);
+        static HOOK: RefCell<Option<Rc<RefCell<HookShared>>>> = const { RefCell::new(None) };
     }
 
     struct State {
@@ -519,6 +519,7 @@ mod win {
 
     unsafe impl Send for State {}
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         rx: Receiver<Command>,
         tx: Sender<ServiceEvent>,
@@ -765,7 +766,7 @@ mod win {
             }
             WM_COMMAND => {
                 if let Some(state) = state {
-                    let id = (wparam.0 & 0xFFFF) as usize;
+                    let id = wparam.0 & 0xFFFF;
                     match id {
                         MENU_SHOW => {
                             state.emit(ServiceEvent::Tray(TrayCommand::Toggle));
