@@ -1237,6 +1237,7 @@ impl App {
     fn sync_active_library(&mut self) {
         self.sync_hotkeys();
         for sound in &self.sounds {
+            self.playback.ensure_lock(sound.id);
             let active = sound.library_id == self.active_library;
             let keep = active && sound.hotkey.is_some() && sound.ram;
             self.playback.set_retain(sound.id, keep);

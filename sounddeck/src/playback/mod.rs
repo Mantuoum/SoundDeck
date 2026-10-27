@@ -234,6 +234,16 @@ impl Playback {
         self.engine.set_sound_volume(id, volume);
     }
 
+    /// Retry the read lock for a configured sound. Used after startup failures
+    /// (file briefly held by another app) and after a volume reconnects.
+    pub fn ensure_lock(&self, id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(entry) = state.get_mut(&id) {
+                entry.ensure_lock();
+            }
+        }
+    }
+
     /// Enable or disable keeping this sound in RAM.
     pub fn set_retain(&self, id: u64, retain: bool) {
         let mut job = None;
