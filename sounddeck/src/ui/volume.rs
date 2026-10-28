@@ -34,9 +34,15 @@ pub fn from_position(position: f32) -> f32 {
     10f32.powf((position * RANGE_DB - RANGE_DB) / 20.0)
 }
 
-/// Fixed-width percentage for a slider position.
+/// Fixed-width percentage for a slider position. A non-finite position renders
+/// as "0 %" — never "NaN%" in the UI.
 pub fn percent_text(position: f32) -> String {
-    format!("{:>3.0}%", position.clamp(0.0, 1.0) * 100.0)
+    let position = if position.is_finite() {
+        position.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    format!("{:>3.0}%", position * 100.0)
 }
 
 /// Slim volume bar used by sound cards, the loop card and Settings rows.
@@ -53,6 +59,9 @@ pub fn bar(
 ) {
     let response = ui.interact(rect, id, Sense::click_and_drag());
     let painter = ui.painter().clone();
+    // One palette snapshot per bar: six colours come out of it, and reading
+    // them off the copy keeps the paint path free of repeated lock lookups.
+    let palette = theme::palette();
     let position = to_position(volume);
     let label_width = if compact { 0.0 } else { 34.0 };
     let track_left = if compact {
@@ -67,9 +76,9 @@ pub fn bar(
             &painter,
             speaker_rect,
             if response.hovered() {
-                theme::muted()
+                palette.muted
             } else {
-                theme::faint()
+                palette.faint
             },
         );
         speaker_rect.right() + 8.0
@@ -78,17 +87,17 @@ pub fn bar(
         Pos2::new(track_left, rect.center().y - 2.0),
         Pos2::new(rect.right() - label_width - 8.0, rect.center().y + 2.0),
     );
-    painter.rect_filled(track, CornerRadius::same(2), theme::field());
+    painter.rect_filled(track, CornerRadius::same(2), palette.field);
     let filled = Rect::from_min_max(
         track.left_top(),
         Pos2::new(track.left() + track.width() * position, track.bottom()),
     );
-    painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
+    painter.rect_filled(filled, CornerRadius::same(2), palette.accent);
     let knob = Pos2::new(filled.right(), track.center().y);
     painter.circle_filled(
         knob,
         if response.hovered() { 5.0 } else { 4.0 },
-        theme::text(),
+        palette.text,
     );
     if !compact {
         painter.text(
@@ -96,7 +105,7 @@ pub fn bar(
             Align2::RIGHT_CENTER,
             percent_text(position),
             theme::ui_font(11.0),
-            theme::muted(),
+            palette.muted,
         );
     }
 
@@ -156,5 +165,14 @@ mod tests {
         assert_eq!(percent_text(0.0), "  0%");
         assert_eq!(percent_text(0.8), " 80%");
         assert_eq!(percent_text(1.0), "100%");
+    }
+
+    #[test]
+    fn percentage_never_renders_nan() {
+        assert_eq!(percent_text(f32::NAN), "  0%");
+        assert_eq!(percent_text(f32::INFINITY), "  0%");
+        assert_eq!(percent_text(f32::NEG_INFINITY), "  0%");
+        assert_eq!(percent_text(-0.5), "  0%");
+        assert_eq!(percent_text(1.5), "100%");
     }
 }

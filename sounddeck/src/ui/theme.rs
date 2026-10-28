@@ -1,6 +1,8 @@
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2,
@@ -56,12 +58,37 @@ pub struct ThemeEntry {
 static CURRENT: OnceLock<RwLock<Palette>> = OnceLock::new();
 static THEMES: OnceLock<RwLock<Vec<ThemeEntry>>> = OnceLock::new();
 
+/// Bumped after every `CURRENT` write so the per-thread snapshot below can be
+/// reused instead of re-acquiring the lock for each colour lookup.
+static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// Last palette read on this thread, tagged with the generation it came
+    /// from. `Palette` is `Copy`, so a hit is one atomic load and a 70-byte
+    /// copy with no lock — widgets read several colours per frame, and a lock
+    /// per colour per widget is pure churn.
+    static PALETTE_SNAPSHOT: Cell<Option<(u64, Palette)>> = const { Cell::new(None) };
+}
+
 fn current_lock() -> &'static RwLock<Palette> {
     CURRENT.get_or_init(|| RwLock::new(theme_defaults::graphite()))
 }
 
 fn themes_lock() -> &'static RwLock<Vec<ThemeEntry>> {
     THEMES.get_or_init(|| RwLock::new(embedded_entries()))
+}
+
+/// The one poisoning policy for every theme lock: another thread's panic must
+/// never lose the palette or take the UI down, so an unwound lock is read with
+/// its last written value (`into_inner`). Degrade, never skip and never panic.
+fn read_lock<T>(lock: &'static RwLock<T>) -> RwLockReadGuard<'static, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Write side of [`read_lock`]'s policy: the write always happens.
+fn write_lock<T>(lock: &'static RwLock<T>) -> RwLockWriteGuard<'static, T> {
+    lock.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn embedded_entries() -> Vec<ThemeEntry> {
@@ -85,10 +112,21 @@ pub fn available() -> Vec<(String, String)> {
     })
 }
 
+/// The active palette. Copy it once per paint function and read fields off the
+/// copy; repeated calls are cheap (generation-tagged thread-local snapshot) but
+/// a local still documents that the whole frame uses one consistent palette.
 pub fn palette() -> Palette {
-    *current_lock()
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    let generation = CURRENT_GENERATION.load(Ordering::Acquire);
+    PALETTE_SNAPSHOT.with(|snapshot| {
+        if let Some((cached, palette)) = snapshot.get() {
+            if cached == generation {
+                return palette;
+            }
+        }
+        let palette = *read_lock(current_lock());
+        snapshot.set(Some((generation, palette)));
+        palette
+    })
 }
 
 /// Select a parsed theme. Unknown ids (or a deleted theme) fall back to Graphite.
@@ -100,22 +138,22 @@ pub fn set_theme(id: &str) {
             .map(|theme| theme.palette)
     })
     .unwrap_or_else(theme_defaults::graphite);
-    let mut current = match current_lock().write() {
-        Ok(current) => current,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *current = palette;
-}
-
-/// One poisoning policy for both theme locks: a stale palette is better than a
-/// crash, so an unwound writer is ignored instead of propagated.
-fn read_themes<T>(read: impl FnOnce(&[ThemeEntry]) -> T) -> T {
-    match themes_lock().read() {
-        Ok(themes) => read(&themes),
-        Err(poisoned) => read(&poisoned.into_inner()),
+    {
+        let mut current = write_lock(current_lock());
+        *current = palette;
     }
+    // Publish after the write so snapshots taken before it are seen as stale.
+    CURRENT_GENERATION.fetch_add(1, Ordering::Release);
 }
 
+/// Read the theme registry under the shared lock policy.
+fn read_themes<T>(read: impl FnOnce(&[ThemeEntry]) -> T) -> T {
+    read(&read_lock(themes_lock()))
+}
+
+/// Individual colour accessors kept for call-site brevity. Each one is a
+/// snapshot hit after the first call on a thread; still, paint code that reads
+/// three or more should hoist `let p = palette();` (see `volume::bar`).
 pub fn bg() -> Color32 {
     palette().bg
 }
@@ -285,9 +323,7 @@ pub fn reload() -> Vec<String> {
             .cmp(&(b.id != "graphite", b.name.to_lowercase()))
     });
 
-    if let Ok(mut themes) = themes_lock().write() {
-        *themes = entries;
-    }
+    *write_lock(themes_lock()) = entries;
     warnings
 }
 
@@ -494,5 +530,23 @@ pub fn truncate(painter: &Painter, text: &str, font: FontId, max_width: f32) -> 
         "...".to_string()
     } else {
         chars[..low].iter().collect::<String>() + "..."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The snapshot cache must not hide a theme switch made on the same thread.
+    #[test]
+    fn palette_snapshot_follows_theme_changes() {
+        let builtins = theme_defaults::all();
+        let (id, _, expected) = &builtins[1];
+        set_theme(id);
+        assert_eq!(palette(), *expected);
+        assert_eq!(bg(), expected.bg);
+        set_theme("graphite");
+        assert_eq!(palette(), theme_defaults::graphite());
+        assert_eq!(bg(), theme_defaults::graphite().bg);
     }
 }

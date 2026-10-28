@@ -6,6 +6,13 @@ use eframe::egui::Color32;
 use super::theme::Palette;
 use super::theme_color::{blend, from_rgb_u32};
 
+/// Blend ratios for the derived `accent_soft` surface. Shared with
+/// `theme_file::parse`, which uses the same family rule for theme files that
+/// omit the token — one set of numbers, not two.
+pub(crate) const ACCENT_SOFT_BLEND_GRAPHITE: f32 = 0.25;
+pub(crate) const ACCENT_SOFT_BLEND_LIGHT: f32 = 0.18;
+pub(crate) const ACCENT_SOFT_BLEND_DARK: f32 = 0.20;
+
 fn hex(value: u32) -> Color32 {
     from_rgb_u32(value)
 }
@@ -27,7 +34,7 @@ pub fn graphite() -> Palette {
         muted: hex(0x8a919a),
         faint: hex(0x5c636c),
         accent,
-        accent_soft: blend(bg, accent, 0.25),
+        accent_soft: blend(bg, accent, ACCENT_SOFT_BLEND_GRAPHITE),
         purple: hex(0x8b78e6),
         amber: hex(0xd6a656),
         red: hex(0xde6969),
@@ -51,7 +58,7 @@ fn macchiato() -> Palette {
         muted: hex(0xa5adcb),
         faint: hex(0x8087a2),
         accent,
-        accent_soft: blend(bg, accent, 0.20),
+        accent_soft: blend(bg, accent, ACCENT_SOFT_BLEND_DARK),
         purple: hex(0xc6a0f6),
         amber: hex(0xf5a97f),
         red: hex(0xed8796),
@@ -75,7 +82,7 @@ fn mocha() -> Palette {
         muted: hex(0xa6adc8),
         faint: hex(0x7f849c),
         accent,
-        accent_soft: blend(bg, accent, 0.20),
+        accent_soft: blend(bg, accent, ACCENT_SOFT_BLEND_DARK),
         purple: hex(0xcba6f7),
         amber: hex(0xfab387),
         red: hex(0xf38ba8),
@@ -99,7 +106,7 @@ fn frappe() -> Palette {
         muted: hex(0xa5adce),
         faint: hex(0x838ba7),
         accent,
-        accent_soft: blend(bg, accent, 0.20),
+        accent_soft: blend(bg, accent, ACCENT_SOFT_BLEND_DARK),
         purple: hex(0xca9ee6),
         amber: hex(0xef9f76),
         red: hex(0xe78284),
@@ -123,7 +130,7 @@ fn latte() -> Palette {
         muted: hex(0x6c6f85),
         faint: hex(0x8c8fa1),
         accent,
-        accent_soft: blend(bg, accent, 0.18),
+        accent_soft: blend(bg, accent, ACCENT_SOFT_BLEND_LIGHT),
         purple: hex(0x8839ef),
         amber: hex(0xdf8e1d),
         red: hex(0xd20f39),
