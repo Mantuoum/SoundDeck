@@ -17,6 +17,10 @@ use super::wasapi;
 const MIX_CHUNK_FRAMES: usize = 240; // 5 ms
 const FADE_IN_FRAMES: f32 = 120.0; // 2.5 ms
 const FADE_OUT_FRAMES: f32 = 240.0; // 5 ms
+/// Attempts at starting the mixer thread before audio is declared dead. One
+/// immediate retry covers a transient OS refusal; beyond that the environment is
+/// broken and the user has to be told, not left with silent audio.
+const MIXER_SPAWN_ATTEMPTS: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
@@ -108,11 +112,17 @@ impl Ring {
     }
 
     pub fn pop_into(&self, out: &mut VecDeque<f32>, max_frames: usize) -> usize {
-        let mut queue = match self.queue.lock() {
-            Ok(q) => q,
-            Err(_) => return 0,
-        };
-        let frames = (max_frames * CHANNELS).min(queue.len()) / CHANNELS;
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        // Whole frames only. A queue length that is not a multiple of `CHANNELS`
+        // can only come from a malformed push; the stray tail sample is dropped
+        // rather than carried, because carrying it would shift every later frame
+        // by one sample (L/R swap) for the life of the ring.
+        let stray = queue.len() % CHANNELS;
+        if stray != 0 {
+            let keep = queue.len() - stray;
+            queue.truncate(keep);
+        }
+        let frames = max_frames.saturating_mul(CHANNELS).min(queue.len()) / CHANNELS;
         let mut peak = 0.0f32;
         for _ in 0..frames * CHANNELS {
             if let Some(sample) = queue.pop_front() {
@@ -178,12 +188,8 @@ impl Voice {
     fn next_frame(&mut self) -> Option<(f32, f32)> {
         match &mut self.source {
             VoiceSource::Buffer(samples) => {
-                let index = self.position * CHANNELS;
-                if index + 1 < samples.len() {
-                    Some((samples[index], samples[index + 1]))
-                } else {
-                    None
-                }
+                let index = self.position.checked_mul(CHANNELS)?;
+                frame_at(samples, index)
             }
             VoiceSource::Stream {
                 rx,
@@ -191,9 +197,11 @@ impl Voice {
                 pos,
                 ended,
             } => loop {
-                if *pos + 1 < chunk.len() {
-                    let frame = (chunk[*pos], chunk[*pos + 1]);
-                    *pos += 2;
+                // Whole frames only: a chunk with an odd length (a truncated
+                // final frame) yields its complete frames and then is discarded
+                // rather than indexed past its end.
+                if let Some(frame) = frame_at(chunk, *pos) {
+                    *pos += CHANNELS;
                     return Some(frame);
                 }
                 chunk.clear();
@@ -224,11 +232,23 @@ impl Voice {
     /// Nothing left to play, regardless of stop fades.
     fn exhausted(&self) -> bool {
         match &self.source {
-            VoiceSource::Buffer(samples) => self.position * CHANNELS + 1 >= samples.len(),
+            VoiceSource::Buffer(samples) => {
+                frame_at(samples, self.position.saturating_mul(CHANNELS)).is_none()
+            }
             VoiceSource::Stream {
                 chunk, pos, ended, ..
-            } => *ended && *pos + 1 >= chunk.len(),
+            } => *ended && frame_at(chunk, *pos).is_none(),
         }
+    }
+}
+
+/// The left/right pair starting at sample index `pos`, or `None` when fewer than
+/// `CHANNELS` samples remain. Never indexes out of bounds, whatever the chunk
+/// length (chunk parity is an invariant of the producer, not of this reader).
+fn frame_at(samples: &[f32], pos: usize) -> Option<(f32, f32)> {
+    match samples.get(pos..pos.checked_add(CHANNELS)?) {
+        Some([left, right]) => Some((*left, *right)),
+        _ => None,
     }
 }
 
@@ -333,31 +353,25 @@ impl Mixer {
                     break;
                 }
                 let take = (frames - index).min(available);
-                let source = &self.loop_chunk[self.loop_pos..self.loop_pos + take * CHANNELS];
+                let len = take * CHANNELS;
+                let source = &self.loop_chunk[self.loop_pos..self.loop_pos + len];
                 let start = index * CHANNELS;
                 let gain = self.loop_gain;
-                if self.loop_on_monitor || self.loop_on_cable {
-                    for (offset, sample) in source.iter().enumerate() {
-                        let value = *sample * gain;
-                        if self.loop_on_monitor {
-                            monitor[start + offset] += value;
-                        }
-                        if self.loop_on_cable {
-                            cable[start + offset] += value;
-                        }
-                    }
+                // One slice-wise write per destination instead of a per-sample
+                // branch on the routing flags; at unity gain this is a plain add.
+                if self.loop_on_monitor {
+                    add_scaled(&mut monitor[start..start + len], source, gain);
                 }
-                self.loop_pos += take * CHANNELS;
+                if self.loop_on_cable {
+                    add_scaled(&mut cable[start..start + len], source, gain);
+                }
+                self.loop_pos += len;
                 index += take;
             }
         }
 
-        for sample in monitor.iter_mut() {
-            *sample = (*sample * self.master_gain).clamp(-1.0, 1.0);
-        }
-        for sample in cable.iter_mut() {
-            *sample = (*sample * self.master_gain).clamp(-1.0, 1.0);
-        }
+        apply_master_gain(monitor, self.master_gain);
+        apply_master_gain(cable, self.master_gain);
         self.voices.retain(|v| !v.finished);
     }
 
@@ -413,9 +427,13 @@ pub struct Engine {
     events_rx: Receiver<AudioEvent>,
     mixer_stop: Arc<AtomicBool>,
     /// Capacity-one wake token: a producer publishes work with `try_send`, the
-    /// mixer parks on the receiving end when it has nothing to render.
-    mixer_wake: Sender<()>,
+    /// mixer parks on the receiving end when it has nothing to render. `None`
+    /// means the mixer thread never started (see `mixer_failure`).
+    mixer_wake: Option<Sender<()>>,
     mixer_thread: Mutex<Option<JoinHandle<()>>>,
+    /// Reason the mixer thread could not be started. Set means nothing can
+    /// render; every trigger reports it instead of failing silently.
+    mixer_failure: Option<String>,
     loop_stream: Mutex<Option<LoopStream>>,
 }
 
@@ -436,9 +454,15 @@ impl Engine {
         let rings = [Arc::new(Ring::new(0.15)), Arc::new(Ring::new(0.15))];
         let (events_tx, events_rx) = unbounded();
         let mixer_stop = Arc::new(AtomicBool::new(false));
-        let (mixer_wake, mixer_wake_rx) = bounded::<()>(1);
 
-        let mixer_thread = {
+        // Each attempt gets its own wake pair: a failed spawn drops the closure
+        // (and the receiver with it), so reusing one channel would leave the
+        // sender permanently disconnected and the engine silently dead.
+        let mut mixer_wake = None;
+        let mut mixer_thread = None;
+        let mut mixer_failure = None;
+        for _ in 0..MIXER_SPAWN_ATTEMPTS {
+            let (wake, wake_rx) = bounded::<()>(1);
             let mixer = mixer.clone();
             let rings = rings.clone();
             let stop = mixer_stop.clone();
@@ -446,15 +470,28 @@ impl Engine {
                 .name("sounddeck-mixer".into())
                 .spawn(move || {
                     super::raise_thread_priority();
-                    mixer_loop(mixer, rings, stop, mixer_wake_rx)
+                    mixer_loop(mixer, rings, stop, wake_rx)
                 });
-            if let Err(err) = &spawned {
-                let _ = events_tx.send(AudioEvent::Warning(format!(
-                    "Could not start the audio mixer: {err}. No sounds will play."
-                )));
+            match spawned {
+                Ok(handle) => {
+                    mixer_wake = Some(wake);
+                    mixer_thread = Some(handle);
+                    mixer_failure = None;
+                    break;
+                }
+                Err(err) => {
+                    mixer_failure = Some(format!("the audio mixer thread could not start: {err}"))
+                }
             }
-            spawned.ok()
-        };
+        }
+
+        if let Some(reason) = &mixer_failure {
+            // Loud once at boot, then again on every trigger via
+            // `report_mixer_failure`.
+            let _ = events_tx.send(AudioEvent::Warning(format!(
+                "No audio: {reason}. No sound will play until the app is restarted."
+            )));
+        }
 
         Self {
             mixer,
@@ -465,6 +502,7 @@ impl Engine {
             mixer_stop,
             mixer_wake,
             mixer_thread: Mutex::new(mixer_thread),
+            mixer_failure,
             loop_stream: Mutex::new(None),
         }
     }
@@ -522,6 +560,9 @@ impl Engine {
     }
 
     pub fn play(&self, sound_id: u64, samples: Arc<Vec<f32>>, volume: f32) {
+        if self.report_mixer_failure() {
+            return;
+        }
         if !is_valid_buffer(&samples) {
             let _ = self.events_tx.send(AudioEvent::Warning(format!(
                 "Refused to play sound {sound_id}: invalid sample buffer"
@@ -563,6 +604,9 @@ impl Engine {
         volume: f32,
         total_frames: Option<usize>,
     ) {
+        if self.report_mixer_failure() {
+            return;
+        }
         {
             let Ok(mut mixer) = self.mixer.lock() else {
                 return;
@@ -590,8 +634,25 @@ impl Engine {
         self.wake_mixer();
     }
 
+    /// Tells the user (again) that the mixer never started. Called from every
+    /// trigger so a dead audio engine can never be mistaken for a quiet one.
+    /// Returns `true` when audio is unavailable.
+    fn report_mixer_failure(&self) -> bool {
+        match self.mixer_failure.as_deref() {
+            Some(reason) => {
+                let _ = self.events_tx.send(AudioEvent::Warning(format!(
+                    "No audio: {reason}. Nothing will play until the app is restarted."
+                )));
+                true
+            }
+            None => false,
+        }
+    }
+
     fn wake_mixer(&self) {
-        let _ = self.mixer_wake.try_send(());
+        if let Some(wake) = &self.mixer_wake {
+            let _ = wake.try_send(());
+        }
     }
 
     pub fn stop_sound(&self, sound_id: u64) {
@@ -619,6 +680,9 @@ impl Engine {
     /// The decoder is attached immediately; audio begins as soon as the first
     /// chunk arrives (a few milliseconds), so this never blocks the UI.
     pub fn start_loop(&self, path: PathBuf) -> Result<()> {
+        if let Some(reason) = self.mixer_failure.as_deref() {
+            bail!("No audio: {reason}");
+        }
         if !path.is_file() {
             bail!("File not found: {}", path.display());
         }
@@ -643,22 +707,24 @@ impl Engine {
 
     /// Stops the loop immediately. Dropping the receiver unblocks the decoder
     /// even if it is parked in `send`, so the join is bounded.
+    ///
+    /// Poison-tolerant on purpose: a panicked mixer must not leave the receiver
+    /// in place, because the decoder would then block in `send` forever and the
+    /// join at shutdown would hang.
     pub fn stop_loop(&self) {
-        let rx = match self.mixer.lock() {
-            Ok(mut mixer) => {
-                mixer.loop_chunk.clear();
-                mixer.loop_pos = 0;
-                mixer.loop_rx.take()
-            }
-            Err(_) => None,
+        let rx = {
+            let mut mixer = self.mixer.lock().unwrap_or_else(|err| err.into_inner());
+            mixer.loop_chunk.clear();
+            mixer.loop_pos = 0;
+            mixer.loop_rx.take()
         };
         drop(rx);
 
         let stream = self
             .loop_stream
             .lock()
-            .ok()
-            .and_then(|mut slot| slot.take());
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
         if let Some(stream) = stream {
             stream.stop();
         }
@@ -777,7 +843,7 @@ impl Drop for Engine {
             }
         }
         self.mixer_stop.store(true, Ordering::SeqCst);
-        let _ = self.mixer_wake.try_send(());
+        self.wake_mixer();
         if let Ok(mut thread) = self.mixer_thread.lock() {
             if let Some(join) = thread.take() {
                 let _ = join.join();
@@ -786,9 +852,40 @@ impl Drop for Engine {
     }
 }
 
-/// Samples accepted by the mixer: non-empty and an even number of samples.
+/// Samples accepted by the mixer: non-empty, whole frames, and finite. A NaN or
+/// infinite sample would poison the mix (and the device conversion) for as long
+/// as the buffer is playing, so it is refused up front.
 fn is_valid_buffer(samples: &[f32]) -> bool {
-    !samples.is_empty() && samples.len() % CHANNELS == 0
+    !samples.is_empty() && samples.len() % CHANNELS == 0 && samples.iter().all(|s| s.is_finite())
+}
+
+/// `dst += src * gain` over a whole slice. `gain == 1.0` skips the multiply so
+/// the unity path is a straight add (the same idea as `Ring::push_scaled`).
+fn add_scaled(dst: &mut [f32], src: &[f32], gain: f32) {
+    debug_assert_eq!(dst.len(), src.len());
+    if gain == 1.0 {
+        for (target, sample) in dst.iter_mut().zip(src) {
+            *target += *sample;
+        }
+    } else {
+        for (target, sample) in dst.iter_mut().zip(src) {
+            *target += *sample * gain;
+        }
+    }
+}
+
+/// `buf = (buf * gain).clamp(-1, 1)`, the final stage before the rings. At unity
+/// gain the multiply is skipped (`x * 1.0 == x`, so the output is unchanged).
+fn apply_master_gain(buf: &mut [f32], gain: f32) {
+    if gain == 1.0 {
+        for sample in buf.iter_mut() {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+    } else {
+        for sample in buf.iter_mut() {
+            *sample = (*sample * gain).clamp(-1.0, 1.0);
+        }
+    }
 }
 
 fn db_to_gain(db: f32) -> f32 {
@@ -1139,5 +1236,193 @@ mod loop_tests {
             !mixer.has_work(),
             "a dead loop must let the mixer park instead of polling"
         );
+    }
+
+    #[test]
+    fn ring_pop_drops_an_odd_tail_sample() {
+        let ring = Ring::new(0.1);
+        // Two whole frames plus a stray sample. The mixer never produces this,
+        // but the ring must not strand it (or keep frame alignment broken).
+        ring.push_scaled(&[0.1, 0.2, 0.3, 0.4, 0.5], 1.0);
+
+        let mut out = VecDeque::new();
+        assert_eq!(ring.pop_into(&mut out, 4), 2);
+        let popped: Vec<f32> = out.iter().copied().collect();
+        assert_eq!(popped, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(ring.buffered_frames(), 0, "the stray sample must not stay");
+
+        // Frame alignment survives: the next frame pops as (L, R).
+        ring.push_scaled(&[0.6, 0.7], 1.0);
+        let mut next = VecDeque::new();
+        assert_eq!(ring.pop_into(&mut next, 4), 1);
+        assert_eq!(next.iter().copied().collect::<Vec<f32>>(), vec![0.6, 0.7]);
+    }
+
+    #[test]
+    fn buffers_with_non_finite_samples_are_rejected() {
+        assert!(is_valid_buffer(&[0.0, 1.0]));
+        assert!(!is_valid_buffer(&[]));
+        assert!(!is_valid_buffer(&[0.0, 1.0, 2.0]), "partial frame");
+        assert!(!is_valid_buffer(&[f32::NAN, 0.0]));
+        assert!(!is_valid_buffer(&[f32::INFINITY, 0.0]));
+        assert!(!is_valid_buffer(&[0.0, f32::NEG_INFINITY]));
+    }
+
+    #[test]
+    fn an_odd_stream_chunk_yields_whole_frames_only() {
+        let (_tx, rx) = crossbeam_channel::bounded(4);
+        let mut voice = Voice {
+            sound_id: 1,
+            source: VoiceSource::Stream {
+                rx,
+                chunk: vec![0.25, -0.25, 0.5],
+                pos: 0,
+                ended: true,
+            },
+            position: 0,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+            total_frames: None,
+        };
+        assert_eq!(voice.next_frame(), Some((0.25, -0.25)));
+        // The stranded third sample cannot form a frame; indexing it would panic.
+        assert_eq!(voice.next_frame(), None);
+        assert!(voice.exhausted());
+    }
+
+    #[test]
+    fn a_truncated_stream_chunk_cannot_wedge_the_mixer() {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        tx.send(vec![0.1, 0.2, 0.3]).unwrap();
+        drop(tx);
+
+        let mut mixer = idle_mixer(None);
+        mixer.voices.push(Voice {
+            sound_id: 9,
+            source: VoiceSource::Stream {
+                rx,
+                chunk: Vec::new(),
+                pos: 0,
+                ended: false,
+            },
+            position: 0,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+            total_frames: Some(2),
+        });
+
+        let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        for _ in 0..4 {
+            mixer.render(&mut monitor, &mut cable);
+            if mixer.voices.is_empty() {
+                break;
+            }
+        }
+        assert!(mixer.voices.is_empty(), "odd chunk wedged the voice");
+    }
+
+    #[test]
+    fn scaled_add_matches_a_per_sample_multiply() {
+        let src = [0.5f32, -0.25, 1.0, -1.0];
+        for gain in [1.0f32, 0.5, 0.0, 1.5] {
+            let mut dst = [0.125f32; 4];
+            add_scaled(&mut dst, &src, gain);
+            for (index, sample) in src.iter().enumerate() {
+                assert_eq!(dst[index], 0.125 + sample * gain);
+            }
+        }
+    }
+
+    #[test]
+    fn unity_master_gain_only_clamps() {
+        let mut unity = [0.5f32, -1.5, 1.5, 0.0];
+        apply_master_gain(&mut unity, 1.0);
+        assert_eq!(unity, [0.5, -1.0, 1.0, 0.0]);
+
+        let mut halved = [0.5f32, -1.5, 1.5, 0.0];
+        apply_master_gain(&mut halved, 0.5);
+        assert_eq!(halved, [0.25, -0.75, 0.75, 0.0]);
+    }
+
+    #[test]
+    fn a_short_loop_chunk_spans_render_passes() {
+        // Two chunks of 100 frames each: the loop write crosses chunk boundaries
+        // inside one 240-frame render pass.
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut mixer = idle_mixer(Some(rx));
+        mixer.loop_gain = 0.5;
+        tx.send(vec![0.5f32; 100 * CHANNELS]).unwrap();
+        tx.send(vec![0.25f32; 100 * CHANNELS]).unwrap();
+
+        let mut monitor = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        let mut cable = vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS];
+        mixer.render(&mut monitor, &mut cable);
+
+        let first = 100 * CHANNELS;
+        let second = 200 * CHANNELS;
+        assert!(monitor[..first].iter().all(|s| (*s - 0.25).abs() < 1e-6));
+        assert!(monitor[first..second]
+            .iter()
+            .all(|s| (*s - 0.125).abs() < 1e-6));
+        assert!(monitor[second..].iter().all(|s| *s == 0.0));
+        // Identical on both outputs: the loop is routed to both.
+        assert_eq!(monitor, cable);
+        // Both chunks were drained (the third read found the channel empty).
+        assert_eq!(mixer.loop_pos, 100 * CHANNELS);
+    }
+
+    #[test]
+    fn a_started_engine_has_a_live_wake_path() {
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        assert!(
+            engine.mixer_failure.is_none(),
+            "no failure on a normal boot"
+        );
+        assert!(engine.mixer_wake.is_some(), "wake sender must exist");
+        let running = engine
+            .mixer_thread
+            .lock()
+            .map(|thread| thread.is_some())
+            .unwrap_or(false);
+        assert!(running, "mixer thread handle must exist");
+    }
+
+    #[test]
+    fn stop_loop_completes_when_the_mixer_lock_is_poisoned() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("sounddeck-engine-poison-{nanos}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loop.wav");
+        write_wav(&path, 0.3);
+
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        engine.start_loop(path).unwrap();
+
+        // Poison the mixer mutex exactly like a panicking mixer would.
+        let mixer = engine.mixer.clone();
+        let panicked = thread::spawn(move || {
+            let _guard = mixer.lock().unwrap();
+            panic!("simulated mixer panic");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(engine.mixer.lock().is_err(), "lock should be poisoned");
+
+        // Must not hang: the receiver is taken (dropping it unblocks the parked
+        // decoder) and the stream is stopped and joined.
+        engine.stop_loop();
+
+        let mixer = engine.mixer.lock().unwrap_or_else(|err| err.into_inner());
+        assert!(mixer.loop_rx.is_none(), "receiver must be released");
+        assert!(mixer.loop_chunk.is_empty());
+        drop(mixer);
+        assert_eq!(engine.loop_state(), LoopState::Idle);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

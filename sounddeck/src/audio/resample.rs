@@ -53,8 +53,17 @@ impl StereoResampler {
     fn render(&mut self, finish: bool) -> Vec<f32> {
         let channels = self.channels;
         let step = self.rate as f64 / SAMPLE_RATE as f64;
-        let available = self.start + (self.pending.len() / channels) as u64;
+        // Whole frames only: a partial trailing frame cannot be indexed.
+        let pending_frames = self.pending.len() / channels;
+        let available = self.start + pending_frames as u64;
         let mut out = Vec::new();
+        if pending_frames == 0 {
+            if finish {
+                self.pending.clear();
+                self.start = available;
+            }
+            return out;
+        }
 
         loop {
             // Position of the next output sample in absolute input frames.
@@ -69,10 +78,16 @@ impl StereoResampler {
                 break;
             }
 
-            let i0_global = t.floor() as u64;
-            let i1_global = (i0_global + 1).min(available.saturating_sub(1));
-            let i0 = (i0_global - self.start) as usize;
-            let i1 = (i1_global - self.start) as usize;
+            // Absolute frame indices, clamped to the frames that actually exist.
+            // `start` and the interpolation point are kept in step by the drain
+            // below, but an unchecked subtraction here would wrap to a huge index
+            // and panic if they ever drifted apart.
+            let last_frame = available.saturating_sub(1);
+            let i0_global = (t.floor().max(0.0) as u64).min(last_frame);
+            let i1_global = i0_global.saturating_add(1).min(last_frame);
+            let last_pending = pending_frames - 1;
+            let i0 = (i0_global.saturating_sub(self.start) as usize).min(last_pending);
+            let i1 = (i1_global.saturating_sub(self.start) as usize).min(last_pending);
             let frac = (t - i0_global as f64) as f32;
 
             let index = |frame: usize, side: usize| {
@@ -181,5 +196,36 @@ mod tests {
         let mut out = r.push(&src);
         out.extend(r.finish());
         assert_eq!(out.len() / 2, 4_800);
+    }
+
+    #[test]
+    fn an_ahead_of_range_start_does_not_underflow() {
+        // `start` ahead of the interpolation point is exactly what an unchecked
+        // `i0_global - start` would wrap into a huge index (panic). The clamp
+        // must keep the read inside `pending`.
+        let mut r = StereoResampler::new(44_100, 2);
+        r.pending = vec![0.25f32; 8]; // 4 whole frames
+        r.start = 100;
+
+        let out = r.render(true);
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn a_partial_trailing_frame_is_ignored() {
+        // One sample cannot make a stereo frame; it must be dropped, not indexed.
+        let mut r = StereoResampler::new(44_100, 2);
+        let out = r.push(&[0.5]);
+        assert!(out.is_empty());
+        assert!(r.finish().is_empty());
+        assert!(r.pending.is_empty() || r.pending.len() < 2);
+    }
+
+    #[test]
+    fn an_empty_input_renders_nothing() {
+        let mut r = StereoResampler::new(22_050, 2);
+        r.start = 10;
+        assert!(r.finish().is_empty());
     }
 }
