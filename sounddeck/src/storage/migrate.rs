@@ -5,8 +5,13 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use super::io;
 use super::{save_libraries, save_settings, LibrariesFile, LibraryConfig, Loaded, Settings};
 use crate::model::{Layout, CONFIG_FILE};
+
+/// Where the imported legacy file is kept once the new files exist. A taken
+/// name gets a numbered suffix (`sounddeck.v1.json.bak.2`, …).
+const LEGACY_BACKUP_FILE: &str = "sounddeck.v1.json.bak";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
@@ -88,6 +93,11 @@ impl Default for LegacyConfig {
 ///
 /// Returns `None` when there is nothing usable to import. The legacy file is
 /// only renamed after both new files are written.
+///
+/// On the success paths every collected warning travels back inside
+/// [`Loaded::warnings`] and the caller's `warnings` vec is left empty. On the
+/// `None` paths there is no `Loaded` to carry them, so they go into `warnings`,
+/// which the caller then keeps collecting for the normal load.
 pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
     let legacy_path = base.join(CONFIG_FILE);
     let text = fs::read_to_string(&legacy_path).ok()?;
@@ -204,7 +214,7 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         return Some(Loaded {
             settings,
             libraries: file.libraries,
-            warnings: Vec::new(),
+            warnings: std::mem::take(warnings),
         });
     }
     if let Err(err) = save_settings(&settings_path, &settings) {
@@ -214,24 +224,118 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
         return Some(Loaded {
             settings,
             libraries: file.libraries,
-            warnings: Vec::new(),
+            warnings: std::mem::take(warnings),
         });
     }
 
-    let backup = base.join("sounddeck.v1.json.bak");
-    if let Err(err) = fs::rename(&legacy_path, &backup) {
-        warnings.push(format!(
-            "Imported the old config, but could not rename sounddeck.json: {err}"
-        ));
-    } else {
-        warnings.push(format!(
-            "Imported {imported_sounds} sound(s) into config/. The old file is sounddeck.v1.json.bak."
-        ));
+    // Keep any earlier backup: the rename below must not overwrite one.
+    match io::free_path(&base.join(LEGACY_BACKUP_FILE)) {
+        Some(backup) => match fs::rename(&legacy_path, &backup) {
+            Ok(()) => warnings.push(format!(
+                "Imported {imported_sounds} sound(s) into config/. The old file is {}.",
+                io::file_label(&backup)
+            )),
+            Err(err) => warnings.push(format!(
+                "Imported the old config, but could not rename {CONFIG_FILE}: {err}"
+            )),
+        },
+        None => warnings.push(format!(
+            "Imported the old config, but every {LEGACY_BACKUP_FILE} name is taken; \
+             {CONFIG_FILE} was left in place."
+        )),
     }
 
     Some(Loaded {
         settings,
         libraries: file.libraries,
-        warnings: Vec::new(),
+        warnings: std::mem::take(warnings),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{libraries_path, settings_path, test_dir};
+
+    fn legacy_json() -> String {
+        serde_json::json!({
+            "version": 1,
+            "sounds": [{
+                "id": 3,
+                "name": "Airhorn",
+                "path": "audio/airhorn.wav",
+                "hotkey": "Alt+1",
+                "volume": 0.8,
+                "ram": null,
+                "library_id": 1
+            }],
+            "libraries": [{ "id": 1, "name": "Main" }],
+            "active_library": 1,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn import_should_return_its_own_warnings() {
+        let base = test_dir("migrate-warnings");
+        fs::write(base.join(CONFIG_FILE), legacy_json()).unwrap();
+
+        let mut warnings = Vec::new();
+        let loaded = import(&base, &mut warnings).expect("import");
+
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains("Imported 1 sound")),
+            "{:?}",
+            loaded.warnings
+        );
+        // The success path hands its warnings back inside `Loaded`, so the
+        // caller's vec must not be used as a second sink.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(settings_path(&base).exists());
+        assert!(libraries_path(&base).exists());
+        assert!(!base.join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn backup_rename_should_not_clobber_an_existing_backup() {
+        let base = test_dir("migrate-backup");
+        fs::write(base.join(CONFIG_FILE), legacy_json()).unwrap();
+        let existing = base.join(LEGACY_BACKUP_FILE);
+        fs::write(&existing, "previous backup").unwrap();
+
+        let mut warnings = Vec::new();
+        let loaded = import(&base, &mut warnings).expect("import");
+
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "previous backup");
+        let numbered = base.join(format!("{LEGACY_BACKUP_FILE}.2"));
+        assert!(numbered.exists());
+        assert_eq!(fs::read_to_string(&numbered).unwrap(), legacy_json());
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|w| w.contains(&format!("{LEGACY_BACKUP_FILE}.2"))),
+            "{:?}",
+            loaded.warnings
+        );
+        assert!(!base.join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn unreadable_legacy_file_should_report_through_the_caller() {
+        let base = test_dir("migrate-corrupt");
+        fs::write(base.join(CONFIG_FILE), "{ broken").unwrap();
+
+        let mut warnings = Vec::new();
+        assert!(import(&base, &mut warnings).is_none());
+
+        assert!(
+            warnings.iter().any(|w| w.contains("unreadable")),
+            "{warnings:?}"
+        );
+        assert!(!base.join(CONFIG_FILE).exists());
+    }
 }

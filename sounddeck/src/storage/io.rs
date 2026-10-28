@@ -3,12 +3,16 @@
 //! Every JSON file is written atomically and keeps exactly one rolling backup:
 //! `name.json` -> `name.json.bak`, with `name.json.tmp` transient. A failed read
 //! moves the bad file aside as `name.json.corrupt`, then tries `.tmp`, `.bak`
-//! and finally caller defaults. Nothing accumulates over time.
+//! and finally caller defaults. A taken snapshot name gets a numbered suffix
+//! (`name.json.corrupt.2`, …) so an earlier snapshot is never overwritten.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
+
+/// Highest numbered suffix `free_path` tries before giving up.
+const MAX_SIDECAR_SUFFIX: u32 = 99;
 
 pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let name = path
@@ -16,6 +20,24 @@ pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "config.json".to_string());
     path.with_file_name(format!("{name}.{suffix}"))
+}
+
+/// `preferred` when nothing is there, otherwise `preferred` with a numbered
+/// suffix (`.2`, `.3`, …), or `None` when every candidate is taken.
+///
+/// Used for sidecars that must never clobber an earlier one: a second corrupt
+/// read or a second legacy import keeps the previous snapshot intact.
+pub fn free_path(preferred: &Path) -> Option<PathBuf> {
+    if !preferred.exists() {
+        return Some(preferred.to_path_buf());
+    }
+    let name = preferred
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_label(preferred));
+    (2..=MAX_SIDECAR_SUFFIX)
+        .map(|index| preferred.with_file_name(format!("{name}.{index}")))
+        .find(|candidate| !candidate.exists())
 }
 
 fn read_text(path: &Path) -> Option<String> {
@@ -29,7 +51,8 @@ fn parse<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_str(&text).map_err(|err| err.to_string())
 }
 
-fn file_label(path: &Path) -> String {
+/// Label used in warnings; a bare file name even for an absolute path.
+pub(crate) fn file_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
@@ -43,7 +66,6 @@ pub fn load_json<T: DeserializeOwned + Default>(
 ) -> T {
     let tmp = sidecar(path, "tmp");
     let bak = sidecar(path, "bak");
-    let corrupt = sidecar(path, "corrupt");
 
     let existed = path.exists() || tmp.exists() || bak.exists();
 
@@ -54,10 +76,17 @@ pub fn load_json<T: DeserializeOwned + Default>(
                 return value;
             }
             Err(err) => {
-                let _ = fs::rename(path, &corrupt);
+                // Keep every snapshot: a `.corrupt` name that is already taken
+                // gets a numbered suffix instead of being overwritten.
+                let kept = match free_path(&sidecar(path, "corrupt")) {
+                    Some(corrupt) => {
+                        let _ = fs::rename(path, &corrupt);
+                        format!("Kept as {}.", file_label(&corrupt))
+                    }
+                    None => "It was left in place: no free snapshot name.".to_string(),
+                };
                 warnings.push(format!(
-                    "{label} was unreadable ({err}). Kept as {} and trying a backup.",
-                    file_label(&corrupt)
+                    "{label} was unreadable ({err}). {kept} Trying a backup."
                 ));
             }
         }
@@ -141,5 +170,49 @@ pub fn sweep_tmp(dir: &Path) {
         {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::test_dir;
+
+    #[test]
+    fn corrupt_snapshot_should_not_clobber_an_earlier_one() {
+        let dir = test_dir("io-corrupt-twice");
+        let path = dir.join("settings.json");
+        let mut warnings = Vec::new();
+
+        fs::write(&path, "{ broken one").unwrap();
+        let _: serde_json::Value = load_json(&path, "settings.json", &mut warnings);
+        fs::write(&path, "{ broken two").unwrap();
+        let _: serde_json::Value = load_json(&path, "settings.json", &mut warnings);
+
+        let first = sidecar(&path, "corrupt");
+        let second = path.with_file_name("settings.json.corrupt.2");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "{ broken one");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "{ broken two");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("settings.json.corrupt.2")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn free_path_should_prefer_the_plain_name_then_number_it() {
+        let dir = test_dir("io-free-path");
+        let preferred = dir.join("libraries.json.corrupt");
+
+        assert_eq!(free_path(&preferred).as_deref(), Some(preferred.as_path()));
+
+        fs::write(&preferred, "first").unwrap();
+        let numbered = free_path(&preferred).unwrap();
+        assert_eq!(
+            numbered.file_name().unwrap().to_string_lossy(),
+            "libraries.json.corrupt.2"
+        );
     }
 }
