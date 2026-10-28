@@ -43,7 +43,12 @@ pub fn free_path(preferred: &Path) -> Option<PathBuf> {
 fn read_text(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     // Some editors prepend a UTF-8 BOM; serde_json rejects it.
-    Some(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+    Some(strip_bom(&text).to_string())
+}
+
+/// Editors may prepend a UTF-8 BOM; every reader drops it before parsing.
+pub(crate) fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
 fn parse<T: DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -122,7 +127,8 @@ pub fn load_json<T: DeserializeOwned + Default>(
     T::default()
 }
 
-/// Atomic write with a rolling single backup.
+/// Atomic write with a rolling single backup. Used for the config files, where
+/// the previous version is worth keeping.
 pub fn write_json_atomic(path: &Path, text: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -138,13 +144,30 @@ pub fn write_json_atomic(path: &Path, text: &str) -> anyhow::Result<()> {
         let _ = fs::rename(path, &bak);
     }
 
-    match fs::rename(&tmp, path) {
+    commit_tmp(path, &tmp)
+}
+
+/// Atomic write with no backup: for a file the user picked, where a stray
+/// `.bak` beside it would be noise (config export).
+pub fn write_text_atomic(path: &Path, text: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = sidecar(path, "tmp");
+    fs::write(&tmp, text)?;
+    commit_tmp(path, &tmp)
+}
+
+/// Move the finished temp file into place, retrying via copy when Windows holds
+/// the target briefly.
+fn commit_tmp(path: &Path, tmp: &Path) -> anyhow::Result<()> {
+    match fs::rename(tmp, path) {
         Ok(()) => Ok(()),
         Err(first) => {
             // Windows sometimes holds the target briefly. Retry via copy.
-            match fs::copy(&tmp, path) {
+            match fs::copy(tmp, path) {
                 Ok(_) => {
-                    let _ = fs::remove_file(&tmp);
+                    let _ = fs::remove_file(tmp);
                     Ok(())
                 }
                 Err(second) => Err(anyhow::anyhow!(
@@ -214,5 +237,20 @@ mod tests {
             numbered.file_name().unwrap().to_string_lossy(),
             "libraries.json.corrupt.2"
         );
+    }
+
+    /// A config export is a file the user picked: it replaces cleanly and never
+    /// leaves a rolling `.bak` (or the temp file) beside it.
+    #[test]
+    fn an_export_write_leaves_no_backup_beside_it() {
+        let dir = test_dir("io-export");
+        let path = dir.join("sounddeck-config.json");
+
+        write_text_atomic(&path, "{\"first\": 1}").unwrap();
+        write_text_atomic(&path, "{\"second\": 2}").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"second\": 2}");
+        assert!(!sidecar(&path, "bak").exists());
+        assert!(!sidecar(&path, "tmp").exists());
     }
 }

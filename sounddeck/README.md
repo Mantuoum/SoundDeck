@@ -80,7 +80,32 @@ The rail on the left switches tabs; the status bar stays available.
   Cable; load hotkey sounds into RAM; enable the stop-all hotkey.
 - **Appearance** — theme, reload themes, Animate UI.
 - **Window** — minimize-to-tray and whether the sidebar shows the master-gain slider.
-- **About** — version, config folder, developer details.
+- **About** — version, config folder, developer details, and the **Data** group.
+
+Each of Playback, Appearance and Window ends with a **Defaults** card: **Reset** puts that
+page's settings back to their defaults and leaves every other page alone. About's
+**Reset all settings** does the same for the whole settings file after a confirmation.
+Neither touches your libraries, your sounds or any audio file — only `settings.json`
+values change, and the loop stops if the reset disables it. The theme falls back to
+Graphite like any missing theme.
+
+### Export and import
+
+**About → Data → Export** writes everything SoundDeck remembers to one JSON file you
+choose: settings (devices, volumes, theme, layout, loop, hotkeys) and the libraries with
+their sounds, volumes and hotkeys. Use it as a backup, or to move the setup to another PC.
+
+- Audio files are never copied into the bundle; sounds keep their paths. Paths inside the
+  SoundDeck folder are stored relative, so a copied folder that keeps the same layout
+  keeps working.
+- **Import** validates the file, then asks before doing anything: "Replace current board?
+  N sounds across M libraries will be replaced." **Replace** swaps the settings and the
+  whole board in one go and saves; **Cancel**, `Esc` or a click outside leaves everything
+  exactly as it was.
+- A file that is not a SoundDeck bundle, is damaged, or was written by a newer SoundDeck
+  is refused with a message in the status bar — nothing is imported.
+- Importing never deletes or copies audio files. Sounds whose file is not on this PC show
+  as missing and can be relinked with right-click → **Locate**.
 
 Monitor/Cable devices, volumes, the link switch and master gain stay in the board
 sidebar where you need them while performing. Each device dropdown ends with
@@ -136,6 +161,10 @@ track is stored as `loop_enabled`, `loop_path`, `loop_volume`, `loop_on_monitor`
 launch and renamed to `sounddeck.v1.json.bak`. Each JSON file is written
 atomically and keeps one rolling `.bak`; interrupted writes are recovered on the
 next start.
+
+**Settings → About → Export configuration** writes both files into one
+`sounddeck-config.json` bundle (and **Import** restores it); the bundle stores the same
+paths, never the audio.
 
 ## Audio notes
 

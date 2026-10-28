@@ -88,9 +88,12 @@ const MIN_VOLUME_WIDTH: f32 = 80.0;
 const MODAL_MARGIN: i8 = 18;
 const MODAL_MARGIN_COMPACT: i8 = 12;
 
-/// Body width of the delete-library dialog: wide enough for the action row and
-/// the target-library combobox without wrapping.
-const DELETE_MODAL_WIDTH: f32 = 460.0;
+/// Body width of a confirmation dialog (delete library, import, reset): wide
+/// enough for the action row and a target combobox without wrapping.
+const CONFIRM_MODAL_WIDTH: f32 = 460.0;
+
+/// Default file name an export offers.
+const DEFAULT_BUNDLE_NAME: &str = "sounddeck-config.json";
 
 /// Level-meter motion: instant attack, `METER_RELEASE_DB_PER_SEC` release, and a
 /// peak that holds for `METER_PEAK_HOLD` before falling at its own rate.
@@ -150,6 +153,17 @@ impl SettingsTab {
             Self::Appearance => "Appearance",
             Self::Window => "Window",
             Self::About => "About",
+        }
+    }
+
+    /// The `SettingsGroup` the page's Reset button restores. About has no fields
+    /// of its own — only the whole-config actions — so it has no group.
+    fn group(self) -> Option<storage::SettingsGroup> {
+        match self {
+            Self::Playback => Some(storage::SettingsGroup::Playback),
+            Self::Appearance => Some(storage::SettingsGroup::Appearance),
+            Self::Window => Some(storage::SettingsGroup::Window),
+            Self::About => None,
         }
     }
 }
@@ -300,6 +314,16 @@ struct DeleteLibraryState {
     target_id: u64,
 }
 
+/// A parsed, validated bundle waiting for the user to confirm the swap. Nothing
+/// is applied until then; closing the dialog drops this and changes nothing.
+struct ImportState {
+    /// File name for the dialog and the log, never the whole path.
+    name: String,
+    bundle: storage::bundle::Bundle,
+    sounds: usize,
+    libraries: usize,
+}
+
 enum Action {
     Play(u64),
     Stop(u64),
@@ -338,6 +362,9 @@ pub struct App {
     engine: Arc<Engine>,
     hotkeys: HotkeyService,
     devices: Vec<DeviceInfo>,
+    /// The Windows default render endpoint from the last enumeration; the Monitor
+    /// fallback when the configured device is gone.
+    default_device: Option<String>,
     device_ready: [bool; 2],
     device_note: [Option<String>; 2],
     tray_available: bool,
@@ -371,6 +398,10 @@ pub struct App {
     stop_all: Option<Hotkey>,
     renaming: Option<RenameState>,
     deleting: Option<DeleteLibraryState>,
+    /// A validated config bundle awaiting confirmation (A5).
+    importing: Option<ImportState>,
+    /// "Reset all settings" confirmation is open (A6).
+    confirm_reset: bool,
     drag: Option<DragState>,
     card_rects: Vec<(u64, Rect)>,
     row_rects: Vec<(u64, Rect)>,
@@ -460,43 +491,10 @@ impl App {
             }
             None => None,
         };
-        let mut sounds = Vec::new();
-        let mut libraries = Vec::new();
-        for library in &stored_libraries {
-            libraries.push(Library {
-                id: library.id,
-                name: library.name.clone(),
-            });
-            for sound in &library.sounds {
-                let path = model::resolve_path(&sound.path);
-                let hotkey = match sound.hotkey.as_deref().map(Hotkey::parse) {
-                    Some(Ok(hk)) => Some(hk),
-                    Some(Err(err)) => {
-                        push_status(
-                            StatusKind::Warning,
-                            format!("Hotkey for \"{}\" is invalid: {err}", sound.name),
-                        );
-                        None
-                    }
-                    None => None,
-                };
-                let ram = hotkey.is_some() && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
-                let mut entry = Sound {
-                    id: sound.id,
-                    name: sound.name.clone(),
-                    path,
-                    hotkey,
-                    volume: sound.volume.clamp(0.0, 1.0),
-                    ram,
-                    library_id: library.id,
-                    search_key: String::new(),
-                    hotkey_label: None,
-                    path_label: String::new(),
-                    flash_until: None,
-                };
-                entry.refresh_labels();
-                sounds.push(entry);
-            }
+        let (libraries, sounds, board_warnings) =
+            build_board(&stored_libraries, cfg.preload_hotkey_sounds);
+        for warning in board_warnings {
+            push_status(StatusKind::Warning, warning);
         }
 
         let active_library = cfg.active_library;
@@ -512,73 +510,35 @@ impl App {
         ));
         engine.set_loop_volume(cfg.loop_volume);
         engine.set_loop_outputs(cfg.loop_on_monitor, cfg.loop_on_cable);
-        if cfg.link_volumes {
-            cfg.cable_volume = cfg.monitor_volume;
-        }
+        link_output_volumes(&mut cfg);
         let playback = Arc::new(Playback::new(engine.clone()));
 
-        for sound in &sounds {
-            playback.register(sound.id, sound.path.clone(), sound.volume);
-        }
+        register_sounds(&playback, &sounds);
 
         let devices_result = wasapi::list_devices();
         let mut devices = Vec::new();
-        let mut default_id = None;
-        match devices_result {
+        let default_device = match devices_result {
             Ok(list) => {
                 devices = list.devices;
-                default_id = list.default_id;
+                list.default_id
             }
-            Err(err) => push_status(
-                StatusKind::Error,
-                format!("Could not list audio devices: {err}"),
-            ),
-        }
-
-        // Resolve configured endpoints, falling back to the Windows default and
-        // then the first available render device.
-        let monitor = resolve_device(
-            &devices,
-            cfg.monitor_device.as_deref(),
-            cfg.monitor_name.as_deref(),
-        )
-        .or_else(|| {
-            default_id
-                .as_deref()
-                .and_then(|id| devices.iter().find(|d| d.id == id).cloned())
-        })
-        .or_else(|| devices.first().cloned());
-
-        let mut cable = resolve_device(
-            &devices,
-            cfg.cable_device.as_deref(),
-            cfg.cable_name.as_deref(),
-        );
-        if cable.is_none() {
-            cable = devices
-                .iter()
-                .find(|d| {
-                    let name = d.name.to_ascii_lowercase();
-                    (name.contains("cable") || name.contains("virtual"))
-                        && monitor.as_ref().map(|m| m.id != d.id).unwrap_or(true)
-                })
-                .cloned();
-            if let Some(found) = &cable {
+            Err(err) => {
                 push_status(
-                    StatusKind::Info,
-                    format!("Auto-selected virtual cable: {}", found.name),
+                    StatusKind::Error,
+                    format!("Could not list audio devices: {err}"),
                 );
+                None
             }
+        };
+
+        // The one resolution rule: stored id -> friendly name -> Windows default
+        // -> first device (Monitor), plus a "cable"/"virtual" device for Cable.
+        let selection = resolve_outputs(&devices, default_device.as_deref(), &mut cfg);
+        let (monitor, cable) = (selection.monitor, selection.cable);
+        if let Some(note) = selection.note {
+            push_status(StatusKind::Info, note);
         }
 
-        if let Some(device) = &monitor {
-            cfg.monitor_device = Some(device.id.clone());
-            cfg.monitor_name = Some(device.name.clone());
-        }
-        if let Some(device) = &cable {
-            cfg.cable_device = Some(device.id.clone());
-            cfg.cable_name = Some(device.name.clone());
-        }
         if devices.is_empty() {
             push_status(
                 StatusKind::Warning,
@@ -617,6 +577,7 @@ impl App {
             engine,
             hotkeys,
             devices,
+            default_device,
             device_ready: [false, false],
             device_note: [None, None],
             tray_available: false,
@@ -639,6 +600,8 @@ impl App {
             stop_all,
             renaming: None,
             deleting: None,
+            importing: None,
+            confirm_reset: false,
             drag: None,
             card_rects: Vec::new(),
             row_rects: Vec::new(),
@@ -1542,8 +1505,7 @@ impl App {
 
     /// Write only the files whose content actually changed.
     fn persist(&mut self) -> bool {
-        self.cfg.active_library = self.active_library;
-        self.cfg.stop_all_hotkey = self.stop_all.map(|hotkey| hotkey.label());
+        self.write_back_runtime_settings();
         let base = model::app_dir();
         let mut ok = true;
 
@@ -1619,6 +1581,337 @@ impl App {
         }
     }
 
+    /// The two settings that live on `App` until a save: the active tab and the
+    /// stop-all label. `persist` and the config export both stamp them, so a
+    /// bundle carries what is actually on screen.
+    fn write_back_runtime_settings(&mut self) {
+        self.cfg.active_library = self.active_library;
+        self.cfg.stop_all_hotkey = self.stop_all.map(|hotkey| hotkey.label());
+    }
+
+    // ---------------------------------------------------------------------
+    // Config data (export / import / reset)
+    // ---------------------------------------------------------------------
+
+    /// Write settings + libraries to one versioned JSON bundle. Audio files are
+    /// references and are never copied (FR-5.3.14).
+    fn export_config(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("SoundDeck configuration", &["json"])
+            .set_title("Export configuration")
+            .set_file_name(DEFAULT_BUNDLE_NAME)
+            .set_directory(model::app_dir());
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+
+        self.write_back_runtime_settings();
+        let libraries = self.storage_libraries();
+        let result = storage::bundle::to_json(&self.cfg, &libraries)
+            .and_then(|json| storage::io::write_text_atomic(&path, &json));
+        match result {
+            Ok(()) => self.log(
+                StatusKind::Success,
+                format!(
+                    "Exported configuration to {}",
+                    storage::io::file_label(&path)
+                ),
+            ),
+            Err(err) => self.log(StatusKind::Error, format!("Export failed: {err}")),
+        }
+    }
+
+    /// Pick a bundle, validate it and open the confirmation. A rejected file is
+    /// only a log line: nothing on the board changes.
+    fn import_config_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .add_filter("SoundDeck configuration", &["json"])
+            .add_filter("All files", &["*"])
+            .set_title("Import configuration")
+            .set_directory(model::app_dir());
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+
+        match storage::bundle::read(&path) {
+            Ok(bundle) => {
+                let sounds = bundle
+                    .libraries
+                    .iter()
+                    .map(|library| library.sounds.len())
+                    .sum();
+                let libraries = bundle.libraries.len();
+                self.importing = Some(ImportState {
+                    name: storage::io::file_label(&path),
+                    bundle,
+                    sounds,
+                    libraries,
+                });
+            }
+            Err(err) => self.log(StatusKind::Error, err.message()),
+        }
+    }
+
+    /// The import confirmation. Nothing is applied until Replace is pressed;
+    /// closing (X, Esc, backdrop, Cancel) drops the bundle.
+    fn import_modal(&mut self, ctx: &egui::Context) {
+        let Some(ImportState {
+            name,
+            bundle,
+            sounds,
+            libraries,
+        }) = self.importing.take()
+        else {
+            return;
+        };
+        let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
+        let mut replace = false;
+
+        modal_shell(
+            ctx,
+            Id::new("import_modal"),
+            CONFIRM_MODAL_WIDTH,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(ui, "Import configuration", Id::new("import_close"), dismiss);
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Replace current board? {} sound{} across {} librar{} will be replaced.",
+                        sounds,
+                        if sounds == 1 { "" } else { "s" },
+                        libraries,
+                        if libraries == 1 { "y" } else { "ies" }
+                    ))
+                    .size(11.5)
+                    .color(theme::text()),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "From {name}. Audio files are not copied or deleted."
+                    ))
+                    .size(10.5)
+                    .color(theme::faint()),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, "Replace", Vec2::new(100.0, 32.0)).clicked() {
+                        replace = true;
+                    }
+                    if ghost_button(ui, "Cancel", Vec2::new(90.0, 32.0)).clicked() {
+                        *dismiss = true;
+                    }
+                });
+            },
+        );
+
+        if replace {
+            self.apply_import(ctx, bundle);
+            return;
+        }
+        if !close {
+            self.importing = Some(ImportState {
+                name,
+                bundle,
+                sounds,
+                libraries,
+            });
+        }
+    }
+
+    /// Swap the whole board for an imported bundle: stop audio, retire the old
+    /// registry entries, rebuild from the bundle's storage shapes, apply the
+    /// settings and save. Audio files are untouched (FR-5.3.14).
+    fn apply_import(&mut self, ctx: &egui::Context, bundle: storage::bundle::Bundle) {
+        let storage::bundle::Bundle {
+            settings,
+            libraries,
+        } = bundle;
+
+        self.engine.stop_all();
+        self.engine.stop_loop();
+        self.loop_state = LoopState::Idle;
+
+        let retired: Vec<u64> = self.sounds.iter().map(|sound| sound.id).collect();
+        for id in retired {
+            self.playback.remove(id);
+        }
+
+        self.cfg = settings;
+        let (new_libraries, new_sounds, warnings) =
+            build_board(&libraries, self.cfg.preload_hotkey_sounds);
+        for warning in warnings {
+            self.log(StatusKind::Warning, warning);
+        }
+        self.libraries = new_libraries;
+        self.sounds = new_sounds;
+        register_sounds(&self.playback, &self.sounds);
+
+        self.active_library = self.cfg.active_library;
+        self.next_id = self.sounds.iter().map(|sound| sound.id).max().unwrap_or(0) + 1;
+        self.selected = None;
+        self.undo = None;
+        self.drag = None;
+        self.search.clear();
+        self.filter_needle.clear();
+        self.search_pending = None;
+
+        let (sound_count, library_count) = (self.sounds.len(), self.libraries.len());
+        self.apply_config(ctx);
+        self.save_now();
+        self.log(
+            StatusKind::Success,
+            format!(
+                "Imported {sound_count} sound{} across {library_count} librar{}",
+                if sound_count == 1 { "" } else { "s" },
+                if library_count == 1 { "y" } else { "ies" }
+            ),
+        );
+    }
+
+    /// The "Reset all settings" confirmation. Libraries, sounds and audio files
+    /// are never part of it.
+    fn reset_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_reset {
+            return;
+        }
+        let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
+        let mut confirm = false;
+
+        modal_shell(
+            ctx,
+            Id::new("reset_settings_modal"),
+            CONFIRM_MODAL_WIDTH,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(
+                    ui,
+                    "Reset all settings",
+                    Id::new("reset_settings_close"),
+                    dismiss,
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Reset all settings? Libraries and sounds are not affected.")
+                        .size(11.5)
+                        .color(theme::text()),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ghost_button_colored(ui, "Reset all", Vec2::new(110.0, 32.0), theme::red())
+                        .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if ghost_button(ui, "Cancel", Vec2::new(90.0, 32.0)).clicked() {
+                        *dismiss = true;
+                    }
+                });
+            },
+        );
+
+        if confirm {
+            self.confirm_reset = false;
+            self.reset_all_settings(ctx);
+            return;
+        }
+        if close {
+            self.confirm_reset = false;
+        }
+    }
+
+    /// Restore one settings page to its defaults and re-apply the side effects.
+    /// No confirmation (a page reset is small and repeatable) and no effect on
+    /// libraries or sounds.
+    fn reset_settings_group(&mut self, ctx: &egui::Context, group: storage::SettingsGroup) {
+        self.cfg.reset_group(group);
+        self.apply_config(ctx);
+        self.log(
+            StatusKind::Info,
+            format!("{} settings reset to defaults", group.title()),
+        );
+    }
+
+    /// Every settings field back to its default. The config is saved at once so a
+    /// crash right after cannot resurrect the old values.
+    fn reset_all_settings(&mut self, ctx: &egui::Context) {
+        self.cfg.reset_all();
+        // The active tab is a settings field too: keep it on a tab that exists.
+        let ids: Vec<u64> = self.libraries.iter().map(|library| library.id).collect();
+        self.cfg.clamp_active_library(&ids);
+        if self.active_library != self.cfg.active_library {
+            self.engine.stop_all();
+            self.active_library = self.cfg.active_library;
+            self.page_fade = Instant::now();
+        }
+        self.apply_config(ctx);
+        self.save_now();
+        self.log(StatusKind::Success, "All settings reset to defaults");
+    }
+
+    /// Push every `Settings` field into the runtime: motion, theme, output levels
+    /// and gain, loop routing, endpoint resolution and the bound hotkeys. Used
+    /// after an import and after a reset so both behave like a fresh start.
+    ///
+    /// The loop is never started here: a restart starts it stopped too.
+    fn apply_config(&mut self, ctx: &egui::Context) {
+        anim::set_user(self.cfg.animate_ui);
+
+        // An unknown theme id falls back to Graphite, exactly as on load.
+        if !self
+            .theme_choices
+            .iter()
+            .any(|(id, _)| id == &self.cfg.theme)
+        {
+            self.cfg.theme = "graphite".to_string();
+        }
+        theme::set_theme(&self.cfg.theme);
+        theme::apply_style(ctx);
+
+        link_output_volumes(&mut self.cfg);
+        self.engine
+            .set_master(Slot::Monitor, self.cfg.monitor_volume);
+        self.engine.set_master(Slot::Cable, self.cfg.cable_volume);
+        self.engine.set_master_gain_db(self.cfg.master_gain_db);
+        self.engine.set_loop_volume(self.cfg.loop_volume);
+        self.engine
+            .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
+        if !self.cfg.loop_enabled {
+            self.engine.stop_loop();
+            self.loop_state = LoopState::Idle;
+        }
+        self.loop_checked_at = since(10);
+        self.refresh_loop_missing(true);
+
+        let selection =
+            resolve_outputs(&self.devices, self.default_device.as_deref(), &mut self.cfg);
+        if let Some(note) = selection.note {
+            self.log(StatusKind::Info, note);
+        }
+        self.apply_routes();
+
+        // Stop-all is stored as a label like every other hotkey.
+        self.stop_all = match self.cfg.stop_all_hotkey.as_deref().map(Hotkey::parse) {
+            Some(Ok(hotkey)) => Some(hotkey),
+            Some(Err(err)) => {
+                self.log(
+                    StatusKind::Warning,
+                    format!("Stop-all hotkey is invalid: {err}"),
+                );
+                self.cfg.stop_all_hotkey = None;
+                None
+            }
+            None => None,
+        };
+
+        self.invalidate_playback_stats();
+        self.sync_active_library();
+        self.mark_dirty();
+    }
+
     fn log(&mut self, kind: StatusKind, text: impl Into<String>) {
         let text = text.into();
         #[cfg(debug_assertions)]
@@ -1650,6 +1943,7 @@ impl App {
         match wasapi::list_devices() {
             Ok(list) => {
                 self.devices = list.devices;
+                self.default_device = list.default_id;
                 self.cfg.monitor_device = resolve_device(
                     &self.devices,
                     self.cfg.monitor_device.as_deref(),
@@ -3045,7 +3339,7 @@ impl App {
         modal_shell(
             ctx,
             Id::new("delete_library_modal"),
-            DELETE_MODAL_WIDTH,
+            CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
             &mut close,
             |ui, dismiss| {
@@ -3312,6 +3606,8 @@ impl App {
         self.capture_modal(ctx);
         self.rename_modal(ctx);
         self.delete_library_modal(ctx);
+        self.import_modal(ctx);
+        self.reset_modal(ctx);
         self.log_modal(ctx);
     }
 
@@ -3399,9 +3695,36 @@ impl App {
                         SettingsTab::Window => self.settings_page_window(ui),
                         SettingsTab::About => self.settings_page_about(ui),
                     }
+                    // Every page that owns fields ends with its Reset row; the
+                    // group list lives in `storage::Settings`, not per page.
+                    if let Some(group) = tab.group() {
+                        self.settings_reset_group(ui, ctx, group);
+                    }
                     ui.add_space(SETTINGS_GROUP_GAP);
                 });
             });
+    }
+
+    /// The trailing "Defaults" card on a settings page: restores that page's
+    /// fields only. Libraries and sounds are not settings, so they are never
+    /// part of it.
+    fn settings_reset_group(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        group: storage::SettingsGroup,
+    ) {
+        settings_group(ui, "Defaults", |ui| {
+            settings_value(ui, "Reset this page", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button(ui, "Reset", SETTINGS_BUTTON_SIZE)
+                    .on_hover_text(format!("Restore the {} defaults", group.title()))
+                    .clicked()
+                {
+                    self.reset_settings_group(ctx, group);
+                }
+            });
+            settings_detail(ui, "Libraries and sounds are not affected.");
+        });
     }
 
     fn settings_page_playback(&mut self, ui: &mut Ui) {
@@ -3658,9 +3981,9 @@ impl App {
         ui.scope(|ui| {
             ui.set_max_width(SETTINGS_ABOUT_MAX_W.min(ui.available_width()));
 
-            // One card: name/version, config folder, licence, project links and
-            // the credit. A second group of two rows pushed the credit off a
-            // 540 px window.
+            // Application identity and links in one card: splitting them pushed the
+            // credit off a 540 px window. Data follows as its own group because
+            // export/import/reset act on the whole config, not on the app.
             settings_group(ui, "Application", |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -3702,6 +4025,40 @@ impl App {
                         }
                     });
                 }
+            });
+
+            // Backup / move to another PC (A5), plus the settings-wide reset (A6).
+            settings_group(ui, "Data", |ui| {
+                settings_value(ui, "Export configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
+                    if ghost_button(ui, "Export", SETTINGS_BUTTON_SIZE)
+                        .on_hover_text("Save settings and libraries as one JSON file")
+                        .clicked()
+                    {
+                        self.export_config();
+                    }
+                });
+                settings_divider(ui);
+                settings_value(ui, "Import configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
+                    if ghost_button(ui, "Import", SETTINGS_BUTTON_SIZE)
+                        .on_hover_text("Replace the board from an exported file")
+                        .clicked()
+                    {
+                        self.import_config_dialog();
+                    }
+                });
+                settings_divider(ui);
+                settings_value(ui, "Reset all settings", SETTINGS_BUTTON_SIZE.x, |ui| {
+                    if ghost_button_colored(ui, "Reset", SETTINGS_BUTTON_SIZE, theme::red())
+                        .on_hover_text("Settings only - libraries and sounds stay")
+                        .clicked()
+                    {
+                        self.confirm_reset = true;
+                    }
+                });
+                settings_detail(
+                    ui,
+                    "A bundle holds settings and libraries (paths stay references, audio is never copied).",
+                );
             });
 
             ui.horizontal(|ui| {
@@ -4248,7 +4605,12 @@ impl App {
 
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
         // Modal state owns the keyboard; each modal handles its own keys.
-        if self.capture.is_some() || self.renaming.is_some() || self.deleting.is_some() {
+        if self.capture.is_some()
+            || self.renaming.is_some()
+            || self.deleting.is_some()
+            || self.importing.is_some()
+            || self.confirm_reset
+        {
             return;
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Comma)) {
@@ -6474,6 +6836,137 @@ fn resolve_device(
     None
 }
 
+/// What the configured endpoints resolved to.
+struct OutputSelection {
+    monitor: Option<DeviceInfo>,
+    cable: Option<DeviceInfo>,
+    /// Log line when a virtual cable had to be guessed ("Auto-selected …").
+    note: Option<String>,
+}
+
+/// The one place Monitor/Cable are resolved from settings: the stored id, then the
+/// friendly name, then (Monitor) the Windows default and the first device; the
+/// Cable falls back to a device whose name says "cable"/"virtual". Both results
+/// are written back into `cfg` so the next launch resolves the same endpoints.
+///
+/// Startup, config import and "Reset all settings" all go through here.
+fn resolve_outputs(
+    devices: &[DeviceInfo],
+    default_id: Option<&str>,
+    cfg: &mut storage::Settings,
+) -> OutputSelection {
+    let monitor = resolve_device(
+        devices,
+        cfg.monitor_device.as_deref(),
+        cfg.monitor_name.as_deref(),
+    )
+    .or_else(|| default_id.and_then(|id| devices.iter().find(|device| device.id == id).cloned()))
+    .or_else(|| devices.first().cloned());
+
+    let mut note = None;
+    let mut cable = resolve_device(
+        devices,
+        cfg.cable_device.as_deref(),
+        cfg.cable_name.as_deref(),
+    );
+    if cable.is_none() {
+        cable = devices
+            .iter()
+            .find(|device| {
+                let name = device.name.to_ascii_lowercase();
+                (name.contains("cable") || name.contains("virtual"))
+                    && monitor
+                        .as_ref()
+                        .map(|monitor| monitor.id != device.id)
+                        .unwrap_or(true)
+            })
+            .cloned();
+        if let Some(found) = &cable {
+            note = Some(format!("Auto-selected virtual cable: {}", found.name));
+        }
+    }
+
+    if let Some(device) = &monitor {
+        cfg.monitor_device = Some(device.id.clone());
+        cfg.monitor_name = Some(device.name.clone());
+    }
+    if let Some(device) = &cable {
+        cfg.cable_device = Some(device.id.clone());
+        cfg.cable_name = Some(device.name.clone());
+    }
+
+    OutputSelection {
+        monitor,
+        cable,
+        note,
+    }
+}
+
+/// Linked outputs are one level: the cable follows the monitor.
+fn link_output_volumes(cfg: &mut storage::Settings) {
+    if cfg.link_volumes {
+        cfg.cable_volume = cfg.monitor_volume;
+    }
+}
+
+/// Register every board sound with the playback registry. Startup and config
+/// import both use it, so an imported board is registered exactly like a loaded
+/// one.
+fn register_sounds(playback: &Playback, sounds: &[Sound]) {
+    for sound in sounds {
+        playback.register(sound.id, sound.path.clone(), sound.volume);
+    }
+}
+
+/// Build the runtime tabs/sounds from their storage shape. Returns the warnings
+/// the board produced (invalid hotkeys) for the caller to log.
+///
+/// Startup and config import both go through this, so a bundle that imports
+/// builds the same board a restart would.
+fn build_board(
+    stored: &[storage::LibraryConfig],
+    preload_hotkey_sounds: bool,
+) -> (Vec<Library>, Vec<Sound>, Vec<String>) {
+    let mut libraries = Vec::with_capacity(stored.len());
+    let mut sounds = Vec::new();
+    let mut warnings = Vec::new();
+
+    for library in stored {
+        libraries.push(Library {
+            id: library.id,
+            name: library.name.clone(),
+        });
+        for sound in &library.sounds {
+            let hotkey = match sound.hotkey.as_deref().map(Hotkey::parse) {
+                Some(Ok(hotkey)) => Some(hotkey),
+                Some(Err(err)) => {
+                    warnings.push(format!("Hotkey for \"{}\" is invalid: {err}", sound.name));
+                    None
+                }
+                None => None,
+            };
+            let mut entry = Sound {
+                id: sound.id,
+                name: sound.name.clone(),
+                path: model::resolve_path(&sound.path),
+                hotkey,
+                volume: sound.volume.clamp(0.0, 1.0),
+                // Only a bound sound can be retained (FR-5.3.5).
+                ram: hotkey.is_some() && sound.ram.unwrap_or(preload_hotkey_sounds),
+                library_id: library.id,
+                search_key: String::new(),
+                hotkey_label: None,
+                path_label: String::new(),
+                flash_until: None,
+            };
+            entry.refresh_labels();
+            sounds.push(entry);
+        }
+    }
+
+    (libraries, sounds, warnings)
+}
+
 #[cfg(test)]
 mod tests {
     // Volume curve coverage lives in `ui::volume::tests`.
@@ -6697,6 +7190,54 @@ mod tests {
         assert!(!claim_unique(&mut claimed, &missing));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// An imported bundle builds the same board a restart would: paths resolve
+    /// against the app folder, RAM follows a binding only, and a hand-edited
+    /// hotkey becomes a warning instead of a lost sound.
+    #[test]
+    fn an_imported_board_rebuilds_like_startup() {
+        let stored = vec![storage::LibraryConfig {
+            id: 3,
+            name: "Main".into(),
+            sounds: vec![
+                storage::SoundConfig {
+                    id: 1,
+                    name: "Bound".into(),
+                    path: "audio/bound.wav".into(),
+                    hotkey: Some("Ctrl+1".into()),
+                    volume: 2.0,
+                    ram: None,
+                },
+                storage::SoundConfig {
+                    id: 2,
+                    name: "Broken".into(),
+                    path: "audio/broken.wav".into(),
+                    hotkey: Some("Ctrl+Nope".into()),
+                    volume: 0.5,
+                    ram: Some(true),
+                },
+            ],
+        }];
+
+        let (libraries, sounds, warnings) = build_board(&stored, true);
+
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0].id, 3);
+        assert_eq!(sounds.len(), 2, "a bad hotkey never drops the sound");
+        assert_eq!(sounds[0].path, model::resolve_path("audio/bound.wav"));
+        assert_eq!(sounds[0].library_id, 3);
+        assert_eq!(sounds[0].volume, 1.0, "volumes are clamped on the way in");
+        assert!(sounds[0].ram, "a bound sound follows the preload default");
+        assert!(!sounds[0].search_key.is_empty());
+        assert!(sounds[1].hotkey.is_none());
+        assert!(!sounds[1].ram, "no binding, no retention");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Broken"), "{warnings:?}");
+
+        // With the global preload off, a sound without a hotkey stays on disk.
+        let (_, sounds, _) = build_board(&stored, false);
+        assert!(!sounds[0].ram);
     }
 
     #[test]

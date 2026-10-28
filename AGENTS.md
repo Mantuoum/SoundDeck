@@ -15,7 +15,8 @@ Delete text that stopped being true instead of appending corrections; log entrie
 one line.
 
 Log: `2026-10-28 — created (codebase review); batch-1 + step-6 syncs` · `2026-10-28 —
-slimmed: non-§2 sections compressed` (detail in git history).
+slimmed: non-§2 sections compressed` · `2026-10-28 — A5/A6: config bundle + reset
+groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` (detail in git history).
 
 ## 1. Repository layout
 
@@ -34,7 +35,8 @@ SoundBoard/
         ├── icon.rs       PNG → window/tray icon
         ├── audio/        engine (mixer), wasapi (devices), reader, decode, resample, stream
         ├── playback/     mod (registry), policy (RAM-vs-disk), lock (file lock)
-        ├── storage/      mod (schemas), io (atomic writes), migrate (legacy import)
+        ├── storage/      mod (schemas), io (atomic writes), migrate (legacy import),
+        │                 bundle (one-file export/import)
         └── ui/           theme*.rs, volume.rs, anim.rs (paint-side only)
 ```
 
@@ -142,6 +144,12 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
   quit forces a final write. `serialize_settings`/`serialize_libraries` are the only
   serializer: the fingerprint string and the file are the same bytes (`save_*` just
   writes what `serialize_*` produced).
+- **Export/import** (`bundle.rs`): one JSON bundle `{app, bundle, settings, libraries}`
+  built from those same structs; import validates the stamps, `normalize()`s, and
+  `App::apply_import` swaps the board only after the user confirms. Settings export is
+  the only writer of a user-chosen file (`io::write_text_atomic`, no rolling `.bak`).
+- **Reset** (`Settings::reset_group`/`reset_all`): one field list per settings page;
+  the coverage test fails when a new field reaches no group. Never touches libraries.
 
 ### 2.5 Playback registry & RAM policy (`playback/`)
 
@@ -313,7 +321,8 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
   SM/MD/LG/XL. Volumes/percentages only via `ui/volume.rs`. Fetch `theme::palette()`
   once per paint; theme locks go through `theme::read_lock`/`write_lock`.
 - **Storage**: settings field = struct + `Default` + `normalize()` clamp +
-  `#[serde(default)]` + control + consumer. Writes only via `io::write_json_atomic`.
+  `#[serde(default)]` + control + consumer. Writes only via `io::write_json_atomic`
+  (`write_text_atomic` for a user-chosen export file: same commit, no `.bak`).
   Keep save fingerprints accurate.
 - **Audio**: 48 kHz stereo f32 in, device format out; fades on every voice start/stop;
   buffers pass `is_valid_buffer`; stream chunks are whole frames (truncated tail
@@ -343,6 +352,8 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 | Hotkey behaviour | `hotkeys.rs`: `KEYS` table + `chord_owner`/`duplicate_sounds` (extend, never copy) → shared capture path in `app.rs` → SPEC §5.7 |
 | A modal | `modal_shell` + `modal_header` + `close_button`; no one-off backdrops |
 | A tray/menu item | `handle_menu_command` in `hotkeys.rs` |
+| A settings reset | field → the owning arm of `Settings::reset_group` (coverage test names any orphan) → side effect in `App::apply_config`; the page's Reset row follows `SettingsTab::group` |
+| Export/import data | `storage/bundle.rs` (stamps + `normalize()` + one `BundleError`) → UI only calls it; the board swap belongs to `App::apply_import` |
 
 ## 6. Guardrails (refuse these)
 

@@ -196,6 +196,17 @@ Reads the legacy single file, groups sounds by `library_id`, writes the new file
 renames the old one. The settings file is the “migration finished” marker, so a partial
 import retries next launch.
 
+### Export/import bundle (`storage/bundle.rs`)
+
+`Export configuration` writes settings + libraries into one JSON document
+(`{ "app": "sounddeck", "bundle": 1, "settings": …, "libraries": … }`) via
+`io::write_text_atomic` (atomic, no rolling `.bak`: the target is a file the user picked).
+Import parses and validates it (`app` stamp, bundle version, then the same
+`normalize()` a load runs), and only `App::apply_import` touches the board — nothing is
+applied until the user confirms the dialog. The bundle's two members are the config
+files' own shapes, so export → import restores exactly what a folder copy would.
+Audio files are never copied (FR-5.3.14).
+
 ---
 
 ## 4. Audio
@@ -404,7 +415,10 @@ above-normal so audio still meets its deadlines.
   below `SETTINGS_ROW_STACK_W`.
 - Playback owns loop enable/file, loop output routing and hotkey RAM; Appearance owns
   theme/motion; Window owns minimize-to-tray and sidebar gain visibility; About owns
-  version/config/dev.
+  version/config/dev plus the **Data** group (export, import, reset all settings).
+- Every page that owns fields ends with a **Defaults** card whose Reset restores that
+  page's fields (`Settings::reset_group`, one field list per group in `storage/mod.rs`);
+  libraries and sounds are never part of a reset.
 - Devices, output volumes, link and master gain live in the sidebar, not Settings.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
 - Shared helpers: `settings_group`, `settings_value` (one label/control row),
@@ -499,6 +513,21 @@ tab switches, `Stop all`, and tray minimize, and stops on quit or when disabled.
 
 `About` reads the version from `Cargo.toml` at compile time. Config folder uses
 `explorer`. Developer values are constants until replaced.
+
+### Backup, restore and reset
+
+`About → Data → Export configuration` writes `storage::bundle::to_json(cfg,
+storage_libraries())` to the chosen file with `io::write_text_atomic`.
+
+Import reads and validates the file, then the confirmation dialog calls
+`App::apply_import`: stop all audio and the loop, retire every `Playback` entry, rebuild
+the board with `build_board` (the function startup uses), `apply_config` (theme, motion,
+output levels/gain, endpoint resolution, loop routing, stop-all, hotkeys, RAM retention)
+and save. Nothing is applied before Replace.
+
+`apply_config` is also the reset path: `Settings::reset_group` / `reset_all` change only
+the `Settings` value, then the same re-apply runs. Libraries, sounds and audio files are
+never touched by either action.
 
 ---
 
@@ -632,9 +661,10 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/audio/stream.rs` | Loop and one-shot decoder threads, bounded chunk channel |
 | `src/audio/engine.rs` | Mixer, buffer and stream voices, loop, rings, gains, routes |
 | `src/audio/wasapi.rs` | Device enumeration, shared-mode render threads |
-| `src/storage/mod.rs` | Settings/libraries schemas, normalize, load/save |
+| `src/storage/mod.rs` | Settings/libraries schemas, normalize, reset groups, load/save |
 | `src/storage/io.rs` | Atomic writes, BOM, rolling backup, recovery, tmp sweep |
 | `src/storage/migrate.rs` | Legacy `sounddeck.json` import |
+| `src/storage/bundle.rs` | One-file config bundle: export, parse, version/stamp validation |
 | `src/ui/theme.rs` | Palette registry, radii, fonts, style, helpers |
 | `src/ui/theme_file.rs` | Markdown theme parser/template/fallback |
 | `src/ui/theme_defaults.rs` | Embedded palettes |

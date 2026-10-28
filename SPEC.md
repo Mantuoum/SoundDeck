@@ -197,6 +197,9 @@ specification:**
 | FR-5.9.7 | Every control MUST save immediately (debounced), with no Apply/Cancel step. |
 | FR-5.9.8 | Spacing MUST stay compact: group gap 5/8 px, card padding 10 px, divider 7 px, row control height 28 px. |
 | FR-5.9.9 | RAM/disk state (card chips, counts, toolbar pill) is hidden by default; a Playback switch reveals it. |
+| FR-5.9.10 | About MUST offer **Export configuration**: one version-stamped JSON bundle of settings and libraries, written atomically. Audio files MUST NOT be copied into it; paths stay references. |
+| FR-5.9.11 | Import MUST validate the bundle's kind and version, report a corrupt, foreign or newer file as a status error, and replace settings and libraries only after the user confirms a dialog stating how many sounds and libraries will be replaced. Cancel MUST change nothing. |
+| FR-5.9.12 | Playback, Appearance and Window MUST each offer a **Reset** that restores only that page's fields. About MUST offer **Reset all settings** behind a confirmation. Neither MUST touch libraries, sounds or audio files. |
 
 ### 5.10 Themes and appearance
 
@@ -296,6 +299,25 @@ stored relative; anything outside is absolute.
 | accent | #0097FF |
 ```
 
+### 6.4 Configuration bundle (export/import)
+
+```json
+{
+  "app": "sounddeck",
+  "bundle": 1,
+  "settings": { "...": "the 6.1 shape" },
+  "libraries": { "version": 2, "libraries": [ "...": "the 6.2 shape" ] }
+}
+```
+
+- The two members are the config files' own shapes: an import normalises them exactly
+  like a load (`normalize()`, ids, `active_library`), so a bundle is never trusted more
+  than a hand-edited file.
+- `app` MUST be `sounddeck` and `bundle` MUST be 1..=current; a higher number is refused
+  as "from a newer version".
+- Paths are references, relative inside the app folder, so a folder that moved together
+  re-resolves on import. Audio files are never copied into the bundle or out of it.
+
 ## 7. UI specification
 
 ### 7.1 Screens
@@ -304,7 +326,7 @@ stored relative; anything outside is absolute.
 | --- | --- |
 | **Board** | Title bar (logo, library tabs, window buttons), toolbar (search, RAM pill), grid or list of sounds, sidebar (outputs, meters, loop card, Settings). |
 | **Settings** | Left rail (Back + four tabs), content column, same title/status bars. |
-| **Modals** | Hotkey capture, rename (sound or library), activity log. |
+| **Modals** | Hotkey capture, rename (sound or library), delete library, import confirmation, reset-all confirmation, activity log. |
 
 ### 7.2 Layout invariants
 

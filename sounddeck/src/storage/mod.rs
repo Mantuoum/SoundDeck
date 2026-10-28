@@ -4,6 +4,7 @@
 //! legacy single-file `sounddeck.json` is imported once and kept as
 //! `sounddeck.v1.json.bak` (numbered if that name is already taken).
 
+pub mod bundle;
 pub mod io;
 pub mod migrate;
 
@@ -112,6 +113,79 @@ impl Settings {
                 Some(trimmed.to_string())
             }
         });
+    }
+
+    /// Restore one settings page's fields to their defaults, leaving every other
+    /// group (device ids, volumes, layout, active tab) exactly as it was.
+    ///
+    /// The field lists live here and nowhere else: the Reset buttons on the three
+    /// pages all call this. Adding a field to a page means adding it to that
+    /// group — `reset_groups_should_cover_every_field` fails until it is.
+    pub fn reset_group(&mut self, group: SettingsGroup) {
+        let defaults = Self::default();
+        match group {
+            SettingsGroup::Playback => {
+                self.loop_enabled = defaults.loop_enabled;
+                self.loop_path = defaults.loop_path;
+                self.loop_volume = defaults.loop_volume;
+                self.loop_on_monitor = defaults.loop_on_monitor;
+                self.loop_on_cable = defaults.loop_on_cable;
+                self.preload_hotkey_sounds = defaults.preload_hotkey_sounds;
+                self.show_ram_state = defaults.show_ram_state;
+                self.stop_all_hotkey_enabled = defaults.stop_all_hotkey_enabled;
+                self.stop_all_hotkey = defaults.stop_all_hotkey;
+            }
+            SettingsGroup::Appearance => {
+                self.theme = defaults.theme;
+                self.animate_ui = defaults.animate_ui;
+            }
+            SettingsGroup::Window => {
+                self.minimize_to_tray = defaults.minimize_to_tray;
+                self.show_gain_slider = defaults.show_gain_slider;
+            }
+        }
+        self.normalize();
+    }
+
+    /// Every field back to its default. Settings only: libraries, sounds and
+    /// audio files are a different file and are never part of a reset.
+    pub fn reset_all(&mut self) {
+        *self = Self::default();
+        self.normalize();
+    }
+
+    /// Keep `active_library` on a tab that exists; the first one is the fallback.
+    pub fn clamp_active_library(&mut self, library_ids: &[u64]) {
+        if library_ids.contains(&self.active_library) {
+            return;
+        }
+        if let Some(first) = library_ids.first() {
+            self.active_library = *first;
+        }
+    }
+}
+
+/// The settings pages that own a group of fields. One definition per group, so
+/// "reset this page" is a single mapping instead of a match on every page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsGroup {
+    Playback,
+    Appearance,
+    Window,
+}
+
+impl SettingsGroup {
+    /// Every page group, for the coverage test that fails when a new `Settings`
+    /// field reaches no group.
+    #[cfg(test)]
+    pub const ALL: [Self; 3] = [Self::Playback, Self::Appearance, Self::Window];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Playback => "Playback",
+            Self::Appearance => "Appearance",
+            Self::Window => "Window",
+        }
     }
 }
 
@@ -276,14 +350,7 @@ pub fn load(base: &Path) -> Loaded {
 
     settings.normalize();
     libraries.normalize();
-
-    if !libraries
-        .libraries
-        .iter()
-        .any(|library| library.id == settings.active_library)
-    {
-        settings.active_library = libraries.libraries[0].id;
-    }
+    fix_active_library(&mut settings, &libraries.libraries);
 
     io::sweep_tmp(&dir);
 
@@ -310,16 +377,29 @@ pub fn serialize_settings(settings: &Settings) -> anyhow::Result<String> {
 /// serialization path for the fingerprint and the write, with no `to_vec()`.
 /// Field order must match [`LibrariesFile`] so the bytes are identical.
 #[derive(Serialize)]
-struct LibrariesRef<'a> {
+pub(crate) struct LibrariesRef<'a> {
     version: u32,
     libraries: &'a [LibraryConfig],
 }
 
+impl<'a> LibrariesRef<'a> {
+    pub(crate) fn new(libraries: &'a [LibraryConfig]) -> Self {
+        Self {
+            version: LIBRARIES_VERSION,
+            libraries,
+        }
+    }
+}
+
 pub fn serialize_libraries(libraries: &[LibraryConfig]) -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&LibrariesRef {
-        version: LIBRARIES_VERSION,
-        libraries,
-    })?)
+    Ok(serde_json::to_string_pretty(&LibrariesRef::new(libraries))?)
+}
+
+/// Keep `active_library` on a real tab. The config load and an imported bundle
+/// both go through this one rule.
+pub fn fix_active_library(settings: &mut Settings, libraries: &[LibraryConfig]) {
+    let ids: Vec<u64> = libraries.iter().map(|library| library.id).collect();
+    settings.clamp_active_library(&ids);
 }
 
 /// Fresh scratch directory for one storage test, keyed by test name.
@@ -663,5 +743,186 @@ mod tests {
         file.normalize();
         assert_eq!(file.libraries.len(), 1);
         assert_eq!(file.libraries[0].name, "Main");
+    }
+
+    /// Every field away from its default, so a reset has something to change.
+    fn non_default_settings() -> Settings {
+        Settings {
+            version: SETTINGS_VERSION,
+            active_library: 7,
+            theme: "mocha".into(),
+            layout: Layout::List,
+            monitor_device: Some("mon-a".into()),
+            cable_device: Some("cable-a".into()),
+            monitor_name: Some("Headphones".into()),
+            cable_name: Some("Cable".into()),
+            monitor_volume: 0.5,
+            cable_volume: 0.4,
+            master_gain_db: 3.0,
+            link_volumes: false,
+            preload_hotkey_sounds: false,
+            loop_enabled: true,
+            loop_path: Some("audio/rain.flac".into()),
+            loop_volume: 0.6,
+            loop_on_monitor: false,
+            loop_on_cable: false,
+            animate_ui: false,
+            minimize_to_tray: true,
+            show_gain_slider: false,
+            show_ram_state: true,
+            stop_all_hotkey_enabled: true,
+            stop_all_hotkey: Some("Ctrl+Alt+S".into()),
+        }
+    }
+
+    /// JSON keys whose value changed between two settings values.
+    fn changed_keys(before: &Settings, after: &Settings) -> Vec<String> {
+        let before: serde_json::Value =
+            serde_json::from_str(&serialize_settings(before).unwrap()).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&serialize_settings(after).unwrap()).unwrap();
+        let after = after.as_object().expect("settings serialize to an object");
+        before
+            .as_object()
+            .expect("settings serialize to an object")
+            .iter()
+            .filter(|(key, value)| after.get(*key) != Some(*value))
+            .map(|(key, _)| key.to_string())
+            .collect()
+    }
+
+    /// Fields with no settings page: they live on the board (devices, volumes,
+    /// layout, active tab) and only "Reset all settings" restores them.
+    const BOARD_OWNED: &[&str] = &[
+        "version",
+        "active_library",
+        "layout",
+        "monitor_device",
+        "cable_device",
+        "monitor_name",
+        "cable_name",
+        "monitor_volume",
+        "cable_volume",
+        "master_gain_db",
+        "link_volumes",
+    ];
+
+    #[test]
+    fn resetting_a_page_should_leave_the_other_groups_intact() {
+        let mut settings = non_default_settings();
+        settings.reset_group(SettingsGroup::Playback);
+
+        // Playback is back to its defaults.
+        assert_eq!(settings.loop_enabled, Settings::default().loop_enabled);
+        assert!(settings.loop_path.is_none());
+        assert_eq!(settings.loop_volume, 1.0);
+        assert!(settings.loop_on_monitor && settings.loop_on_cable);
+        assert!(settings.preload_hotkey_sounds);
+        assert!(!settings.show_ram_state);
+        assert!(!settings.stop_all_hotkey_enabled);
+        assert!(settings.stop_all_hotkey.is_none());
+
+        // Appearance and Window are untouched.
+        assert_eq!(settings.theme, "mocha");
+        assert!(!settings.animate_ui);
+        assert!(settings.minimize_to_tray);
+        assert!(!settings.show_gain_slider);
+
+        // So is everything that belongs to the board.
+        assert_eq!(settings.active_library, 7);
+        assert_eq!(settings.layout, Layout::List);
+        assert_eq!(settings.monitor_device.as_deref(), Some("mon-a"));
+        assert_eq!(settings.cable_name.as_deref(), Some("Cable"));
+        assert_eq!(settings.monitor_volume, 0.5);
+        assert!(!settings.link_volumes);
+        assert!((settings.master_gain_db - 3.0).abs() < 1e-6);
+    }
+
+    /// Drift guard: a settings field must belong to a page group or be listed as
+    /// board-owned. A new field added to `Settings` and forgotten in both fails
+    /// here with its own name.
+    #[test]
+    fn reset_groups_should_cover_every_field() {
+        let mut settings = non_default_settings();
+        let mut covered: HashSet<String> = BOARD_OWNED.iter().map(|key| key.to_string()).collect();
+        for group in SettingsGroup::ALL {
+            let before = settings.clone();
+            settings.reset_group(group);
+            covered.extend(changed_keys(&before, &settings));
+        }
+
+        let all_keys: HashSet<String> = serde_json::from_str::<serde_json::Value>(
+            &serialize_settings(&Settings::default()).unwrap(),
+        )
+        .unwrap()
+        .as_object()
+        .expect("settings serialize to an object")
+        .keys()
+        .cloned()
+        .collect();
+        let missing: Vec<&String> = all_keys.difference(&covered).collect();
+        assert!(
+            missing.is_empty(),
+            "settings fields belong to no reset group and are not board-owned: {missing:?}"
+        );
+
+        // What the three resets leave alone is exactly the board-owned set.
+        let mut defaults = Settings::default();
+        defaults.normalize();
+        let leftover = changed_keys(&defaults, &settings);
+        assert!(
+            leftover
+                .iter()
+                .all(|key| BOARD_OWNED.contains(&key.as_str())),
+            "a page reset changed a field outside its group: {leftover:?}"
+        );
+        assert!(
+            !leftover.iter().any(|key| key == "loop_enabled"),
+            "a Playback field is back at its default"
+        );
+        assert!(
+            leftover.iter().any(|key| key == "master_gain_db"),
+            "a board field keeps its value"
+        );
+    }
+
+    #[test]
+    fn reset_all_should_equal_the_defaults() {
+        let mut settings = non_default_settings();
+        settings.reset_all();
+
+        let mut expected = Settings::default();
+        expected.normalize();
+        assert_eq!(
+            serialize_settings(&settings).unwrap(),
+            serialize_settings(&expected).unwrap()
+        );
+
+        // The libraries file is a separate value: a settings reset has no path
+        // to it, so its bytes stay exactly as they were (SPEC FR-5.9.12).
+        let libraries = vec![LibraryConfig {
+            id: 9,
+            name: "Keep".into(),
+            sounds: vec![sound(9, "nine")],
+        }];
+        let before = serialize_libraries(&libraries).unwrap();
+        settings.reset_all();
+        assert_eq!(serialize_libraries(&libraries).unwrap(), before);
+    }
+
+    #[test]
+    fn active_library_clamps_to_an_existing_tab() {
+        let mut settings = Settings {
+            active_library: 99,
+            ..Settings::default()
+        };
+        settings.clamp_active_library(&[4, 5]);
+        assert_eq!(settings.active_library, 4);
+        // A tab that exists is left alone, and an empty board keeps the value.
+        settings.active_library = 5;
+        settings.clamp_active_library(&[4, 5]);
+        assert_eq!(settings.active_library, 5);
+        settings.clamp_active_library(&[]);
+        assert_eq!(settings.active_library, 5);
     }
 }
