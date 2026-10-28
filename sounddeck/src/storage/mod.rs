@@ -295,29 +295,31 @@ pub fn load(base: &Path) -> Loaded {
 }
 
 pub fn save_settings(path: &Path, settings: &Settings) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(settings)?;
-    io::write_json_atomic(path, &json)
+    io::write_json_atomic(path, &serialize_settings(settings)?)
 }
 
 pub fn save_libraries(path: &Path, libraries: &[LibraryConfig]) -> anyhow::Result<()> {
-    let file = LibrariesFile {
-        version: LIBRARIES_VERSION,
-        libraries: libraries.to_vec(),
-    };
-    let json = serde_json::to_string_pretty(&file)?;
-    io::write_json_atomic(path, &json)
+    io::write_json_atomic(path, &serialize_libraries(libraries)?)
 }
 
 pub fn serialize_settings(settings: &Settings) -> anyhow::Result<String> {
     Ok(serde_json::to_string_pretty(settings)?)
 }
 
+/// The libraries file exactly as it is written. Borrowing the tabs keeps one
+/// serialization path for the fingerprint and the write, with no `to_vec()`.
+/// Field order must match [`LibrariesFile`] so the bytes are identical.
+#[derive(Serialize)]
+struct LibrariesRef<'a> {
+    version: u32,
+    libraries: &'a [LibraryConfig],
+}
+
 pub fn serialize_libraries(libraries: &[LibraryConfig]) -> anyhow::Result<String> {
-    let file = LibrariesFile {
+    Ok(serde_json::to_string_pretty(&LibrariesRef {
         version: LIBRARIES_VERSION,
-        libraries: libraries.to_vec(),
-    };
-    Ok(serde_json::to_string_pretty(&file)?)
+        libraries,
+    })?)
 }
 
 /// Fresh scratch directory for one storage test, keyed by test name.
@@ -401,6 +403,25 @@ mod tests {
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
+
+    /// The fingerprint and the write share one serializer; its bytes must stay
+    /// identical to the owned `LibrariesFile` form readers already expect.
+    #[test]
+    fn libraries_serialize_to_the_owned_file_form() {
+        let libraries = vec![LibraryConfig {
+            id: 3,
+            name: "Voices".into(),
+            sounds: vec![sound(9, "hello")],
+        }];
+        let owned = LibrariesFile {
+            version: LIBRARIES_VERSION,
+            libraries: libraries.clone(),
+        };
+        assert_eq!(
+            serialize_libraries(&libraries).unwrap(),
+            serde_json::to_string_pretty(&owned).unwrap()
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +59,12 @@ const METER_PEAK_HOLD: Duration = Duration::from_millis(900);
 /// Hard cap on rendered search results; protects a pathological library.
 const MAX_SEARCH_RESULTS: usize = 500;
 
+/// Hard cap on the activity log's memory; the oldest entry is dropped.
+const MAX_STATUS_ENTRIES: usize = 200;
+
+/// Hotkey pill text for a sound that has no binding yet.
+const HOTKEY_UNBOUND_LABEL: &str = "Set hotkey";
+
 const DEVELOPER_NAME: &str = "Mantum";
 
 /// Personal links shown under the credit line in About. Entries with an empty
@@ -117,6 +123,11 @@ pub struct Sound {
     pub library_id: u64,
     /// Lower-cased name + file name, built once so search never re-allocates.
     pub search_key: String,
+    /// Hotkey pill text, built with the other cached labels so painting never
+    /// formats it; `None` until the sound has a binding.
+    pub hotkey_label: Option<String>,
+    /// Path as the card tooltip and the activity log show it.
+    pub path_label: String,
     pub flash_until: Option<Instant>,
 }
 
@@ -149,6 +160,28 @@ struct StatusEntry {
     kind: StatusKind,
     text: String,
     at: Instant,
+}
+
+/// Append one activity entry. A repeated message refreshes the newest entry
+/// instead of stacking copies (UI-6), and the log stays at
+/// [`MAX_STATUS_ENTRIES`] by dropping the oldest — one rule for every caller.
+fn record_status(statuses: &mut VecDeque<StatusEntry>, kind: StatusKind, text: String) {
+    let now = Instant::now();
+    if let Some(last) = statuses.back_mut() {
+        if last.text == text {
+            last.kind = kind;
+            last.at = now;
+            return;
+        }
+    }
+    statuses.push_back(StatusEntry {
+        kind,
+        text,
+        at: now,
+    });
+    if statuses.len() > MAX_STATUS_ENTRIES {
+        statuses.pop_front();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -184,6 +217,30 @@ struct DragState {
 struct UndoDelete {
     sound: Sound,
     index: usize,
+}
+
+/// Buffers the board rebuilds from scratch every frame. Immediate mode throws
+/// this data away at the end of the frame, so it must never be cached across
+/// frames — but the allocations can be, which is all this is for.
+#[derive(Default)]
+struct BoardScratch {
+    /// Indices into `App::sounds` of the sounds the current filter shows.
+    filtered: Vec<usize>,
+    /// Ids of those sounds, for the one playback-state query per frame.
+    ids: Vec<u64>,
+    /// Sound id -> progress bar while it plays.
+    playing: HashMap<u64, Option<f32>>,
+    /// Actions collected while painting, applied after the board is drawn.
+    actions: Vec<Action>,
+}
+
+impl BoardScratch {
+    fn clear(&mut self) {
+        self.filtered.clear();
+        self.ids.clear();
+        self.playing.clear();
+        self.actions.clear();
+    }
 }
 
 /// What confirming the delete-library dialog does with the library's sounds.
@@ -248,7 +305,10 @@ pub struct App {
     search_pending: Option<Instant>,
     focus_search: bool,
     selected: Option<u64>,
-    statuses: Vec<StatusEntry>,
+    /// Reused per-frame buffers for the board (see [`BoardScratch`]).
+    board_scratch: BoardScratch,
+    /// Newest last; the oldest entry falls off the front at `MAX_STATUS_ENTRIES`.
+    statuses: VecDeque<StatusEntry>,
     show_log: bool,
     show_settings: bool,
     capture: Option<CaptureState>,
@@ -274,7 +334,9 @@ pub struct App {
     last_save: Instant,
     last_settings_json: String,
     last_libraries_json: String,
-    last_tip: String,
+    /// `(playing, total)` the tray tooltip was last built for; the text is only
+    /// formatted when this changes.
+    last_tip: Option<(usize, usize)>,
     next_tip: Instant,
     meter_db: [f32; 2],
     meter_peak_db: [f32; 2],
@@ -301,9 +363,9 @@ impl App {
         anim::set_user(cfg.animate_ui);
         anim::set_os(anim::os_animations_enabled());
 
-        let mut statuses = Vec::new();
+        let mut statuses = VecDeque::new();
         let mut push_status = |kind: StatusKind, text: String| {
-            statuses.push(StatusEntry {
+            statuses.push_back(StatusEntry {
                 kind,
                 text,
                 at: Instant::now(),
@@ -368,9 +430,11 @@ impl App {
                     ram,
                     library_id: library.id,
                     search_key: String::new(),
+                    hotkey_label: None,
+                    path_label: String::new(),
                     flash_until: None,
                 };
-                entry.refresh_search_key();
+                entry.refresh_labels();
                 sounds.push(entry);
             }
         }
@@ -507,6 +571,7 @@ impl App {
             search_pending: None,
             focus_search: false,
             selected: None,
+            board_scratch: BoardScratch::default(),
             statuses,
             show_log: false,
             show_settings: open_settings,
@@ -531,7 +596,7 @@ impl App {
             last_save: Instant::now(),
             last_settings_json: String::new(),
             last_libraries_json: String::new(),
-            last_tip: String::new(),
+            last_tip: None,
             next_tip: Instant::now(),
             meter_db: [METER_FLOOR_DB; 2],
             meter_peak_db: [METER_FLOOR_DB; 2],
@@ -766,13 +831,13 @@ impl App {
     // Commands
     // ---------------------------------------------------------------------
 
-    fn handle_actions(&mut self, actions: Vec<Action>, ctx: &egui::Context) {
+    fn handle_actions(&mut self, actions: &mut Vec<Action>, ctx: &egui::Context) {
         // An empty list means nothing changed. Requesting a frame here is what
         // kept the board at 60 fps (and a hidden window at 100% of a core).
         if actions.is_empty() {
             return;
         }
-        for action in actions {
+        for action in actions.drain(..) {
             match action {
                 Action::Play(id) => self.play_sound(id),
                 Action::Stop(id) => {
@@ -1061,8 +1126,8 @@ impl App {
         if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
             sound.path = path.clone();
             // Search matches the name and the *file* name; a relink must not keep
-            // the old path's key.
-            sound.refresh_search_key();
+            // the old path's key (or the old tooltip).
+            sound.refresh_labels();
         }
         self.playback.set_path(id, path.clone(), true);
         self.mark_dirty();
@@ -1097,30 +1162,29 @@ impl App {
             }
         }
 
+        // One canonical key per sound already on the board, then one per
+        // candidate: the naive loop re-canonicalized every existing path once
+        // per dropped file, which is O(files x library) syscalls.
+        let mut claimed: HashSet<String> = self
+            .sounds
+            .iter()
+            .map(|sound| canonical_key(&sound.path))
+            .collect();
+        // One running id for the whole batch instead of a full scan per file.
+        let mut next_id = free_sound_id(&self.sounds, self.next_id);
+
         for path in expanded {
             if !path.is_file() || !is_supported_file(&path) {
                 unsupported += 1;
                 continue;
             }
-            let canonical = path
-                .canonicalize()
-                .unwrap_or_else(|_| path.clone())
-                .to_string_lossy()
-                .to_lowercase();
-            let duplicate = self.sounds.iter().any(|s| {
-                s.path
-                    .canonicalize()
-                    .unwrap_or_else(|_| s.path.clone())
-                    .to_string_lossy()
-                    .to_lowercase()
-                    == canonical
-            });
-            if duplicate {
+            if !claim_unique(&mut claimed, &path) {
                 skipped += 1;
                 continue;
             }
 
-            let id = self.next_sound_id();
+            let id = next_id;
+            next_id += 1;
             let volume = 1.0;
             let name = display_name(&path);
             let mut sound = Sound {
@@ -1132,9 +1196,11 @@ impl App {
                 ram: false,
                 library_id: self.active_library,
                 search_key: String::new(),
+                hotkey_label: None,
+                path_label: String::new(),
                 flash_until: None,
             };
-            sound.refresh_search_key();
+            sound.refresh_labels();
             self.playback.register(id, path, volume);
             self.sounds.push(sound);
             added += 1;
@@ -1142,6 +1208,7 @@ impl App {
         }
 
         if added > 0 {
+            self.next_id = next_id;
             if let Some(id) = last_id {
                 self.selected = Some(id);
             }
@@ -1352,14 +1419,6 @@ impl App {
         self.dirty = true;
     }
 
-    fn next_sound_id(&mut self) -> u64 {
-        let id = self
-            .next_id
-            .max(self.sounds.iter().map(|s| s.id).max().unwrap_or(0) + 1);
-        self.next_id = id + 1;
-        id
-    }
-
     /// Snapshot the runtime tabs/sounds into their storage form.
     fn storage_libraries(&self) -> Vec<storage::LibraryConfig> {
         self.libraries
@@ -1471,23 +1530,7 @@ impl App {
         let text = text.into();
         #[cfg(debug_assertions)]
         eprintln!("[log] {text}");
-        // A repeated message refreshes the newest entry instead of stacking copies
-        // (UI-6): clicking a missing card five times must not flood the log.
-        if let Some(last) = self.statuses.last_mut() {
-            if last.text == text {
-                last.kind = kind;
-                last.at = Instant::now();
-                return;
-            }
-        }
-        self.statuses.push(StatusEntry {
-            kind,
-            text,
-            at: Instant::now(),
-        });
-        if self.statuses.len() > 200 {
-            self.statuses.remove(0);
-        }
+        record_status(&mut self.statuses, kind, text);
     }
 
     fn sound_name(&self, id: u64) -> String {
@@ -2461,10 +2504,12 @@ impl App {
 
     fn status_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         ui.horizontal_centered(|ui| {
-            let latest = self.statuses.last();
+            // Borrowed, not cloned: this runs once per frame while the newest
+            // line usually has not changed at all.
+            let latest = self.statuses.back();
             let (kind, text) = match latest {
-                Some(entry) => (entry.kind, entry.text.clone()),
-                None => (StatusKind::Info, "Ready".to_string()),
+                Some(entry) => (entry.kind, entry.text.as_str()),
+                None => (StatusKind::Info, "Ready"),
             };
             status_dot(ui, kind.color());
             ui.add(egui::Label::new(RichText::new(text).size(12.5).color(kind.color())).truncate());
@@ -2490,13 +2535,19 @@ impl App {
         self.toolbar(ui);
         ui.add_space(6.0);
 
-        let filtered = self.filtered_indices();
+        // The board's per-frame buffers live on `App`; taking them out lets the
+        // paint closures borrow the board immutably while filling them, and the
+        // next frame reuses the same allocations.
+        let mut scratch = std::mem::take(&mut self.board_scratch);
+        scratch.clear();
+
+        self.filtered_indices(&mut scratch.filtered);
         let active = self.engine.active();
         // `Some(progress)` while a voice plays; the inner option is the bar, which
         // stays `None` until the stream's duration is known.
-        let mut playing: HashMap<u64, Option<f32>> = HashMap::new();
         for voice in &active {
-            playing
+            scratch
+                .playing
                 .entry(voice.sound_id)
                 .and_modify(|known| {
                     if let Some(progress) = voice.progress {
@@ -2507,13 +2558,11 @@ impl App {
         }
 
         // Only query playback state for sounds that are actually on screen.
-        let ids: Vec<u64> = filtered
-            .iter()
-            .map(|&index| self.sounds[index].id)
-            .collect();
-        let infos = self.playback.info_map(&ids);
+        for &index in &scratch.filtered {
+            scratch.ids.push(self.sounds[index].id);
+        }
+        let infos = self.playback.info_map(&scratch.ids);
 
-        let mut actions = Vec::new();
         let mut rects: Vec<(u64, Rect)> = Vec::new();
         let mut rows: Vec<(u64, Rect)> = Vec::new();
         let allow_drag = self.search.trim().is_empty();
@@ -2532,7 +2581,7 @@ impl App {
                 .any(|sound| sound.library_id == self.active_library)
         {
             self.empty_state(ui);
-        } else if filtered.is_empty() {
+        } else if scratch.filtered.is_empty() {
             self.no_results(ui);
         } else {
             egui::ScrollArea::vertical()
@@ -2545,29 +2594,29 @@ impl App {
                             ui,
                             &self.sounds,
                             &self.libraries,
-                            &filtered,
+                            &scratch.filtered,
                             &infos,
-                            &playing,
+                            &scratch.playing,
                             allow_drag,
                             capture_id,
                             self.selected,
                             self.cfg.show_ram_state,
                             &mut rects,
-                            &mut actions,
+                            &mut scratch.actions,
                         ),
                         SoundLayout::List => draw_list(
                             ui,
                             &self.sounds,
                             &self.libraries,
-                            &filtered,
+                            &scratch.filtered,
                             &infos,
-                            &playing,
+                            &scratch.playing,
                             allow_drag,
                             capture_id,
                             self.selected,
                             self.cfg.show_ram_state,
                             &mut rows,
-                            &mut actions,
+                            &mut scratch.actions,
                         ),
                     }
                     ui.add_space(10.0);
@@ -2576,7 +2625,9 @@ impl App {
 
         self.card_rects = rects;
         self.row_rects = rows;
-        self.handle_actions(actions, ui.ctx());
+        // Drain, then hand the buffer back so the next frame reuses its capacity.
+        self.handle_actions(&mut scratch.actions, ui.ctx());
+        self.board_scratch = scratch;
 
         // Drop files overlay is drawn in update(); this only consumes the drop.
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -3091,9 +3142,11 @@ impl App {
         );
     }
 
-    fn filtered_indices(&self) -> Vec<usize> {
+    /// Fill `out` with the indices of the sounds the board shows, in tab order.
+    /// The buffer belongs to the caller so a frame does not allocate a new one.
+    fn filtered_indices(&self, out: &mut Vec<usize>) {
+        out.clear();
         let needle = self.filter_needle.trim();
-        let mut out = Vec::new();
         for (index, sound) in self.sounds.iter().enumerate() {
             if sound.library_id != self.active_library {
                 continue;
@@ -3106,7 +3159,6 @@ impl App {
                 break;
             }
         }
-        out
     }
     fn empty_state(&mut self, ui: &mut Ui) {
         let available = ui.available_size();
@@ -3640,33 +3692,44 @@ impl App {
         let Some(mut capture) = self.capture.take() else {
             return;
         };
-        let mut close = false;
         let mut save = false;
         let mut clear = false;
 
-        // Read the keyboard directly so the global hotkey wins over widgets.
-        let events = ctx.input(|i| i.events.clone());
-        for event in events {
-            if let egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } = event
-            {
-                if key == Key::Escape {
-                    close = true;
+        // Read the keyboard directly so the global hotkey wins over widgets. The
+        // events are walked inside the closure: cloning the frame's event list
+        // bought nothing when only the resulting chord matters.
+        let (escape, picked) = ctx.input(|input| {
+            let mut escape = false;
+            let mut picked: Option<Option<Hotkey>> = None;
+            for event in &input.events {
+                let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    continue;
+                };
+                if *key == Key::Escape {
+                    escape = true;
                     continue;
                 }
-                let plain = mods_from_egui(&modifiers).is_empty();
-                if (key == Key::Backspace || key == Key::Delete) && plain {
-                    capture.current = None;
+                if (*key == Key::Backspace || *key == Key::Delete)
+                    && mods_from_egui(modifiers).is_empty()
+                {
+                    picked = Some(None);
                     continue;
                 }
-                if let Some(hotkey) = Hotkey::from_egui(key, &modifiers) {
-                    capture.current = Some(hotkey);
+                if let Some(hotkey) = Hotkey::from_egui(*key, modifiers) {
+                    picked = Some(Some(hotkey));
                 }
             }
+            (escape, picked)
+        });
+        let mut close = escape;
+        if let Some(picked) = picked {
+            capture.current = picked;
         }
 
         let (title, subject) = match capture.target {
@@ -3786,6 +3849,7 @@ impl App {
                                 sound.ram = preload;
                             }
                             sound.hotkey = Some(hotkey);
+                            sound.refresh_hotkey_label();
                             log_line = Some(format!(
                                 "Hotkey {} assigned to \"{}\"",
                                 hotkey.label(),
@@ -3891,7 +3955,7 @@ impl App {
                     let mut old_name = None;
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
                         old_name = Some(std::mem::replace(&mut sound.name, name));
-                        sound.refresh_search_key();
+                        sound.refresh_labels();
                     }
                     if let Some(old) = old_name {
                         self.log(StatusKind::Info, format!("Renamed \"{old}\""));
@@ -3930,21 +3994,10 @@ impl App {
         if !self.show_log {
             return;
         }
-        let entries: Vec<(StatusKind, String, String)> = self
-            .statuses
-            .iter()
-            .rev()
-            .map(|entry| {
-                let secs = entry.at.elapsed().as_secs();
-                let when = if secs < 60 {
-                    format!("{secs}s ago")
-                } else {
-                    format!("{}m ago", secs / 60)
-                };
-                (entry.kind, when, entry.text.clone())
-            })
-            .collect();
         let mut close = false;
+        // Paint straight from the log: copying every entry into a fresh list each
+        // frame was the whole cost of this dialog.
+        let statuses = &self.statuses;
         modal_shell(
             ctx,
             Id::new("log_modal"),
@@ -3958,25 +4011,27 @@ impl App {
                     .max_height(380.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        if entries.is_empty() {
+                        if statuses.is_empty() {
                             ui.label(RichText::new("No activity yet.").color(theme::faint()));
                         }
-                        for (kind, when, text) in entries.iter() {
+                        for entry in statuses.iter().rev() {
+                            let secs = entry.at.elapsed().as_secs();
+                            let when = if secs < 60 {
+                                format!("{secs}s ago")
+                            } else {
+                                format!("{}m ago", secs / 60)
+                            };
                             ui.horizontal_top(|ui| {
-                                status_dot(ui, kind.color());
-                                ui.label(RichText::new(text).size(12.5).color(
-                                    if *kind == StatusKind::Error {
+                                status_dot(ui, entry.kind.color());
+                                ui.label(RichText::new(&entry.text).size(12.5).color(
+                                    if entry.kind == StatusKind::Error {
                                         theme::red()
                                     } else {
                                         theme::text()
                                     },
                                 ));
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new(when.clone())
-                                            .size(10.0)
-                                            .color(theme::faint()),
-                                    );
+                                    ui.label(RichText::new(when).size(10.0).color(theme::faint()));
                                 });
                             });
                             ui.add_space(2.0);
@@ -4316,22 +4371,31 @@ impl App {
             return;
         }
         self.next_tip = now + Duration::from_secs(3);
-        let playing = self
-            .engine
-            .active()
-            .iter()
-            .map(|v| v.sound_id)
-            .collect::<HashSet<_>>()
-            .len();
+        // The voice list is tiny and can briefly hold one id twice (a retrigger
+        // before the fade-out finishes), so each id counts once. Counting the
+        // ids directly beats building a set per call.
+        let active = self.engine.active();
+        let mut playing = 0usize;
+        for (index, voice) in active.iter().enumerate() {
+            if !active[..index]
+                .iter()
+                .any(|earlier| earlier.sound_id == voice.sound_id)
+            {
+                playing += 1;
+            }
+        }
+        let total = self.sounds.len();
+        let state = (playing, total);
+        if self.last_tip == Some(state) {
+            return;
+        }
+        self.last_tip = Some(state);
         let tip = if playing > 0 {
             format!("{APP_NAME} - {playing} playing")
         } else {
-            format!("{APP_NAME} - {} sounds", self.sounds.len())
+            format!("{APP_NAME} - {total} sounds")
         };
-        if tip != self.last_tip {
-            self.hotkeys.set_tooltip(tip.clone());
-            self.last_tip = tip;
-        }
+        self.hotkeys.set_tooltip(tip);
     }
 }
 
@@ -4553,10 +4617,41 @@ fn search_key(name: &str, path: &Path) -> String {
 }
 
 impl Sound {
-    /// Rebuild the cached search key. Call after the name or path changes.
-    fn refresh_search_key(&mut self) {
+    /// Rebuild the cached strings the board paints from. Call after the name or
+    /// path changes — this is the only place they are derived.
+    fn refresh_labels(&mut self) {
         self.search_key = search_key(&self.name, &self.path);
+        self.path_label = self.path.display().to_string();
+        self.refresh_hotkey_label();
     }
+
+    /// The pill text only; a rebind changes nothing else, so it does not pay for
+    /// the name/path rebuild.
+    fn refresh_hotkey_label(&mut self) {
+        self.hotkey_label = self.hotkey.map(|hotkey| hotkey.label());
+    }
+}
+
+/// Duplicate-detection key for a sound file: the canonical path when it
+/// resolves, the path as given otherwise, lower-cased because Windows paths
+/// compare case-insensitively.
+fn canonical_key(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase()
+}
+
+/// Claim `path` for this import batch; false when an earlier path already
+/// claimed the same file.
+fn claim_unique(claimed: &mut HashSet<String>, path: &Path) -> bool {
+    claimed.insert(canonical_key(path))
+}
+
+/// First id free for a batch of new sounds: past everything on the board, and
+/// never below the counter that keeps a removed sound's id from coming back.
+fn free_sound_id(sounds: &[Sound], next_id: u64) -> u64 {
+    next_id.max(sounds.iter().map(|sound| sound.id).max().unwrap_or(0) + 1)
 }
 
 /// A sound's only RAM-eligibility rule (FR-5.3.5 + FR-5.2.5): it needs a hotkey
@@ -4936,6 +5031,9 @@ fn draw_grid(
     let columns = (((width + spacing) / 238.0).floor() as usize).clamp(1, 6);
     let card_width =
         ((width - spacing * (columns.saturating_sub(1)) as f32) / columns as f32).max(170.0);
+    // One stand-in for sounds the registry has no entry for, so neither the map
+    // lookup nor its error strings are cloned per item.
+    let no_info = SoundInfo::default();
 
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -4946,13 +5044,13 @@ fn draw_grid(
                         ui.add_space(spacing);
                     }
                     let sound = &sounds[index];
-                    let info = infos.get(&sound.id).cloned().unwrap_or_default();
+                    let info = infos.get(&sound.id).unwrap_or(&no_info);
                     let state = playing.get(&sound.id).copied();
                     let (rect, card_actions) = sound_item(
                         ui,
                         Vec2::new(card_width, CARD_HEIGHT),
                         sound,
-                        &info,
+                        info,
                         state.is_some(),
                         state.flatten(),
                         drag_enabled,
@@ -4986,6 +5084,8 @@ fn draw_list(
     rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
+    // One stand-in for sounds the registry has no entry for (see `draw_grid`).
+    let no_info = SoundInfo::default();
     ui.horizontal_top(|ui| {
         let content_width = ui.available_width().min(1100.0);
         let pad = ((ui.available_width() - content_width) * 0.5).max(0.0);
@@ -4995,13 +5095,13 @@ fn draw_list(
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             for &index in filtered {
                 let sound = &sounds[index];
-                let info = infos.get(&sound.id).cloned().unwrap_or_default();
+                let info = infos.get(&sound.id).unwrap_or(&no_info);
                 let state = playing.get(&sound.id).copied();
                 let (rect, row_actions) = sound_item(
                     ui,
                     Vec2::new(ui.available_width(), ROW_HEIGHT),
                     sound,
-                    &info,
+                    info,
                     state.is_some(),
                     state.flatten(),
                     drag_enabled,
@@ -5113,6 +5213,7 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
 fn unbind(sound: &mut Sound) -> Option<Hotkey> {
     let hotkey = sound.hotkey.take()?;
     sound.ram = false;
+    sound.refresh_hotkey_label();
     Some(hotkey)
 }
 
@@ -5146,16 +5247,17 @@ fn hotkey_pill(
     );
     let press = anim::press(ui, id, pill.is_pointer_button_down_on());
     press_overlay(painter, rect, theme::RADIUS_MD, press);
-    let (label, color) = match sound.hotkey {
-        Some(hotkey) => (
-            hotkey.label(),
+    // The label is cached on the sound; only the colour depends on the modal.
+    let (label, color) = match &sound.hotkey_label {
+        Some(label) => (
+            label.as_str(),
             if capture_active {
                 theme::red()
             } else {
                 theme::text()
             },
         ),
-        None => ("Set hotkey".to_string(), theme::faint()),
+        None => (HOTKEY_UNBOUND_LABEL, theme::faint()),
     };
     painter.text(
         rect.center(),
@@ -5165,7 +5267,11 @@ fn hotkey_pill(
         color,
     );
     let clicked = pill.clicked();
-    pill.on_hover_text("Set a global hotkey (works while hidden)");
+    // A tooltip cannot show while the item is not hovered, and building it was a
+    // string allocation per item per frame.
+    if pill.hovered() {
+        pill.on_hover_text("Set a global hotkey (works while hidden)");
+    }
     clicked
 }
 
@@ -5215,15 +5321,17 @@ fn ram_chip(
         color,
     );
     let clicked = chip.clicked();
-    chip.on_hover_text(if missing {
-        "File is missing - click to locate"
-    } else if ram_active {
-        "In RAM - click to play from disk"
-    } else if info.refused {
-        "Too long or over the preload budget - always plays from disk"
-    } else {
-        "Playing from disk - click to keep in RAM"
-    });
+    if chip.hovered() {
+        chip.on_hover_text(if missing {
+            "File is missing - click to locate"
+        } else if ram_active {
+            "In RAM - click to play from disk"
+        } else if info.refused {
+            "Too long or over the preload budget - always plays from disk"
+        } else {
+            "Playing from disk - click to keep in RAM"
+        });
+    }
     if !clicked {
         return None;
     }
@@ -5491,7 +5599,7 @@ fn sound_item(
     libraries: &[Library],
     layout: ItemLayout,
 ) -> (Rect, Vec<Action>) {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
@@ -5604,7 +5712,9 @@ fn sound_item(
     if close.clicked() {
         actions.push(Action::Remove(sound.id));
     }
-    close.on_hover_text("Remove sound");
+    if close.hovered() {
+        close.on_hover_text("Remove sound");
+    }
 
     if let Some(volume_rect) = geometry.volume {
         volume::bar(
@@ -5632,13 +5742,16 @@ fn sound_item(
         actions.push(Action::Rename(sound.id));
     }
     // Rows name the decode error instead of the path; cards always show the path.
-    let tooltip = match (layout, &info.error) {
-        (ItemLayout::List, Some(error)) => error.clone(),
-        _ => sound.path.display().to_string(),
-    };
-    response
-        .on_hover_text(tooltip)
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    // Both are stable strings and only needed while hovered — building them per
+    // item per frame was pure waste.
+    if response.hovered() {
+        let tooltip = match (layout, &info.error) {
+            (ItemLayout::List, Some(error)) => error.as_str(),
+            _ => sound.path_label.as_str(),
+        };
+        response = response.on_hover_text(tooltip);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
     (rect, actions)
 }
@@ -6239,7 +6352,7 @@ mod tests {
     use super::*;
 
     fn bound_sound() -> Sound {
-        Sound {
+        let mut sound = Sound {
             id: 7,
             name: "Airhorn".to_string(),
             path: PathBuf::from("airhorn.wav"),
@@ -6247,9 +6360,13 @@ mod tests {
             volume: 1.0,
             ram: true,
             library_id: 1,
-            search_key: "airhorn".to_string(),
+            search_key: String::new(),
+            hotkey_label: None,
+            path_label: String::new(),
             flash_until: None,
-        }
+        };
+        sound.refresh_labels();
+        sound
     }
 
     fn sound_with_id(id: u64) -> Sound {
@@ -6328,20 +6445,31 @@ mod tests {
     }
 
     #[test]
-    fn relinking_rebuilds_the_search_key() {
+    fn relinking_rebuilds_the_search_key_and_the_tooltip() {
         let mut sound = bound_sound();
         sound.path = PathBuf::from("old").join("Clown_Horn.wav");
-        sound.refresh_search_key();
+        sound.refresh_labels();
         assert!(sound.search_key.contains("airhorn"));
         assert!(sound.search_key.contains("clown_horn"));
+        assert!(sound.path_label.ends_with("Clown_Horn.wav"));
 
         sound.path = PathBuf::from("new").join("Party_Horn.wav");
-        sound.refresh_search_key();
+        sound.refresh_labels();
         assert!(
             !sound.search_key.contains("clown_horn"),
             "the old file name must not linger"
         );
         assert!(sound.search_key.contains("party_horn"));
+        assert!(
+            sound.path_label.ends_with("Party_Horn.wav"),
+            "the card tooltip follows the new path"
+        );
+
+        // The pill text is cached beside them and follows the binding.
+        assert_eq!(sound.hotkey_label.as_deref(), Some("Ctrl+1"));
+        sound.hotkey = None;
+        sound.refresh_hotkey_label();
+        assert_eq!(sound.hotkey_label, None);
     }
 
     #[test]
@@ -6407,9 +6535,78 @@ mod tests {
         assert_eq!(dropped, Some("Ctrl+1".to_string()));
         assert_eq!(sound.hotkey, None);
         assert!(!sound.ram);
+        assert_eq!(
+            sound.hotkey_label, None,
+            "the pill text follows the binding"
+        );
         // Unbinding a sound that has no hotkey is a no-op, never a panic.
         assert_eq!(unbind(&mut sound), None);
         assert_eq!(sound.hotkey, None);
+    }
+
+    /// One bulk import must claim each file once and hand out fresh ids, without
+    /// re-canonicalizing the library for every candidate.
+    #[test]
+    fn a_bulk_import_claims_each_file_once() {
+        let path = temp_audio_path("claim");
+        let mut claimed = HashSet::new();
+        assert!(claim_unique(&mut claimed, &path));
+        assert!(
+            !claim_unique(&mut claimed, &path),
+            "the same file is a duplicate"
+        );
+        // Windows resolves the same file through a differently-cased path.
+        let shouty = PathBuf::from(path.to_string_lossy().to_uppercase());
+        assert!(
+            !claim_unique(&mut claimed, &shouty),
+            "case is not a distinct file"
+        );
+
+        // A path that does not resolve still has a stable key of its own.
+        let missing = std::env::temp_dir().join("sounddeck-test-claim-missing.wav");
+        assert!(claim_unique(&mut claimed, &missing));
+        assert!(!claim_unique(&mut claimed, &missing));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn new_sound_ids_start_past_everything_on_the_board() {
+        let empty: Vec<Sound> = Vec::new();
+        assert_eq!(free_sound_id(&empty, 1), 1);
+        let sounds = vec![sound_with_id(4), sound_with_id(9)];
+        assert_eq!(free_sound_id(&sounds, 1), 10, "past the highest id");
+        assert_eq!(
+            free_sound_id(&sounds, 20),
+            20,
+            "the counter wins when it is already ahead"
+        );
+    }
+
+    /// The activity log refreshes a repeated message and drops the oldest once
+    /// full, instead of shifting a vector on every overflow.
+    #[test]
+    fn the_activity_log_dedupes_and_caps() {
+        let mut statuses = VecDeque::new();
+        for index in 0..MAX_STATUS_ENTRIES + 5 {
+            record_status(&mut statuses, StatusKind::Info, format!("entry {index}"));
+        }
+        assert_eq!(statuses.len(), MAX_STATUS_ENTRIES);
+        assert_eq!(
+            statuses.front().map(|entry| entry.text.as_str()),
+            Some("entry 5"),
+            "the oldest entries fall off the front"
+        );
+
+        let before = statuses.len();
+        record_status(&mut statuses, StatusKind::Error, "entry 204".to_string());
+        assert_eq!(statuses.len(), before, "a repeat refreshes, never stacks");
+        let newest = statuses.back().expect("the log has an entry");
+        assert_eq!(newest.text, "entry 204");
+        assert!(
+            matches!(newest.kind, StatusKind::Error),
+            "the newer kind wins"
+        );
     }
 
     /// Grid and list used to be two renderers; this pins the geometry decisions

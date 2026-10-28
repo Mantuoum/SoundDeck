@@ -40,6 +40,7 @@ future session.
    - `2026-10-28 — created from codebase review; Part 1 (how it works), boundaries, conventions, guardrails.`
    - `2026-10-28 — batch 1 landed (plan.md): one key table + hotkey conflict rules (§2.7, §5), policy::Refusal (§2.5), audio invariants (§4.6), palette snapshot (§4.4), non-clobbering backups (§2.4), storage budget guardrail (§6.13).`
    - `2026-10-28 — batch 6b: delete-library dialog (§2.8), missing-sound trigger logs instead of opening the picker (§2.5), drag targets by id, Option progress until duration is known (§2.6), RAM eligibility in one predicate (§2.5).`
+   - `2026-10-28 — batch 6c (performance only): board scratch buffers + cached Sound labels (§2.8), activity log on a VecDeque with one append rule (§2.8), single storage serializer for fingerprint + write (§2.4).`
 
 ---
 
@@ -170,7 +171,9 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
   `.corrupt` snapshots never clobber an earlier one).
 - **Save lifecycle**: every mutation calls `mark_dirty()`; `tick` debounces saves
   (700 ms); `persist()` diffs **JSON fingerprints** and writes only changed files;
-  quit forces a final write.
+  quit forces a final write. `serialize_settings`/`serialize_libraries` are the only
+  serializer: the fingerprint string and the file are the same bytes (`save_*` just
+  writes what `serialize_*` produced).
 
 ### 2.5 Playback registry & RAM policy (`playback/`)
 
@@ -278,6 +281,13 @@ pill, RAM chip, missing state, log-curve volume bar, progress line — drawn onl
 total duration is known — context menu). Delete removes with one-slot undo (`Ctrl+Z`).
 Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
 remove them from the board (files untouched); cancel leaves everything alone.
+
+Per-frame board data (visible indices, ids, playing/progress map, collected `Action`s)
+is rebuilt each frame into `App::board_scratch` (clear + refill) so the *content* is
+always fresh while the allocations are not. Stable per-sound strings are cached on
+`Sound` — `search_key`, `hotkey_label`, `path_label` — and rebuilt together by
+`refresh_labels()` (or `refresh_hotkey_label()` when only the binding changed); call it
+after any name/path/hotkey change, never re-derive them while painting.
 
 **Modals** (transparent backdrop, `modal_header` + red-hover close): hotkey capture
 (reads raw keyboard events, Esc cancels), rename, delete library, activity log (last 200
