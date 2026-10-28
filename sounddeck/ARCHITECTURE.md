@@ -263,6 +263,9 @@ loop is a separate field and is deliberately untouched by both.
 
 The mixer thread wakes every 1 ms, renders 5 ms chunks, catches up at most four chunks
 if late, and pushes to each `Ring` only when that output has a consumer.
+`Mixer::active()` reports each live voice with `progress: Option<f32>`: `None` while a
+stream's total length is still unknown (the UI then draws no progress line instead of a
+full one), `Some(0..=1)` once the probe has reported the duration.
 
 ### Output rings and meters
 
@@ -381,13 +384,15 @@ above-normal so audio still meets its deadlines.
 - **Main page:** search toolbar + RAM pill, grid/list of the active library, empty/no
   results states, drop handling.
 - **Cards/rows:** name, hotkey pill, RAM chip, missing state, volume bar, progress
-  line, context menu (play, locate, reveal, move, rename, remove).
+  line (only once the total duration is known), context menu (play, locate, reveal,
+  move, rename, remove).
 - **Actions:** cards/rows and the library bar push `Action` values; `handle_actions`
   drains one buffer per frame. Singleton chrome (sidebar, title bar, status bar,
   Settings, tray) mutates directly - wrapping a single `ComboBox` in an event gains
   nothing.
 - **Selection/search/drag:** search filters name/path; drag reorders or moves between
-  libraries; Delete/undo uses a one-slot `UndoDelete`.
+  libraries (the drop target is resolved by sound id, so a list that shifted mid-drag
+  cannot move the wrong sound); Delete/undo uses a one-slot `UndoDelete`.
 
 ### Settings screen
 
@@ -403,13 +408,18 @@ above-normal so audio still meets its deadlines.
 - Shared helpers: `settings_group`, `settings_row`, `settings_switch`,
   `settings_nav_item`, `settings_back`.
 - Board-only shortcuts are disabled while Settings is open; `Ctrl+Q` still quits.
+- While a text field has focus (`ctx.memory().focused()`), every board shortcut is
+  suppressed: add files, focus search, layout, undo, delete, play, rename. `Ctrl+Q`
+  and `Ctrl+,` stay available, and `Esc` never stops playback from a focused field.
 
 ### Modals
 
-Capture hotkey, rename, and activity log use `egui::Modal` with a **transparent**
-backdrop, so the board stays visible without a dim layer and input cannot leak through.
-They share `modal_header` + `close_button` (red hover), are centred over the board area,
-and take keyboard input directly where needed (hotkey capture).
+Capture hotkey, rename, delete library, and activity log use `egui::Modal` with a
+**transparent** backdrop, so the board stays visible without a dim layer and input
+cannot leak through. They share `modal_header` + `close_button` (red hover), are centred
+over the board area, and take keyboard input directly where needed (hotkey capture).
+The delete-library dialog states the sound count and offers move-to-a-library,
+delete-the-sounds, or cancel; nothing is applied until a button is pressed.
 The sidebar divider is painted inside the central-panel layer, not as a separate
 top-level layer, so it can never draw over modals or popups.
 
@@ -447,20 +457,23 @@ skips duplicates, assigns IDs, registers with `Playback`, updates the library, s
 
 Card click/Space/hotkey → `Playback::play`. Cached RAM samples go straight to
 `Engine::play`; otherwise the loader decodes, then plays. `Engine::play` fades out all
-current voices (exclusive) and starts the new one. If the file is missing, the UI
-offers Locate.
+current voices (exclusive) and starts the new one. If the file is missing, the trigger
+logs an error and the sound is relinked from its context menu (`Locate`).
 
 ### Libraries and active tab
 
 Tabs are `Library { id, name }`; sounds carry `library_id`. Switching calls
 `sync_active_library`: rebinds hotkeys for the new tab, sets RAM retention, preloads,
-and stops sound playback. The loop is unaffected.
+and stops sound playback. The loop is unaffected. Deleting a library opens a dialog
+(`deleting` state) that moves its sounds to a chosen library or removes them from the
+board; audio files are never touched, and the last library cannot be deleted.
 
 ### Missing files
 
 `Playback::info` reports missing if no samples and the path is gone. Cards/rows show a
-red state and clicking opens the file picker; `relink_sound` updates the path and
-reloads. The folder is never scanned automatically.
+red state; triggering the sound logs `file missing - right-click > Locate` and does
+nothing else, and `Locate` in the context menu opens the picker. `relink_sound` updates
+the path (and its search key) and reloads. The folder is never scanned automatically.
 
 ### Volume and gain
 

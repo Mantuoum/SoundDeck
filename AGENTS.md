@@ -39,6 +39,7 @@ future session.
 4. **Update log** (newest last):
    - `2026-10-28 — created from codebase review; Part 1 (how it works), boundaries, conventions, guardrails.`
    - `2026-10-28 — batch 1 landed (plan.md): one key table + hotkey conflict rules (§2.7, §5), policy::Refusal (§2.5), audio invariants (§4.6), palette snapshot (§4.4), non-clobbering backups (§2.4), storage budget guardrail (§6.13).`
+   - `2026-10-28 — batch 6b: delete-library dialog (§2.8), missing-sound trigger logs instead of opening the picker (§2.5), drag targets by id, Option progress until duration is known (§2.6), RAM eligibility in one predicate (§2.5).`
 
 ---
 
@@ -179,7 +180,7 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
 
 **`play(id)` trigger algorithm** (UI *or* hotkey thread):
 1. Samples resident? → `engine.play` instantly.
-2. File gone? → `Failed{missing}` event (UI offers Locate).
+2. File gone? → `Failed{missing}` event (the UI logs it; relinking is context-menu → Locate).
 3. Already decoding? → `pending_play = true`.
 4. `retain` on? → queue decode job to the single loader thread; play when it lands.
 5. Else **stream from disk** via `stream::spawn_once` (bounded 8×1024-frame channel,
@@ -273,11 +274,15 @@ NFR-8.1.x).
 **Board**: sidebar (Monitor/Cable device + volume sliders + link, optional master gain
 0..+12 dB right-click-reset, peak meter, stop-all card, loop card, Settings button),
 toolbar (search, RAM pill), grid/list of the active library, cards/rows (name, hotkey
-pill, RAM chip, missing state, log-curve volume bar, progress line, context menu).
-Delete removes with one-slot undo (`Ctrl+Z`).
+pill, RAM chip, missing state, log-curve volume bar, progress line — drawn only once the
+total duration is known — context menu). Delete removes with one-slot undo (`Ctrl+Z`).
+Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
+remove them from the board (files untouched); cancel leaves everything alone.
 
 **Modals** (transparent backdrop, `modal_header` + red-hover close): hotkey capture
-(reads raw keyboard events, Esc cancels), rename, activity log (last 200 entries).
+(reads raw keyboard events, Esc cancels), rename, delete library, activity log (last 200
+entries). While any of them is open, `global_shortcuts` stands down. Outside modals, a
+focused text field suppresses every board shortcut (quit and Settings stay live).
 
 **Settings** (immediate save, no Apply): Playback (loop + hotkey RAM), Appearance
 (theme + motion), Window (minimize-to-tray, gain slider visibility), About.

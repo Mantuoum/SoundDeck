@@ -435,11 +435,6 @@ pub enum TrayCommand {
 pub enum ServiceEvent {
     Pressed(u64),
     StopAll,
-    Registered {
-        sound_id: u64,
-        hotkey: Hotkey,
-        error: Option<String>,
-    },
     Tray(TrayCommand),
     TrayReady(bool),
     Fatal(String),
@@ -815,13 +810,6 @@ mod win {
                         .iter()
                         .map(|(sound_id, hotkey)| (*hotkey, *sound_id))
                         .collect();
-                    for (sound_id, hk) in bindings {
-                        state.emit(ServiceEvent::Registered {
-                            sound_id,
-                            hotkey: hk,
-                            error: None,
-                        });
-                    }
                 }
                 Command::SetStopAll(hotkey) => {
                     state.hook.borrow_mut().stop_all = hotkey;

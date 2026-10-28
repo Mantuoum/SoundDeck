@@ -291,7 +291,7 @@ fn run_diag() -> Result<(), String> {
             println!(
                 "active voices: {} progress {:.2}",
                 active.len(),
-                active.first().map(|v| v.progress).unwrap_or(0.0)
+                active.first().and_then(|v| v.progress).unwrap_or(0.0)
             );
             if active.is_empty() {
                 break;

@@ -379,20 +379,28 @@ impl Mixer {
         self.voices
             .iter()
             .filter(|v| !v.finished && v.stop_at.is_none())
-            .map(|v| {
-                let total = v.total_frames().unwrap_or(0).max(1) as f32;
-                ActiveSound {
-                    sound_id: v.sound_id,
-                    progress: (v.position as f32 / total).clamp(0.0, 1.0),
-                }
+            .map(|v| ActiveSound {
+                sound_id: v.sound_id,
+                progress: voice_progress(v),
             })
             .collect()
     }
 }
 
+/// How far a voice has played, or `None` while its total length is unknown.
+///
+/// A stream that has not been probed yet has no denominator; reporting 1.0 there
+/// would peg the progress line at full for the whole sound, so the UI is told to
+/// draw nothing instead (the bar appears once the probe lands).
+fn voice_progress(voice: &Voice) -> Option<f32> {
+    let total = voice.total_frames().filter(|total| *total > 0)?;
+    Some((voice.position as f32 / total as f32).clamp(0.0, 1.0))
+}
+
 pub struct ActiveSound {
     pub sound_id: u64,
-    pub progress: f32,
+    /// `None` when the total length is unknown (no progress bar yet).
+    pub progress: Option<f32>,
 }
 
 struct DeviceHandle {
@@ -1212,6 +1220,52 @@ mod loop_tests {
             }
         }
         assert!(mixer.voices.is_empty(), "stream voice never finished");
+    }
+
+    #[test]
+    fn progress_is_none_until_the_stream_length_is_known() {
+        let (_tx, rx) = crossbeam_channel::bounded(4);
+        let voice = Voice {
+            sound_id: 3,
+            source: VoiceSource::Stream {
+                rx,
+                chunk: Vec::new(),
+                pos: 0,
+                ended: false,
+            },
+            position: 480,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+            total_frames: None,
+        };
+        assert_eq!(
+            voice_progress(&voice),
+            None,
+            "an unprobed stream must not report a full bar"
+        );
+
+        let mut mixer = idle_mixer(None);
+        mixer.voices.push(voice);
+        let active = mixer.active();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].progress, None);
+
+        // Once the probe reports a length, the fraction behaves as before.
+        mixer.voices[0].total_frames = Some(960);
+        assert_eq!(mixer.active()[0].progress, Some(0.5));
+
+        // A RAM buffer always knows its own length.
+        let buffered = Voice {
+            sound_id: 4,
+            source: VoiceSource::Buffer(Arc::new(vec![0.0f32; MIX_CHUNK_FRAMES * CHANNELS * 2])),
+            position: MIX_CHUNK_FRAMES,
+            gain: 1.0,
+            stop_at: None,
+            finished: false,
+            total_frames: None,
+        };
+        assert_eq!(voice_progress(&buffered), Some(0.5));
     }
 
     #[test]

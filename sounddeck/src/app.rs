@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
-    self, Align, Align2, Button, Color32, ComboBox, CornerRadius, Frame, Id, Key, LayerId, Layout,
-    Margin, Order, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
+    self, Align, Align2, Button, Color32, ComboBox, CornerRadius, FontId, Frame, Id, Key, LayerId,
+    Layout, Margin, Order, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
     ViewportCommand,
 };
 
@@ -32,6 +32,29 @@ use crate::ui::volume;
 const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
+
+/// Width of the chip the drag ghost shows for a list row (a card-sized ghost
+/// would be wider than the row it came from).
+const ROW_DRAG_WIDTH: f32 = 220.0;
+
+/// Narrowest row volume track worth showing; below this the rows are squashed
+/// and the bar would be a stub, so it is dropped entirely.
+const MIN_VOLUME_WIDTH: f32 = 80.0;
+
+/// Inner margin of a modal body; the activity log tightens it to fit more rows.
+const MODAL_MARGIN: i8 = 18;
+const MODAL_MARGIN_COMPACT: i8 = 12;
+
+/// Body width of the delete-library dialog: wide enough for the action row and
+/// the target-library combobox without wrapping.
+const DELETE_MODAL_WIDTH: f32 = 460.0;
+
+/// Level-meter motion: instant attack, `METER_RELEASE_DB_PER_SEC` release, and a
+/// peak that holds for `METER_PEAK_HOLD` before falling at its own rate.
+const METER_FLOOR_DB: f32 = -60.0;
+const METER_RELEASE_DB_PER_SEC: f32 = 24.0;
+const METER_PEAK_RELEASE_DB_PER_SEC: f32 = 18.0;
+const METER_PEAK_HOLD: Duration = Duration::from_millis(900);
 
 /// Hard cap on rendered search results; protects a pathological library.
 const MAX_SEARCH_RESULTS: usize = 500;
@@ -87,7 +110,6 @@ pub struct Sound {
     pub name: String,
     pub path: PathBuf,
     pub hotkey: Option<Hotkey>,
-    pub hotkey_error: Option<String>,
     pub volume: f32,
     /// Only meaningful for sounds with a hotkey. Everything else always plays
     /// from disk.
@@ -154,7 +176,6 @@ enum RenameTarget {
 
 struct DragState {
     sound_id: u64,
-    from: usize,
     size: Vec2,
     name: String,
     hotkey: String,
@@ -163,6 +184,20 @@ struct DragState {
 struct UndoDelete {
     sound: Sound,
     index: usize,
+}
+
+/// What confirming the delete-library dialog does with the library's sounds.
+#[derive(Clone, Copy)]
+enum LibraryDeleteOutcome {
+    Move(u64),
+    Remove,
+}
+
+/// Open delete-library dialog. `target_id` is the library the move option sends
+/// the sounds to (the first remaining one until the user picks another).
+struct DeleteLibraryState {
+    library_id: u64,
+    target_id: u64,
 }
 
 enum Action {
@@ -178,7 +213,7 @@ enum Action {
     Locate(u64),
     ShowInExplorer(u64),
     Volume(u64, f32),
-    DragStart { id: u64, index: usize, size: Vec2 },
+    DragStart { id: u64, size: Vec2 },
     DragStop,
 }
 
@@ -220,9 +255,10 @@ pub struct App {
     /// Global stop-all binding, parsed from settings.
     stop_all: Option<Hotkey>,
     renaming: Option<RenameState>,
+    deleting: Option<DeleteLibraryState>,
     drag: Option<DragState>,
-    card_rects: Vec<(usize, Rect)>,
-    row_rects: Vec<(usize, Rect)>,
+    card_rects: Vec<(u64, Rect)>,
+    row_rects: Vec<(u64, Rect)>,
     undo: Option<UndoDelete>,
     last_dir: Option<PathBuf>,
     next_id: u64,
@@ -323,19 +359,19 @@ impl App {
                     None => None,
                 };
                 let ram = hotkey.is_some() && sound.ram.unwrap_or(cfg.preload_hotkey_sounds);
-                let key = search_key(&sound.name, &path);
-                sounds.push(Sound {
+                let mut entry = Sound {
                     id: sound.id,
                     name: sound.name.clone(),
                     path,
                     hotkey,
-                    hotkey_error: None,
                     volume: sound.volume.clamp(0.0, 1.0),
                     ram,
                     library_id: library.id,
-                    search_key: key,
+                    search_key: String::new(),
                     flash_until: None,
-                });
+                };
+                entry.refresh_search_key();
+                sounds.push(entry);
             }
         }
 
@@ -477,6 +513,7 @@ impl App {
             capture: None,
             stop_all,
             renaming: None,
+            deleting: None,
             drag: None,
             card_rects: Vec::new(),
             row_rects: Vec::new(),
@@ -496,8 +533,8 @@ impl App {
             last_libraries_json: String::new(),
             last_tip: String::new(),
             next_tip: Instant::now(),
-            meter_db: [-60.0; 2],
-            meter_peak_db: [-60.0; 2],
+            meter_db: [METER_FLOOR_DB; 2],
+            meter_peak_db: [METER_FLOOR_DB; 2],
             meter_peak_at: [Instant::now(); 2],
             loop_state: LoopState::Idle,
             loop_missing: false,
@@ -615,31 +652,6 @@ impl App {
                     }
                     ctx.request_repaint();
                 }
-                ServiceEvent::Registered {
-                    sound_id,
-                    hotkey,
-                    error,
-                } => {
-                    let mut log_line = None;
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == sound_id) {
-                        match &error {
-                            Some(err) => {
-                                sound.hotkey_error = Some(err.clone());
-                                log_line = Some(format!(
-                                    "Hotkey {} for \"{}\": {err}",
-                                    hotkey.label(),
-                                    sound.name
-                                ));
-                            }
-                            None => {
-                                sound.hotkey_error = None;
-                            }
-                        }
-                    }
-                    if let Some(line) = log_line {
-                        self.log(StatusKind::Error, line);
-                    }
-                }
                 ServiceEvent::Tray(command) => {
                     self.handle_tray(command, ctx);
                 }
@@ -685,8 +697,8 @@ impl App {
         self.hidden = false;
         self.restored_at = Instant::now();
         self.was_minimized = false;
-        self.meter_db = [-60.0; 2];
-        self.meter_peak_db = [-60.0; 2];
+        self.meter_db = [METER_FLOOR_DB; 2];
+        self.meter_peak_db = [METER_FLOOR_DB; 2];
         crate::hotkeys::set_taskbar_tab(true);
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -762,14 +774,7 @@ impl App {
         }
         for action in actions {
             match action {
-                Action::Play(id) => {
-                    self.selected = Some(id);
-                    if self.playback.info(id).missing {
-                        self.locate_sound(id);
-                    } else {
-                        self.playback.play(id);
-                    }
-                }
+                Action::Play(id) => self.play_sound(id),
                 Action::Stop(id) => {
                     self.playback.stop_sound(id);
                 }
@@ -823,12 +828,11 @@ impl App {
                         self.mark_dirty();
                     }
                 }
-                Action::DragStart { id, index, size } => {
+                Action::DragStart { id, size } => {
                     if self.search.trim().is_empty() {
                         if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                             self.drag = Some(DragState {
                                 sound_id: id,
-                                from: index,
                                 size,
                                 name: sound.name.clone(),
                                 hotkey: sound.hotkey.map(|h| h.label()).unwrap_or_default(),
@@ -840,28 +844,12 @@ impl App {
                     if let Some(drag) = self.drag.take() {
                         let pointer = ctx.input(|i| i.pointer.interact_pos());
                         if let Some(pointer) = pointer {
-                            let target = self
-                                .card_rects
-                                .iter()
-                                .chain(self.row_rects.iter())
-                                .find(|(_, rect)| rect.contains(pointer))
-                                .map(|(index, _)| *index);
+                            // Rects carry ids, so a list that shifted since the
+                            // drag started still resolves to the right sound.
+                            let target = drop_target(&self.card_rects, pointer)
+                                .or_else(|| drop_target(&self.row_rects, pointer));
                             if let Some(target) = target {
-                                // Resolve the source by id. `from` was captured
-                                // when the drag started; if anything shifted the
-                                // list since, that index would move the wrong
-                                // sound.
-                                let from = self
-                                    .sounds
-                                    .iter()
-                                    .position(|sound| sound.id == drag.sound_id)
-                                    .unwrap_or(drag.from);
-                                if from != target
-                                    && from < self.sounds.len()
-                                    && target < self.sounds.len()
-                                {
-                                    let sound = self.sounds.remove(from);
-                                    self.sounds.insert(target, sound);
+                                if move_sound_to_id(&mut self.sounds, drag.sound_id, target) {
                                     self.selected = Some(drag.sound_id);
                                     self.mark_dirty();
                                 }
@@ -876,7 +864,21 @@ impl App {
 
     fn play_sound(&mut self, id: u64) {
         self.selected = Some(id);
+        if self.playback.info(id).missing {
+            self.log_missing_sound(id);
+            return;
+        }
         self.playback.play(id);
+    }
+
+    /// A missing file is reported, never silently played and never a surprise
+    /// file dialog: relinking is an explicit menu action (FR-5.3.6).
+    fn log_missing_sound(&mut self, id: u64) {
+        let label = self.sound_name(id);
+        self.log(
+            StatusKind::Error,
+            format!("\"{label}\": file missing - right-click > Locate"),
+        );
     }
 
     fn remove_sound(&mut self, id: u64) {
@@ -903,23 +905,14 @@ impl App {
             self.log(StatusKind::Info, "Nothing to undo");
             return;
         };
-        let index = undo.index.min(self.sounds.len());
-        let sound = undo.sound;
-        let id = sound.id;
-        let path = sound.path.clone();
-        let volume = sound.volume;
-        self.playback.register(id, path, volume);
-        self.playback.mark_missing(
-            id,
-            !self.sounds.iter().any(|s| s.id == id && s.path.exists()),
-            None,
-        );
-        let label = sound.name.clone();
-        self.sounds.insert(index, sound);
+        let id = restore_sound(&mut self.sounds, &self.playback, undo);
         self.selected = Some(id);
         self.sync_active_library();
         self.mark_dirty();
-        self.log(StatusKind::Success, format!("Restored \"{label}\""));
+        self.log(
+            StatusKind::Success,
+            format!("Restored \"{}\"", self.sound_name(id)),
+        );
     }
 
     fn open_file_dialog(&mut self) {
@@ -1067,6 +1060,9 @@ impl App {
         }
         if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
             sound.path = path.clone();
+            // Search matches the name and the *file* name; a relink must not keep
+            // the old path's key.
+            sound.refresh_search_key();
         }
         self.playback.set_path(id, path.clone(), true);
         self.mark_dirty();
@@ -1127,18 +1123,18 @@ impl App {
             let id = self.next_sound_id();
             let volume = 1.0;
             let name = display_name(&path);
-            let sound = Sound {
+            let mut sound = Sound {
                 id,
-                name: name.clone(),
+                name,
                 path: path.clone(),
                 hotkey: None,
-                hotkey_error: None,
                 volume,
                 ram: false,
                 library_id: self.active_library,
-                search_key: search_key(&name, &path),
+                search_key: String::new(),
                 flash_until: None,
             };
+            sound.refresh_search_key();
             self.playback.register(id, path, volume);
             self.sounds.push(sound);
             added += 1;
@@ -1262,8 +1258,7 @@ impl App {
         self.sync_hotkeys();
         for sound in &self.sounds {
             self.playback.ensure_lock(sound.id);
-            let active = sound.library_id == self.active_library;
-            let keep = active && sound.hotkey.is_some() && sound.ram;
+            let keep = ram_eligible(sound, self.active_library) && sound.ram;
             self.playback.set_retain(sound.id, keep);
             if keep {
                 self.playback.ensure_loaded(sound.id);
@@ -1275,11 +1270,12 @@ impl App {
         let mut eligible = 0usize;
         let mut on = 0usize;
         for sound in &self.sounds {
-            if sound.library_id == self.active_library && sound.hotkey.is_some() {
-                eligible += 1;
-                if sound.ram {
-                    on += 1;
-                }
+            if !ram_eligible(sound, self.active_library) {
+                continue;
+            }
+            eligible += 1;
+            if sound.ram {
+                on += 1;
             }
         }
         if eligible == 0 {
@@ -1299,18 +1295,25 @@ impl App {
     }
 
     fn set_all_hotkey_ram(&mut self, on: bool) {
+        let active = self.active_library;
+        let mut touched = Vec::new();
         let mut changed = false;
         for sound in &mut self.sounds {
-            if sound.hotkey.is_none() || sound.library_id != self.active_library {
+            // Inactive libraries and hotkey-less sounds are never RAM-eligible;
+            // they keep following the sync path instead of being retained here.
+            if !ram_eligible(sound, active) {
                 continue;
             }
             if sound.ram != on {
                 sound.ram = on;
                 changed = true;
             }
-            self.playback.set_retain(sound.id, on);
+            touched.push(sound.id);
+        }
+        for id in touched {
+            self.playback.set_retain(id, on);
             if on {
-                self.playback.ensure_loaded(sound.id);
+                self.playback.ensure_loaded(id);
             }
         }
         if changed || self.cfg.preload_hotkey_sounds != on {
@@ -1320,10 +1323,11 @@ impl App {
     }
 
     fn toggle_sound_ram(&mut self, id: u64) {
+        let active = self.active_library;
         let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) else {
             return;
         };
-        if sound.hotkey.is_none() {
+        if !ram_eligible(sound, active) {
             return;
         }
         sound.ram = !sound.ram;
@@ -1467,6 +1471,15 @@ impl App {
         let text = text.into();
         #[cfg(debug_assertions)]
         eprintln!("[log] {text}");
+        // A repeated message refreshes the newest entry instead of stacking copies
+        // (UI-6): clicking a missing card five times must not flood the log.
+        if let Some(last) = self.statuses.last_mut() {
+            if last.text == text {
+                last.kind = kind;
+                last.at = Instant::now();
+                return;
+            }
+        }
         self.statuses.push(StatusEntry {
             kind,
             text,
@@ -1483,6 +1496,14 @@ impl App {
             .find(|s| s.id == id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "Unknown sound".to_string())
+    }
+
+    fn library_name(&self, id: u64) -> String {
+        self.libraries
+            .iter()
+            .find(|library| library.id == id)
+            .map(|library| library.name.clone())
+            .unwrap_or_else(|| "Unknown library".to_string())
     }
 
     // ---------------------------------------------------------------------
@@ -2471,11 +2492,17 @@ impl App {
 
         let filtered = self.filtered_indices();
         let active = self.engine.active();
-        let mut progress: HashMap<u64, f32> = HashMap::new();
+        // `Some(progress)` while a voice plays; the inner option is the bar, which
+        // stays `None` until the stream's duration is known.
+        let mut playing: HashMap<u64, Option<f32>> = HashMap::new();
         for voice in &active {
-            progress
+            playing
                 .entry(voice.sound_id)
-                .and_modify(|p| *p = p.max(voice.progress))
+                .and_modify(|known| {
+                    if let Some(progress) = voice.progress {
+                        *known = Some(known.unwrap_or(0.0).max(progress));
+                    }
+                })
                 .or_insert(voice.progress);
         }
 
@@ -2487,8 +2514,8 @@ impl App {
         let infos = self.playback.info_map(&ids);
 
         let mut actions = Vec::new();
-        let mut rects: Vec<(usize, Rect)> = Vec::new();
-        let mut rows: Vec<(usize, Rect)> = Vec::new();
+        let mut rects: Vec<(u64, Rect)> = Vec::new();
+        let mut rows: Vec<(u64, Rect)> = Vec::new();
         let allow_drag = self.search.trim().is_empty();
         let capture_id = self
             .capture
@@ -2520,7 +2547,7 @@ impl App {
                             &self.libraries,
                             &filtered,
                             &infos,
-                            &progress,
+                            &playing,
                             allow_drag,
                             capture_id,
                             self.selected,
@@ -2534,7 +2561,7 @@ impl App {
                             &self.libraries,
                             &filtered,
                             &infos,
-                            &progress,
+                            &playing,
                             allow_drag,
                             capture_id,
                             self.selected,
@@ -2615,7 +2642,7 @@ impl App {
                                             && ui
                                                 .button(RichText::new("Delete").color(theme::red()))
                                                 .on_hover_text(
-                                                    "Sounds are moved to another library",
+                                                    "Choose whether its sounds move or go",
                                                 )
                                                 .clicked()
                                         {
@@ -2653,6 +2680,17 @@ impl App {
         }
     }
 
+    /// Drops the per-tab view state (search text, selection) and re-derives what
+    /// the board shows for the now-active library: bindings, RAM retention, and
+    /// the pending save. Callers that also change the active library set it
+    /// first.
+    fn reset_view_state(&mut self) {
+        self.search.clear();
+        self.selected = None;
+        self.sync_active_library();
+        self.mark_dirty();
+    }
+
     fn switch_library(&mut self, id: u64) {
         if id == self.active_library || !self.libraries.iter().any(|l| l.id == id) {
             return;
@@ -2660,10 +2698,7 @@ impl App {
         self.engine.stop_all();
         self.active_library = id;
         self.page_fade = Instant::now();
-        self.search.clear();
-        self.selected = None;
-        self.sync_active_library();
-        self.mark_dirty();
+        self.reset_view_state();
         self.log(
             StatusKind::Info,
             format!(
@@ -2685,55 +2720,253 @@ impl App {
             name: name.clone(),
         });
         self.active_library = id;
-        self.search.clear();
-        self.selected = None;
-        self.mark_dirty();
+        self.reset_view_state();
         self.renaming = Some(RenameState {
             target: RenameTarget::Library(id),
             buffer: name,
             focus: true,
         });
-        self.sync_active_library();
     }
 
+    /// Opens the delete-library dialog (FR-5.2.3). Nothing is deleted until the
+    /// user chooses; the last remaining library is refused here, so the dialog can
+    /// always offer somewhere to move its sounds.
     fn delete_library(&mut self, id: u64) {
         if self.libraries.len() <= 1 {
             self.log(StatusKind::Warning, "At least one library is required");
             return;
         }
-        let Some(index) = self.libraries.iter().position(|l| l.id == id) else {
+        if !self.libraries.iter().any(|library| library.id == id) {
+            return;
+        }
+        let target_id = self
+            .libraries
+            .iter()
+            .find(|library| library.id != id)
+            .map(|library| library.id);
+        let Some(target_id) = target_id else {
+            return;
+        };
+        self.deleting = Some(DeleteLibraryState {
+            library_id: id,
+            target_id,
+        });
+    }
+
+    /// Applies the dialog: move the sounds to `target`, or drop them from the
+    /// board. Neither touches the audio files (FR-5.3.14).
+    fn confirm_delete_library(&mut self, id: u64, outcome: LibraryDeleteOutcome) {
+        let Some(fallback) = self
+            .libraries
+            .iter()
+            .find(|library| library.id != id)
+            .map(|library| library.id)
+        else {
+            self.log(StatusKind::Warning, "At least one library is required");
+            return;
+        };
+        let Some(index) = self.libraries.iter().position(|library| library.id == id) else {
             return;
         };
         let removed = self.libraries.remove(index);
-        let fallback = self.libraries[0].clone();
-        let mut moved = 0usize;
-        for sound in &mut self.sounds {
-            if sound.library_id == removed.id {
-                sound.library_id = fallback.id;
-                moved += 1;
+        let label = removed.name;
+        let was_active = self.active_library == removed.id;
+        if was_active {
+            self.engine.stop_all();
+        }
+
+        // A pending undo may hold a sound from this library; it is not on the
+        // board, so the loops below cannot reach it.
+        let undo_in_removed = self
+            .undo
+            .as_ref()
+            .map(|undo| undo.sound.library_id == removed.id)
+            .unwrap_or(false);
+        if undo_in_removed {
+            match outcome {
+                LibraryDeleteOutcome::Move(target) => {
+                    if let Some(undo) = self.undo.as_mut() {
+                        undo.sound.library_id = target;
+                    }
+                }
+                LibraryDeleteOutcome::Remove => self.undo = None,
             }
         }
-        if self.active_library == removed.id {
-            self.engine.stop_all();
-            self.active_library = fallback.id;
-            self.selected = None;
-            self.search.clear();
-        }
-        self.mark_dirty();
-        self.sync_active_library();
-        let suffix = if moved > 0 {
-            format!(
-                " - moved {moved} sound{} to \"{}\"",
-                if moved == 1 { "" } else { "s" },
-                fallback.name
-            )
-        } else {
-            String::new()
+
+        let (kind, summary) = match outcome {
+            LibraryDeleteOutcome::Move(target) => {
+                // The combo can point at a library deleted between frames; fall
+                // back to the one every branch of the dialog is guaranteed.
+                let target = if self.libraries.iter().any(|library| library.id == target) {
+                    target
+                } else {
+                    fallback
+                };
+                let mut moved = 0usize;
+                for sound in &mut self.sounds {
+                    if sound.library_id == id {
+                        sound.library_id = target;
+                        moved += 1;
+                    }
+                }
+                if was_active {
+                    self.active_library = target;
+                }
+                (
+                    StatusKind::Info,
+                    format!(
+                        "moved {moved} sound{} to \"{}\"",
+                        if moved == 1 { "" } else { "s" },
+                        self.library_name(target)
+                    ),
+                )
+            }
+            LibraryDeleteOutcome::Remove => {
+                let doomed: Vec<u64> = self
+                    .sounds
+                    .iter()
+                    .filter(|sound| sound.library_id == id)
+                    .map(|sound| sound.id)
+                    .collect();
+                let count = doomed.len();
+                self.sounds.retain(|sound| sound.library_id != id);
+                for sound_id in doomed {
+                    self.playback.remove(sound_id);
+                    if self.selected == Some(sound_id) {
+                        self.selected = None;
+                    }
+                }
+                if was_active {
+                    self.active_library = fallback;
+                }
+                (
+                    StatusKind::Warning,
+                    format!(
+                        "removed {count} sound{} from the board",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
         };
-        self.log(
-            StatusKind::Info,
-            format!("Deleted \"{}\"{suffix}", removed.name),
+
+        if was_active {
+            self.reset_view_state();
+        } else {
+            self.sync_active_library();
+            self.mark_dirty();
+        }
+        self.log(kind, format!("Deleted \"{label}\" - {summary}"));
+    }
+
+    /// The delete-library dialog (FR-5.2.3): the sound count, the move target, and
+    /// the two irreversible choices plus cancel. Nothing is deleted until the user
+    /// picks; closing (X, Esc, backdrop) leaves the library untouched.
+    fn delete_library_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut state) = self.deleting.take() else {
+            return;
+        };
+        let Some(library) = self
+            .libraries
+            .iter()
+            .find(|library| library.id == state.library_id)
+            .cloned()
+        else {
+            return;
+        };
+        let targets: Vec<Library> = self
+            .libraries
+            .iter()
+            .filter(|target| target.id != library.id)
+            .cloned()
+            .collect();
+        let Some(first) = targets.first() else {
+            return;
+        };
+        if !targets.iter().any(|target| target.id == state.target_id) {
+            state.target_id = first.id;
+        }
+        let selected_name = targets
+            .iter()
+            .find(|target| target.id == state.target_id)
+            .map(|target| target.name.clone())
+            .unwrap_or_default();
+        let count = self
+            .sounds
+            .iter()
+            .filter(|sound| sound.library_id == library.id)
+            .count();
+
+        let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+        let mut outcome = None;
+        modal_shell(
+            ctx,
+            Id::new("delete_library_modal"),
+            DELETE_MODAL_WIDTH,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                let title = format!(
+                    "Delete \"{}\" - {count} sound{}",
+                    library.name,
+                    if count == 1 { "" } else { "s" }
+                );
+                modal_header(ui, &title, Id::new("delete_library_close"), dismiss);
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(
+                        "Move the sounds to another library or remove them from the board. \
+                         Audio files stay on disk.",
+                    )
+                    .size(11.5)
+                    .color(theme::muted()),
+                );
+                ui.add_space(10.0);
+                settings_row(ui, "Move to", 190.0, |ui| {
+                    ComboBox::from_id_salt("delete_library_target")
+                        .width(190.0)
+                        .selected_text(RichText::new(&selected_name).size(13.5))
+                        .show_ui(ui, |ui| {
+                            ui.set_min_width(170.0);
+                            for target in &targets {
+                                if ui
+                                    .selectable_label(target.id == state.target_id, &target.name)
+                                    .clicked()
+                                {
+                                    state.target_id = target.id;
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                });
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, "Move sounds", Vec2::new(120.0, 32.0)).clicked() {
+                        outcome = Some(LibraryDeleteOutcome::Move(state.target_id));
+                    }
+                    if ghost_button_colored(
+                        ui,
+                        "Delete sounds",
+                        Vec2::new(120.0, 32.0),
+                        theme::red(),
+                    )
+                    .clicked()
+                    {
+                        outcome = Some(LibraryDeleteOutcome::Remove);
+                    }
+                    if ghost_button(ui, "Cancel", Vec2::new(90.0, 32.0)).clicked() {
+                        *dismiss = true;
+                    }
+                });
+            },
         );
+
+        if let Some(outcome) = outcome {
+            self.confirm_delete_library(library.id, outcome);
+            return;
+        }
+        if !close {
+            self.deleting = Some(state);
+        }
     }
 
     fn move_sound_to_library(&mut self, sound_id: u64, library_id: u64) {
@@ -2933,6 +3166,7 @@ impl App {
     fn modals(&mut self, ctx: &egui::Context) {
         self.capture_modal(ctx);
         self.rename_modal(ctx);
+        self.delete_library_modal(ctx);
         self.log_modal(ctx);
     }
 
@@ -3458,21 +3692,14 @@ impl App {
             .map(|owner| self.owner_label(owner))
         });
 
-        let modal_area = egui::Modal::default_area(Id::new("capture_modal"))
-            .anchor(Align2::CENTER_CENTER, Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0));
-        let modal = egui::Modal::new(Id::new("capture_modal"))
-            .area(modal_area)
-            .backdrop_color(Color32::TRANSPARENT)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel())
-                    .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(theme::RADIUS_XL)
-                    .inner_margin(Margin::same(18)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(400.0);
-                modal_header(ui, title, Id::new("capture_close"), &mut close);
+        modal_shell(
+            ctx,
+            Id::new("capture_modal"),
+            400.0,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(ui, title, Id::new("capture_close"), dismiss);
                 ui.label(RichText::new(subject).size(13.0).color(theme::muted()));
                 ui.add_space(12.0);
 
@@ -3528,7 +3755,7 @@ impl App {
                         .on_hover_text("Esc")
                         .clicked()
                     {
-                        close = true;
+                        *dismiss = true;
                     }
                     if ghost_button(ui, "Clear", Vec2::new(84.0, 32.0)).clicked() {
                         clear = true;
@@ -3541,11 +3768,8 @@ impl App {
                         .color(theme::faint()),
                 );
                 ui.add_space(2.0);
-            });
-
-        if modal.backdrop_response.clicked() {
-            close = true;
-        }
+            },
+        );
 
         if close {
             return;
@@ -3562,7 +3786,6 @@ impl App {
                                 sound.ram = preload;
                             }
                             sound.hotkey = Some(hotkey);
-                            sound.hotkey_error = None;
                             log_line = Some(format!(
                                 "Hotkey {} assigned to \"{}\"",
                                 hotkey.label(),
@@ -3624,20 +3847,14 @@ impl App {
             close = true;
         }
 
-        let rename_area = centered_modal_area(Id::new("rename_modal"));
-        let modal = egui::Modal::new(Id::new("rename_modal"))
-            .area(rename_area)
-            .backdrop_color(Color32::TRANSPARENT)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel())
-                    .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(theme::RADIUS_XL)
-                    .inner_margin(Margin::same(18)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(380.0);
-                modal_header(ui, title, Id::new("rename_close"), &mut close);
+        modal_shell(
+            ctx,
+            Id::new("rename_modal"),
+            380.0,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(ui, title, Id::new("rename_close"), dismiss);
                 ui.add_space(8.0);
                 let response = ui.add_sized(
                     [ui.available_width(), 34.0],
@@ -3656,14 +3873,11 @@ impl App {
                         commit = true;
                     }
                     if ghost_button(ui, "Cancel", Vec2::new(90.0, 32.0)).clicked() {
-                        close = true;
+                        *dismiss = true;
                     }
                 });
-            });
-
-        if modal.backdrop_response.clicked() {
-            close = true;
-        }
+            },
+        );
 
         if commit {
             let name = renaming.buffer.trim().to_string();
@@ -3677,7 +3891,7 @@ impl App {
                     let mut old_name = None;
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
                         old_name = Some(std::mem::replace(&mut sound.name, name));
-                        sound.search_key = search_key(&sound.name, &sound.path);
+                        sound.refresh_search_key();
                     }
                     if let Some(old) = old_name {
                         self.log(StatusKind::Info, format!("Renamed \"{old}\""));
@@ -3731,20 +3945,14 @@ impl App {
             })
             .collect();
         let mut close = false;
-        let log_area = centered_modal_area(Id::new("log_modal"));
-        let modal = egui::Modal::new(Id::new("log_modal"))
-            .area(log_area)
-            .backdrop_color(Color32::TRANSPARENT)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel())
-                    .stroke(Stroke::new(1.0_f32, theme::border()))
-                    .corner_radius(theme::RADIUS_XL)
-                    .inner_margin(Margin::same(12)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(520.0);
-                modal_header(ui, "Activity log", Id::new("log_close"), &mut close);
+        modal_shell(
+            ctx,
+            Id::new("log_modal"),
+            520.0,
+            MODAL_MARGIN_COMPACT,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(ui, "Activity log", Id::new("log_close"), dismiss);
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height(380.0)
@@ -3774,10 +3982,8 @@ impl App {
                             ui.add_space(2.0);
                         }
                     });
-            });
-        if modal.backdrop_response.clicked() {
-            close = true;
-        }
+            },
+        );
         if close {
             self.show_log = false;
         }
@@ -3889,7 +4095,8 @@ impl App {
     }
 
     fn global_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.capture.is_some() || self.renaming.is_some() {
+        // Modal state owns the keyboard; each modal handles its own keys.
+        if self.capture.is_some() || self.renaming.is_some() || self.deleting.is_some() {
             return;
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Comma)) {
@@ -3900,6 +4107,11 @@ impl App {
             }
             return;
         }
+
+        // Whether a text field owns the keyboard. Everything below that changes
+        // the board is suppressed while that is true; only quitting and the
+        // settings toggle above stay available.
+        let typing = ctx.memory(|m| m.focused().is_some());
 
         // Esc is a universal "back": close an open popup first, then the current
         // overlay, cancel a drag, clear a search, and only then stop playback.
@@ -3915,7 +4127,7 @@ impl App {
                 self.drag = None;
             } else if !self.search.is_empty() {
                 self.search.clear();
-            } else {
+            } else if !typing {
                 self.engine.stop_all();
                 self.log(StatusKind::Info, "Stopped all sounds");
             }
@@ -3923,30 +4135,29 @@ impl App {
             return;
         }
 
-        let typing = ctx.memory(|m| m.focused().is_some());
-        let (open, find, toggle_layout, undo, quit, delete, space, f2) = ctx.input(|i| {
-            (
-                i.modifiers.ctrl && i.key_pressed(Key::O),
-                i.modifiers.ctrl && i.key_pressed(Key::F),
-                i.modifiers.ctrl && i.key_pressed(Key::L),
-                i.modifiers.ctrl && i.key_pressed(Key::Z),
-                i.modifiers.ctrl && i.key_pressed(Key::Q),
-                i.key_pressed(Key::Delete),
-                i.key_pressed(Key::Space),
-                i.key_pressed(Key::F2),
-            )
-        });
-
-        if quit {
+        // Quitting is always available (except inside a modal, handled above).
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Q)) {
             self.quit = true;
             self.save_now();
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
 
-        if self.show_settings {
+        if self.show_settings || typing {
             return;
         }
+
+        let (open, find, toggle_layout, undo, delete, space, f2) = ctx.input(|i| {
+            (
+                i.modifiers.ctrl && i.key_pressed(Key::O),
+                i.modifiers.ctrl && i.key_pressed(Key::F),
+                i.modifiers.ctrl && i.key_pressed(Key::L),
+                i.modifiers.ctrl && i.key_pressed(Key::Z),
+                i.key_pressed(Key::Delete),
+                i.key_pressed(Key::Space),
+                i.key_pressed(Key::F2),
+            )
+        });
 
         if open {
             self.open_file_dialog();
@@ -3959,9 +4170,6 @@ impl App {
         }
         if undo {
             self.undo_remove();
-        }
-        if typing {
-            return;
         }
         if delete {
             if let Some(id) = self.selected {
@@ -4013,26 +4221,17 @@ impl App {
         let levels = self.engine.take_levels();
         let dt = ctx.input(|i| i.stable_dt).clamp(0.001, 0.2);
         let now = Instant::now();
-        for (slot, level) in levels.iter().enumerate() {
-            let level = *level;
-            let target = if level > 0.000_01 {
-                (20.0 * level.log10()).clamp(-60.0, 0.0)
-            } else {
-                -60.0
+        for slot in [Slot::Monitor, Slot::Cable] {
+            let index = slot.index();
+            let (Some(&level), Some(db), Some(peak_db), Some(peak_at)) = (
+                levels.get(index),
+                self.meter_db.get_mut(index),
+                self.meter_peak_db.get_mut(index),
+                self.meter_peak_at.get_mut(index),
+            ) else {
+                continue;
             };
-            if target >= self.meter_db[slot] {
-                self.meter_db[slot] = target;
-            } else {
-                self.meter_db[slot] = (self.meter_db[slot] - 24.0 * dt).max(target).max(-60.0);
-            }
-            if target >= self.meter_peak_db[slot] {
-                self.meter_peak_db[slot] = target;
-                self.meter_peak_at[slot] = now;
-            } else if now.duration_since(self.meter_peak_at[slot]) > Duration::from_millis(900) {
-                self.meter_peak_db[slot] = (self.meter_peak_db[slot] - 18.0 * dt)
-                    .max(target)
-                    .max(-60.0);
-            }
+            smooth_meter(db, peak_db, peak_at, level, dt, now);
         }
 
         let interval = self.repaint_interval();
@@ -4352,6 +4551,100 @@ fn search_key(name: &str, path: &Path) -> String {
         .unwrap_or_default();
     format!("{} {}", name.to_lowercase(), file)
 }
+
+impl Sound {
+    /// Rebuild the cached search key. Call after the name or path changes.
+    fn refresh_search_key(&mut self) {
+        self.search_key = search_key(&self.name, &self.path);
+    }
+}
+
+/// A sound's only RAM-eligibility rule (FR-5.3.5 + FR-5.2.5): it needs a hotkey
+/// and it has to be in the library whose hotkeys are bound. Everything else is
+/// streamed from disk, so retention, preloading and the RAM controls all read
+/// this one predicate.
+fn ram_eligible(sound: &Sound, active_library: u64) -> bool {
+    sound.hotkey.is_some() && sound.library_id == active_library
+}
+
+/// Re-insert an undone delete at its old index and re-register it with playback.
+///
+/// The missing flag is judged from the restored path, so a healthy file comes back
+/// healthy (the old code asked the board instead, which no longer held the sound,
+/// and marked every restored sound missing).
+fn restore_sound(sounds: &mut Vec<Sound>, playback: &Playback, undo: UndoDelete) -> u64 {
+    let index = undo.index.min(sounds.len());
+    let sound = undo.sound;
+    let id = sound.id;
+    playback.register(id, sound.path.clone(), sound.volume);
+    // `Playback` owns the "is the file missing" decision. Re-registering already set
+    // it from the restored path, so the message is refreshed from that; the old code
+    // asked the board, which no longer held the sound, and flagged every restore.
+    let missing = playback.info(id).missing;
+    playback.mark_missing(id, missing, None);
+    sounds.insert(index, sound);
+    id
+}
+
+/// The sound id under the pointer, if any. The drag rects carry ids so a list
+/// that shifted between paint and drop cannot move the wrong sound.
+fn drop_target(rects: &[(u64, Rect)], pointer: Pos2) -> Option<u64> {
+    rects
+        .iter()
+        .find(|(_, rect)| rect.contains(pointer))
+        .map(|(id, _)| *id)
+}
+
+/// Move `id` to `target`'s position, keeping every other sound in order. Returns
+/// whether anything moved; a source or target that left the board is skipped.
+fn move_sound_to_id(sounds: &mut Vec<Sound>, id: u64, target: u64) -> bool {
+    let (Some(from), Some(to)) = (
+        sounds.iter().position(|sound| sound.id == id),
+        sounds.iter().position(|sound| sound.id == target),
+    ) else {
+        return false;
+    };
+    if from == to {
+        return false;
+    }
+    let sound = sounds.remove(from);
+    sounds.insert(to, sound);
+    true
+}
+
+/// One meter slot's motion: instant attack, linear release, peak hold then fall.
+/// Takes the slot's values directly so a length mismatch in the slot arrays can
+/// never index out of bounds.
+fn smooth_meter(
+    db: &mut f32,
+    peak_db: &mut f32,
+    peak_at: &mut Instant,
+    level: f32,
+    dt: f32,
+    now: Instant,
+) {
+    let target = if level > 0.000_01 {
+        (20.0 * level.log10()).clamp(METER_FLOOR_DB, 0.0)
+    } else {
+        METER_FLOOR_DB
+    };
+    if target >= *db {
+        *db = target;
+    } else {
+        *db = (*db - METER_RELEASE_DB_PER_SEC * dt)
+            .max(target)
+            .max(METER_FLOOR_DB);
+    }
+    if target >= *peak_db {
+        *peak_db = target;
+        *peak_at = now;
+    } else if now.duration_since(*peak_at) > METER_PEAK_HOLD {
+        *peak_db = (*peak_db - METER_PEAK_RELEASE_DB_PER_SEC * dt)
+            .max(target)
+            .max(METER_FLOOR_DB);
+    }
+}
+
 fn settings_header(ui: &mut Ui, tab: SettingsTab) {
     ui.label(
         RichText::new(tab.title())
@@ -4628,12 +4921,12 @@ fn draw_grid(
     libraries: &[Library],
     filtered: &[usize],
     infos: &HashMap<u64, SoundInfo>,
-    progress: &HashMap<u64, f32>,
+    playing: &HashMap<u64, Option<f32>>,
     drag_enabled: bool,
     capture_id: Option<u64>,
     selected: Option<u64>,
     show_ram: bool,
-    rects: &mut Vec<(usize, Rect)>,
+    rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
     let spacing = 10.0;
@@ -4654,21 +4947,22 @@ fn draw_grid(
                     }
                     let sound = &sounds[index];
                     let info = infos.get(&sound.id).cloned().unwrap_or_default();
-                    let playing = progress.get(&sound.id).copied();
-                    let (rect, card_actions) = sound_card(
+                    let state = playing.get(&sound.id).copied();
+                    let (rect, card_actions) = sound_item(
                         ui,
                         Vec2::new(card_width, CARD_HEIGHT),
                         sound,
                         &info,
-                        playing,
+                        state.is_some(),
+                        state.flatten(),
                         drag_enabled,
                         capture_id == Some(sound.id),
                         selected == Some(sound.id),
                         show_ram,
-                        index,
                         libraries,
+                        ItemLayout::Grid,
                     );
-                    rects.push((index, rect));
+                    rects.push((sound.id, rect));
                     actions.extend(card_actions);
                 }
             });
@@ -4684,12 +4978,12 @@ fn draw_list(
     libraries: &[Library],
     filtered: &[usize],
     infos: &HashMap<u64, SoundInfo>,
-    progress: &HashMap<u64, f32>,
+    playing: &HashMap<u64, Option<f32>>,
     drag_enabled: bool,
     capture_id: Option<u64>,
     selected: Option<u64>,
     show_ram: bool,
-    rects: &mut Vec<(usize, Rect)>,
+    rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal_top(|ui| {
@@ -4702,20 +4996,22 @@ fn draw_list(
             for &index in filtered {
                 let sound = &sounds[index];
                 let info = infos.get(&sound.id).cloned().unwrap_or_default();
-                let playing = progress.get(&sound.id).copied();
-                let (rect, row_actions) = sound_row(
+                let state = playing.get(&sound.id).copied();
+                let (rect, row_actions) = sound_item(
                     ui,
+                    Vec2::new(ui.available_width(), ROW_HEIGHT),
                     sound,
                     &info,
-                    playing,
+                    state.is_some(),
+                    state.flatten(),
                     drag_enabled,
                     capture_id == Some(sound.id),
                     selected == Some(sound.id),
                     show_ram,
-                    index,
                     libraries,
+                    ItemLayout::List,
                 );
-                rects.push((index, rect));
+                rects.push((sound.id, rect));
                 actions.extend(row_actions);
                 ui.add_space(6.0);
             }
@@ -4726,6 +5022,36 @@ fn draw_list(
 fn centered_modal_area(id: Id) -> egui::Area {
     egui::Modal::default_area(id)
         .anchor(Align2::CENTER_CENTER, Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0))
+}
+
+/// Shared modal chrome: centred over the board (offset for the sidebar),
+/// transparent backdrop, panel frame, fixed body width, and backdrop-click
+/// close. `body` gets the modal's `close` flag so a header X can cancel it.
+fn modal_shell(
+    ctx: &egui::Context,
+    id: Id,
+    width: f32,
+    margin: i8,
+    close: &mut bool,
+    body: impl FnOnce(&mut Ui, &mut bool),
+) {
+    let modal = egui::Modal::new(id)
+        .area(centered_modal_area(id))
+        .backdrop_color(Color32::TRANSPARENT)
+        .frame(
+            Frame::NONE
+                .fill(theme::panel())
+                .stroke(Stroke::new(1.0_f32, theme::border()))
+                .corner_radius(theme::RADIUS_XL)
+                .inner_margin(Margin::same(margin)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            body(ui, close);
+        });
+    if modal.backdrop_response.clicked() {
+        *close = true;
+    }
 }
 
 fn modal_header(ui: &mut Ui, title: &str, id: Id, close: &mut bool) {
@@ -4782,16 +5108,17 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
 }
 
 /// Removes a sound's binding and the state that depends on it (FR-5.3.5): the
-/// hotkey is gone, RAM preloading is off and no stale error stays behind. Returns
+/// hotkey is gone and RAM preloading is off. Returns
 /// the dropped hotkey so the caller can name it in the log.
 fn unbind(sound: &mut Sound) -> Option<Hotkey> {
     let hotkey = sound.hotkey.take()?;
     sound.ram = false;
-    sound.hotkey_error = None;
     Some(hotkey)
 }
 
-/// Hotkey pill shared by cards and rows. Returns true when clicked.
+/// Hotkey pill shared by cards and rows. Returns true when clicked. While the
+/// sound's chord is being captured the pill turns red, which is what tells the
+/// user the dialog belongs to this item.
 fn hotkey_pill(
     ui: &mut Ui,
     painter: &egui::Painter,
@@ -4802,9 +5129,8 @@ fn hotkey_pill(
     font_size: f32,
 ) -> bool {
     let pill = ui.interact(rect, id, Sense::click());
-    let has_error = sound.hotkey_error.is_some() || capture_active;
     let hover = anim::hover(ui, id, pill.hovered());
-    let border = if has_error {
+    let border = if capture_active {
         theme::red()
     } else if pill.hovered() {
         theme::accent()
@@ -4823,7 +5149,7 @@ fn hotkey_pill(
     let (label, color) = match sound.hotkey {
         Some(hotkey) => (
             hotkey.label(),
-            if has_error {
+            if capture_active {
                 theme::red()
             } else {
                 theme::text()
@@ -4839,11 +5165,7 @@ fn hotkey_pill(
         color,
     );
     let clicked = pill.clicked();
-    if let Some(error) = &sound.hotkey_error {
-        pill.on_hover_text(error);
-    } else {
-        pill.on_hover_text("Set a global hotkey (works while hidden)");
-    }
+    pill.on_hover_text("Set a global hotkey (works while hidden)");
     clicked
 }
 
@@ -4992,45 +5314,213 @@ fn play_progress(painter: &egui::Painter, track: Rect, progress: f32, alpha: u8)
     painter.rect_filled(filled, CornerRadius::same(2), theme::accent());
 }
 
+/// Which presentation a sound item uses. Both layouts share one implementation;
+/// only the geometry differs (see [`item_geometry`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemLayout {
+    Grid,
+    List,
+}
+
+/// Rects, fonts and widget-id tags for one sound item. Kept pure so the layouts
+/// can be exercised without an egui context.
+///
+/// Widget ids stay per-layout (`card_*` vs `row_*`) on purpose: a widget's
+/// animation state is stored under its id, so sharing one id across layouts
+/// would carry a stale hover/press tween into the other view.
+struct ItemGeometry {
+    radius: u8,
+    /// Grid cards wash the whole surface while a trigger flashes; rows rely on
+    /// the accent border alone.
+    flash_overlay: bool,
+    hover_tag: &'static str,
+    name: Rect,
+    name_font: FontId,
+    pill: Rect,
+    pill_tag: &'static str,
+    pill_font: f32,
+    /// `None` when the layout reserves no room for the chip (nothing to show).
+    chip: Option<Rect>,
+    chip_tag: &'static str,
+    chip_font: f32,
+    close: Rect,
+    close_tag: &'static str,
+    /// `None` when the item is too narrow for a usable track.
+    volume: Option<Rect>,
+    volume_tag: &'static str,
+    /// Rows hide the speaker glyph and percentage to save horizontal space.
+    volume_compact: bool,
+    progress: Rect,
+    progress_alpha: u8,
+}
+
+fn item_geometry(
+    layout: ItemLayout,
+    rect: Rect,
+    has_hotkey: bool,
+    show_ram: bool,
+    missing: bool,
+) -> ItemGeometry {
+    match layout {
+        ItemLayout::Grid => {
+            let pill_width = if has_hotkey { 78.0 } else { 88.0 };
+            let pill = Rect::from_min_size(
+                rect.left_bottom() + Vec2::new(12.0, -34.0),
+                Vec2::new(pill_width, 24.0),
+            );
+            ItemGeometry {
+                radius: theme::RADIUS_LG,
+                flash_overlay: true,
+                hover_tag: "card_hover",
+                name: Rect::from_min_max(
+                    rect.left_top() + Vec2::new(13.0, 30.0),
+                    Pos2::new(rect.right() - 38.0, rect.top() + 68.0),
+                ),
+                name_font: theme::medium(17.0),
+                pill,
+                pill_tag: "hotkey",
+                pill_font: 12.5,
+                // Compact RAM / disk / missing chip at the top-left.
+                chip: Some(Rect::from_min_size(
+                    rect.left_top() + Vec2::new(10.0, 8.0),
+                    Vec2::new(54.0, 20.0),
+                )),
+                chip_tag: "ram",
+                chip_font: 10.5,
+                // Close button: clean vector X, exactly centered.
+                close: Rect::from_min_size(
+                    rect.right_top() + Vec2::new(-30.0, 7.0),
+                    Vec2::new(22.0, 22.0),
+                ),
+                close_tag: "close",
+                volume: Some(Rect::from_min_max(
+                    Pos2::new(pill.right() + 10.0, rect.bottom() - 34.0),
+                    Pos2::new(rect.right() - 12.0, rect.bottom() - 10.0),
+                )),
+                volume_tag: "cardvol",
+                volume_compact: false,
+                progress: Rect::from_min_max(
+                    Pos2::new(rect.left() + 10.0, rect.bottom() - 4.0),
+                    Pos2::new(rect.right() - 10.0, rect.bottom() - 2.0),
+                ),
+                progress_alpha: 45,
+            }
+        }
+        ItemLayout::List => {
+            // Controls on the right: chip, hotkey pill and close.
+            let pill_width = if has_hotkey { 110.0 } else { 118.0 };
+            let indicator_width = if (has_hotkey && show_ram) || missing {
+                70.0
+            } else {
+                0.0
+            };
+            let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
+
+            // Name column; the volume track uses the remaining space up to the
+            // controls instead of floating as a short bar in a maximized window.
+            let name = Rect::from_min_max(
+                rect.left_center() + Vec2::new(16.0, -14.0),
+                Pos2::new(rect.left() + rect.width() * 0.38, rect.center().y + 14.0),
+            );
+            let pill = Rect::from_center_size(
+                Pos2::new(rect.right() - 42.0 - pill_width * 0.5, rect.center().y),
+                Vec2::new(pill_width, 30.0),
+            );
+            let chip = (indicator_width > 0.0).then(|| {
+                Rect::from_center_size(
+                    Pos2::new(
+                        pill.left() - 8.0 - (indicator_width - 8.0) * 0.5,
+                        rect.center().y,
+                    ),
+                    Vec2::new(indicator_width - 8.0, 28.0),
+                )
+            });
+            let volume_left = name.right() + 16.0;
+            let volume_right = controls_left - 16.0;
+            let slider_width = (volume_right - volume_left).max(0.0);
+            ItemGeometry {
+                radius: theme::RADIUS_MD,
+                flash_overlay: false,
+                hover_tag: "row_hover",
+                name,
+                name_font: theme::medium(15.0),
+                pill,
+                pill_tag: "rowhotkey",
+                pill_font: 13.5,
+                chip,
+                chip_tag: "rowram",
+                chip_font: 11.0,
+                close: Rect::from_center_size(
+                    Pos2::new(rect.right() - 18.0, rect.center().y),
+                    Vec2::new(26.0, 26.0),
+                ),
+                close_tag: "rowclose",
+                volume: (slider_width >= MIN_VOLUME_WIDTH).then(|| {
+                    Rect::from_min_size(
+                        Pos2::new(volume_left, rect.center().y - 11.0),
+                        Vec2::new(slider_width, 22.0),
+                    )
+                }),
+                volume_tag: "rowvol",
+                volume_compact: true,
+                progress: Rect::from_min_max(
+                    Pos2::new(rect.left() + 8.0, rect.bottom() - 3.0),
+                    Pos2::new(rect.right() - 8.0, rect.bottom() - 1.0),
+                ),
+                progress_alpha: 40,
+            }
+        }
+    }
+}
+
+/// One sound item for both the grid and the list. Painting follows the list's
+/// order (name, pill, chip, close, volume, progress); the layouts never overlap
+/// those rects, so the order is invisible.
 #[allow(clippy::too_many_arguments)]
-fn sound_card(
+fn sound_item(
     ui: &mut Ui,
     size: Vec2,
     sound: &Sound,
     info: &SoundInfo,
+    playing: bool,
     progress: Option<f32>,
     drag_enabled: bool,
     capture_active: bool,
     selected: bool,
     show_ram: bool,
-    index: usize,
     libraries: &[Library],
+    layout: ItemLayout,
 ) -> (Rect, Vec<Action>) {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
     let ram_active = has_hotkey && info.loaded;
-    let playing = progress.is_some();
     let missing = is_missing(info);
     let flash = sound
         .flash_until
         .map(|t| t > Instant::now())
         .unwrap_or(false);
+    let geometry = item_geometry(layout, rect, has_hotkey, show_ram, missing);
 
-    let hover = anim::hover(ui, Id::new(("card_hover", sound.id)), response.hovered());
+    let hover = anim::hover(
+        ui,
+        Id::new((geometry.hover_tag, sound.id)),
+        response.hovered(),
+    );
     let (fill, border, width) = sound_surface(hover, ram_active, playing, missing, selected, flash);
+    let radius = CornerRadius::same(geometry.radius);
     painter.rect(
         rect,
-        CornerRadius::same(theme::RADIUS_LG),
+        radius,
         fill,
         Stroke::new(width, border),
         StrokeKind::Inside,
     );
-    if flash {
+    if geometry.flash_overlay && flash {
         painter.rect(
             rect,
-            CornerRadius::same(theme::RADIUS_LG),
+            radius,
             theme::alpha(theme::accent(), 18),
             Stroke::NONE,
             StrokeKind::Inside,
@@ -5041,10 +5531,13 @@ fn sound_card(
         actions.push(Action::Play(sound.id));
     }
     if drag_enabled && response.drag_started() {
+        let drag_size = match layout {
+            ItemLayout::Grid => size,
+            ItemLayout::List => Vec2::new(ROW_DRAG_WIDTH, ROW_HEIGHT),
+        };
         actions.push(Action::DragStart {
             id: sound.id,
-            index,
-            size,
+            size: drag_size,
         });
     }
     if response.drag_stopped() {
@@ -5054,51 +5547,18 @@ fn sound_card(
         sound_context_menu(ui, sound, info, libraries, &mut actions);
     });
 
-    // Compact RAM / disk / missing chip at the top-left.
-    let chip_rect = Rect::from_min_size(
-        rect.left_top() + Vec2::new(10.0, 8.0),
-        Vec2::new(54.0, 20.0),
-    );
-    if let Some(action) = ram_chip(
-        ui,
-        &painter,
-        chip_rect,
-        ui.id().with(("ram", sound.id)),
-        sound,
-        info,
-        10.5,
-        show_ram,
-    ) {
-        actions.push(action);
-    }
-
-    // Close button: clean vector X, exactly centered.
-    let close_rect = Rect::from_min_size(
-        rect.right_top() + Vec2::new(-30.0, 7.0),
-        Vec2::new(22.0, 22.0),
-    );
-    let close = close_button(ui, &painter, close_rect, ui.id().with(("close", sound.id)));
-    if close.clicked() {
-        actions.push(Action::Remove(sound.id));
-    }
-    close.on_hover_text("Remove sound");
-
     // Name.
-    let name_rect = Rect::from_min_max(
-        rect.left_top() + Vec2::new(13.0, 30.0),
-        Pos2::new(rect.right() - 38.0, rect.top() + 68.0),
-    );
     let name = theme::truncate(
         &painter,
         &sound.name,
-        theme::medium(17.0),
-        name_rect.width(),
+        geometry.name_font.clone(),
+        geometry.name.width(),
     );
     painter.text(
-        name_rect.left_center(),
+        geometry.name.left_center(),
         Align2::LEFT_CENTER,
         name,
-        theme::medium(17.0),
+        geometry.name_font,
         if missing {
             theme::mix(theme::text(), theme::red(), 0.4)
         } else {
@@ -5107,229 +5567,74 @@ fn sound_card(
     );
 
     // Hotkey pill.
-    let pill_width = if sound.hotkey.is_some() { 78.0 } else { 88.0 };
-    let pill_rect = Rect::from_min_size(
-        rect.left_bottom() + Vec2::new(12.0, -34.0),
-        Vec2::new(pill_width, 24.0),
-    );
     if hotkey_pill(
         ui,
         &painter,
-        pill_rect,
-        ui.id().with(("hotkey", sound.id)),
+        geometry.pill,
+        ui.id().with((geometry.pill_tag, sound.id)),
         sound,
         capture_active,
-        12.5,
+        geometry.pill_font,
     ) {
         actions.push(Action::SetHotkey(sound.id));
     }
 
-    // Volume slider (bottom right).
-    let slider_rect = Rect::from_min_max(
-        Pos2::new(pill_rect.right() + 10.0, rect.bottom() - 34.0),
-        Pos2::new(rect.right() - 12.0, rect.bottom() - 10.0),
-    );
-    volume::bar(
-        ui,
-        slider_rect,
-        ui.id().with(("cardvol", sound.id)),
-        sound.volume,
-        |v| actions.push(Action::Volume(sound.id, v)),
-        false,
-    );
-
-    // Playing progress line.
-    if let Some(progress) = progress {
-        let track = Rect::from_min_max(
-            Pos2::new(rect.left() + 10.0, rect.bottom() - 4.0),
-            Pos2::new(rect.right() - 10.0, rect.bottom() - 2.0),
-        );
-        play_progress(&painter, track, progress, 45);
-    }
-
-    if response.double_clicked() {
-        actions.push(Action::Rename(sound.id));
-    }
-    response
-        .on_hover_text(sound.path.display().to_string())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-
-    (rect, actions)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn sound_row(
-    ui: &mut Ui,
-    sound: &Sound,
-    info: &SoundInfo,
-    progress: Option<f32>,
-    drag_enabled: bool,
-    capture_active: bool,
-    selected: bool,
-    show_ram: bool,
-    index: usize,
-    libraries: &[Library],
-) -> (Rect, Vec<Action>) {
-    let width = ui.available_width();
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click_and_drag());
-    let mut actions = Vec::new();
-    let painter = ui.painter().clone();
-    let has_hotkey = sound.hotkey.is_some();
-    let ram_active = has_hotkey && info.loaded;
-    let missing = is_missing(info);
-    let playing = progress.is_some();
-    let flash = sound
-        .flash_until
-        .map(|t| t > Instant::now())
-        .unwrap_or(false);
-
-    let hover = anim::hover(ui, Id::new(("row_hover", sound.id)), response.hovered());
-    let (fill, border, width) = sound_surface(hover, ram_active, playing, missing, selected, flash);
-    painter.rect(
-        rect,
-        CornerRadius::same(theme::RADIUS_MD),
-        fill,
-        Stroke::new(width, border),
-        StrokeKind::Inside,
-    );
-
-    if response.clicked() {
-        actions.push(Action::Play(sound.id));
-    }
-    if drag_enabled && response.drag_started() {
-        actions.push(Action::DragStart {
-            id: sound.id,
-            index,
-            size: Vec2::new(220.0, ROW_HEIGHT),
-        });
-    }
-    if response.drag_stopped() {
-        actions.push(Action::DragStop);
-    }
-    response.context_menu(|ui| {
-        sound_context_menu(ui, sound, info, libraries, &mut actions);
-    });
-
-    // Controls on the right: chip, hotkey pill and close.
-    let pill_width = if has_hotkey { 110.0 } else { 118.0 };
-    let indicator_width = if (has_hotkey && show_ram) || missing {
-        70.0
-    } else {
-        0.0
-    };
-    let controls_left = rect.right() - 42.0 - pill_width - indicator_width;
-
-    // Name column; the volume track uses the remaining space up to the controls
-    // instead of floating as a short bar in a maximized window.
-    let name_rect = Rect::from_min_max(
-        rect.left_center() + Vec2::new(16.0, -14.0),
-        Pos2::new(rect.left() + rect.width() * 0.38, rect.center().y + 14.0),
-    );
-    let name = theme::truncate(
-        &painter,
-        &sound.name,
-        theme::medium(15.0),
-        name_rect.width(),
-    );
-    painter.text(
-        name_rect.left_center(),
-        Align2::LEFT_CENTER,
-        name,
-        theme::medium(15.0),
-        if missing {
-            theme::mix(theme::text(), theme::red(), 0.4)
-        } else {
-            theme::text()
-        },
-    );
-
-    let pill_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - 42.0 - pill_width * 0.5, rect.center().y),
-        Vec2::new(pill_width, 30.0),
-    );
-    if hotkey_pill(
-        ui,
-        &painter,
-        pill_rect,
-        ui.id().with(("rowhotkey", sound.id)),
-        sound,
-        capture_active,
-        13.5,
-    ) {
-        actions.push(Action::SetHotkey(sound.id));
-    }
-
-    let chip_rect = Rect::from_center_size(
-        Pos2::new(
-            pill_rect.left() - 8.0 - (indicator_width - 8.0) * 0.5,
-            rect.center().y,
-        ),
-        Vec2::new(indicator_width - 8.0, 28.0),
-    );
-    if indicator_width > 0.0 {
+    // RAM / disk / missing chip. Nothing is emitted or stored when `None`.
+    if let Some(chip) = geometry.chip {
         if let Some(action) = ram_chip(
             ui,
             &painter,
-            chip_rect,
-            ui.id().with(("rowram", sound.id)),
+            chip,
+            ui.id().with((geometry.chip_tag, sound.id)),
             sound,
             info,
-            11.0,
+            geometry.chip_font,
             show_ram,
         ) {
             actions.push(action);
         }
     }
 
-    let close_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - 18.0, rect.center().y),
-        Vec2::new(26.0, 26.0),
-    );
     let close = close_button(
         ui,
         &painter,
-        close_rect,
-        ui.id().with(("rowclose", sound.id)),
+        geometry.close,
+        ui.id().with((geometry.close_tag, sound.id)),
     );
     if close.clicked() {
         actions.push(Action::Remove(sound.id));
     }
     close.on_hover_text("Remove sound");
 
-    // Volume track spans the free space between the name column and the controls.
-    let volume_left = name_rect.right() + 16.0;
-    let volume_right = controls_left - 16.0;
-    let slider_width = (volume_right - volume_left).max(0.0);
-    if slider_width >= 80.0 {
-        let volume_rect = Rect::from_min_size(
-            Pos2::new(volume_left, rect.center().y - 11.0),
-            Vec2::new(slider_width, 22.0),
-        );
+    if let Some(volume_rect) = geometry.volume {
         volume::bar(
             ui,
             volume_rect,
-            ui.id().with(("rowvol", sound.id)),
+            ui.id().with((geometry.volume_tag, sound.id)),
             sound.volume,
             |v| actions.push(Action::Volume(sound.id, v)),
-            true,
+            geometry.volume_compact,
         );
     }
 
+    // Playing progress line. Absent until the total duration is known, so a
+    // streamed sound never shows a bar pegged at 100%.
     if let Some(progress) = progress {
-        let track = Rect::from_min_max(
-            Pos2::new(rect.left() + 8.0, rect.bottom() - 3.0),
-            Pos2::new(rect.right() - 8.0, rect.bottom() - 1.0),
+        play_progress(
+            &painter,
+            geometry.progress,
+            progress,
+            geometry.progress_alpha,
         );
-        play_progress(&painter, track, progress, 40);
     }
 
     if response.double_clicked() {
         actions.push(Action::Rename(sound.id));
     }
-    let tooltip = match &info.error {
-        Some(error) => error.clone(),
-        None => sound.path.display().to_string(),
+    // Rows name the decode error instead of the path; cards always show the path.
+    let tooltip = match (layout, &info.error) {
+        (ItemLayout::List, Some(error)) => error.clone(),
+        _ => sound.path.display().to_string(),
     };
     response
         .on_hover_text(tooltip)
@@ -5561,9 +5866,15 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
 }
 
 fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
+    ghost_button_colored(ui, text, size, theme::text())
+}
+
+/// Ghost button with a caller-chosen label colour, for destructive actions that
+/// must not look like the neutral buttons beside them.
+fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> egui::Response {
     let response = ui.add_sized(
         size,
-        Button::new(RichText::new(text).size(13.5).color(theme::text()))
+        Button::new(RichText::new(text).size(13.5).color(color))
             .fill(theme::card())
             .stroke(Stroke::new(1.0_f32, theme::border()))
             .corner_radius(theme::RADIUS_MD),
@@ -5933,13 +6244,160 @@ mod tests {
             name: "Airhorn".to_string(),
             path: PathBuf::from("airhorn.wav"),
             hotkey: Some(Hotkey::parse("Ctrl+1").expect("test hotkey parses")),
-            hotkey_error: None,
             volume: 1.0,
             ram: true,
             library_id: 1,
             search_key: "airhorn".to_string(),
             flash_until: None,
         }
+    }
+
+    fn sound_with_id(id: u64) -> Sound {
+        let mut sound = bound_sound();
+        sound.id = id;
+        sound
+    }
+
+    /// A real file on disk, so `Playable` can stat and lock it. Content is never
+    /// decoded in these tests.
+    fn temp_audio_path(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sounddeck-test-{tag}-{}-{}.wav",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        std::fs::write(&path, [0u8; 16]).expect("write temp audio");
+        path
+    }
+
+    #[test]
+    fn undo_restores_a_present_file_without_flagging_it_missing() {
+        let path = temp_audio_path("undo");
+        let playback = Playback::new(Arc::new(Engine::new(1.0, 1.0, 0.0)));
+
+        let mut present = sound_with_id(11);
+        present.path = path.clone();
+        let mut sounds = Vec::new();
+        assert_eq!(
+            restore_sound(
+                &mut sounds,
+                &playback,
+                UndoDelete {
+                    sound: present,
+                    index: 0,
+                }
+            ),
+            11
+        );
+        let info = playback.info(11);
+        assert!(!info.missing, "an existing file must not come back missing");
+        assert!(info.error.is_none());
+
+        // The old bug judged from the board, which no longer held the sound, so
+        // this case came back flagged too. A genuinely absent file still is.
+        let gone = std::env::temp_dir().join("sounddeck-test-undo-gone.wav");
+        let mut absent = sound_with_id(12);
+        absent.path = gone;
+        let id = restore_sound(
+            &mut sounds,
+            &playback,
+            UndoDelete {
+                sound: absent,
+                index: 1,
+            },
+        );
+        assert_eq!(id, 12);
+        assert!(playback.info(12).missing);
+        assert_eq!(sounds.len(), 2, "both sounds are on the board again");
+        assert_eq!(sounds[1].id, 12, "restored at the recorded index");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn only_hotkey_sounds_in_the_active_library_are_ram_eligible() {
+        let sound = bound_sound();
+        assert!(ram_eligible(&sound, 1));
+        assert!(
+            !ram_eligible(&sound, 2),
+            "another tab's sounds are never preloaded"
+        );
+        let mut unbound = bound_sound();
+        unbound.hotkey = None;
+        assert!(!ram_eligible(&unbound, 1), "no hotkey, no retention");
+    }
+
+    #[test]
+    fn relinking_rebuilds_the_search_key() {
+        let mut sound = bound_sound();
+        sound.path = PathBuf::from("old").join("Clown_Horn.wav");
+        sound.refresh_search_key();
+        assert!(sound.search_key.contains("airhorn"));
+        assert!(sound.search_key.contains("clown_horn"));
+
+        sound.path = PathBuf::from("new").join("Party_Horn.wav");
+        sound.refresh_search_key();
+        assert!(
+            !sound.search_key.contains("clown_horn"),
+            "the old file name must not linger"
+        );
+        assert!(sound.search_key.contains("party_horn"));
+    }
+
+    #[test]
+    fn a_drop_resolves_its_target_by_id() {
+        let rects = vec![(7u64, Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)))];
+        assert_eq!(drop_target(&rects, Pos2::new(5.0, 5.0)), Some(7));
+        assert_eq!(drop_target(&rects, Pos2::new(50.0, 5.0)), None);
+        assert_eq!(drop_target(&[], Pos2::ZERO), None);
+    }
+
+    #[test]
+    fn moving_a_sound_keeps_the_rest_in_order() {
+        let mut sounds = vec![sound_with_id(1), sound_with_id(2), sound_with_id(3)];
+        // Dropping onto id 3 inserts at its pre-removal index, exactly as the old
+        // index-based code did.
+        assert!(move_sound_to_id(&mut sounds, 1, 3));
+        let ids: Vec<u64> = sounds.iter().map(|sound| sound.id).collect();
+        assert_eq!(ids, vec![2, 3, 1]);
+
+        assert!(
+            !move_sound_to_id(&mut sounds, 1, 1),
+            "a self-drop is a no-op"
+        );
+        assert!(
+            !move_sound_to_id(&mut sounds, 99, 2),
+            "a stale source is skipped"
+        );
+        assert!(
+            !move_sound_to_id(&mut sounds, 2, 99),
+            "a stale target is skipped"
+        );
+        let ids: Vec<u64> = sounds.iter().map(|sound| sound.id).collect();
+        assert_eq!(ids, vec![2, 3, 1], "skipped drops never reorder");
+    }
+
+    #[test]
+    fn the_meter_attacks_instantly_and_decays_to_the_floor() {
+        let mut db = METER_FLOOR_DB;
+        let mut peak = METER_FLOOR_DB;
+        let mut peak_at = Instant::now();
+        let now = Instant::now();
+
+        // -20 dBFS is shown in the same frame it arrives.
+        smooth_meter(&mut db, &mut peak, &mut peak_at, 0.1, 0.033, now);
+        assert!((db + 20.0).abs() < 0.01);
+        assert!((peak + 20.0).abs() < 0.01);
+
+        // Silence releases by the configured rate, never below the floor.
+        smooth_meter(&mut db, &mut peak, &mut peak_at, 0.0, 0.1, now);
+        assert!(db < -20.0);
+        let later = now + METER_PEAK_HOLD + Duration::from_millis(100);
+        for _ in 0..200 {
+            smooth_meter(&mut db, &mut peak, &mut peak_at, 0.0, 0.1, later);
+        }
+        assert_eq!(db, METER_FLOOR_DB);
+        assert_eq!(peak, METER_FLOOR_DB);
     }
 
     #[test]
@@ -5952,5 +6410,47 @@ mod tests {
         // Unbinding a sound that has no hotkey is a no-op, never a panic.
         assert_eq!(unbind(&mut sound), None);
         assert_eq!(sound.hotkey, None);
+    }
+
+    /// Grid and list used to be two renderers; this pins the geometry decisions
+    /// the merged one still makes.
+    #[test]
+    fn item_geometry_matches_the_layout_it_renders() {
+        let card = Rect::from_min_size(Pos2::ZERO, Vec2::new(240.0, CARD_HEIGHT));
+        let grid = item_geometry(ItemLayout::Grid, card, true, true, false);
+        assert_eq!(grid.radius, theme::RADIUS_LG);
+        assert!(grid.flash_overlay);
+        let chip = grid.chip.expect("cards always draw the chip");
+        assert!(card.contains_rect(chip));
+        assert!(
+            grid.name.top() >= chip.bottom(),
+            "the name starts below the chip"
+        );
+        let volume = grid.volume.expect("cards always draw the volume bar");
+        assert!(card.contains_rect(volume));
+
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(700.0, ROW_HEIGHT));
+        let list = item_geometry(ItemLayout::List, row, true, true, false);
+        assert_eq!(list.radius, theme::RADIUS_MD);
+        assert!(!list.flash_overlay);
+        assert!(row.contains_rect(list.chip.expect("RAM chip while the state is shown")));
+        let volume = list.volume.expect("a wide row has room for the track");
+        assert!(row.contains_rect(volume));
+        assert!(
+            volume.left() >= list.name.right(),
+            "the track starts after the name"
+        );
+
+        // RAM state hidden and the file healthy: no chip, and its space goes to
+        // the volume track.
+        let dense = item_geometry(ItemLayout::List, row, true, false, false);
+        assert!(dense.chip.is_none());
+        assert!(dense.volume.expect("volume").width() > volume.width());
+
+        // Too narrow for a usable track: dropped instead of squashed.
+        let tight = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, ROW_HEIGHT));
+        assert!(item_geometry(ItemLayout::List, tight, true, true, false)
+            .volume
+            .is_none());
     }
 }

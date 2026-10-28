@@ -92,7 +92,7 @@ specification:**
 | --- | --- |
 | FR-5.2.1 | A fresh config MUST contain one library named `Main` (id 1) and no sounds. |
 | FR-5.2.2 | Libraries MUST be addable, renamable and deletable; the last remaining library MUST NOT be deletable. |
-| FR-5.2.3 | Deleting a library MUST move its sounds to the first remaining library, not delete them. |
+| FR-5.2.3 | Deleting a library MUST ask, in a confirmation dialog, whether to move its sounds to a remaining library the user chooses or to remove the sounds from the board; cancelling MUST leave the library untouched. Removing sounds MUST NOT touch their files (FR-5.3.14). |
 | FR-5.2.4 | Exactly one library is active at a time; the active tab is persisted. |
 | FR-5.2.5 | The active library selects which sounds are shown and which hotkeys are registered. |
 | FR-5.2.6 | Sounds MAY be dragged between libraries and reordered inside one. |
@@ -106,7 +106,7 @@ specification:**
 | FR-5.3.3 | Duplicates MUST be rejected by canonical path, including the same file reached through a different case or path form. |
 | FR-5.3.4 | A sound MUST have: id, display name (defaults to the file stem), path, volume in `0..=1`, optional hotkey, optional RAM preload. |
 | FR-5.3.5 | RAM preload MUST only be meaningful for sounds with a hotkey; assigning no hotkey clears it. |
-| FR-5.3.6 | A sound whose file is missing MUST be marked in the UI; triggering it MUST offer to locate the file instead of failing silently. |
+| FR-5.3.6 | A sound whose file is missing MUST be marked in the UI; triggering it MUST report the failure in the status log and MUST NOT open a dialog on its own. Relinking MUST be offered from the sound's context menu (Locate). |
 | FR-5.3.7 | Removing a sound MUST be undoable once (`Ctrl+Z` restores the last removal at its original index). |
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
@@ -423,7 +423,7 @@ Rules that enforce them:
 
 | Failure | Required behaviour |
 | --- | --- |
-| Sound file missing | Card marked; triggering opens Locate; log entry. |
+| Sound file missing | Card marked; triggering logs an error; relink via context menu → Locate. |
 | Sound decode fails | Log entry with the reason; the sound stays registered. |
 | Loop file missing/corrupt | Loop state `Error`; mixer parks; retry available. |
 | Device unplugged | Slot stops, `DeviceError` logged, `device_ready` cleared, route restartable. |
