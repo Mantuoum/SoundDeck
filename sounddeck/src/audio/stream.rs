@@ -179,6 +179,12 @@ fn pump(
     }
 }
 
+/// Sends `samples` as whole-frame chunks of at most [`STREAM_CHUNK_FRAMES`].
+///
+/// Chunk parity is an invariant of this channel: the mixer consumes whole
+/// stereo frames, so a chunk with an odd number of samples would leave a
+/// half frame behind. A trailing partial frame (a truncated last sample in the
+/// file) is therefore dropped here rather than handed on.
 fn send_pcm(tx: &Sender<Vec<f32>>, stop: &AtomicBool, samples: &[f32]) -> Result<()> {
     let mut rest = samples;
     while !rest.is_empty() {
@@ -186,9 +192,14 @@ fn send_pcm(tx: &Sender<Vec<f32>>, stop: &AtomicBool, samples: &[f32]) -> Result
             return Ok(());
         }
         let take = (STREAM_CHUNK_FRAMES * CHANNELS).min(rest.len());
-        tx.send(rest[..take].to_vec())
+        let whole = take - take % CHANNELS;
+        if whole == 0 {
+            // Only a lone sample is left; it cannot form a frame.
+            return Ok(());
+        }
+        tx.send(rest[..whole].to_vec())
             .map_err(|_| anyhow::anyhow!("stream channel closed"))?;
-        rest = &rest[take..];
+        rest = &rest[whole..];
     }
     Ok(())
 }
@@ -308,5 +319,40 @@ mod tests {
     #[test]
     fn missing_file_fails_before_spawning() {
         assert!(spawn_once(Path::new("Z:\\nope.wav")).is_err());
+    }
+
+    #[test]
+    fn chunks_carry_whole_frames_only() {
+        let (tx, rx) = crossbeam_channel::bounded(8);
+        let stop = AtomicBool::new(false);
+
+        // Two whole frames plus a lone trailing sample (a truncated final frame).
+        send_pcm(&tx, &stop, &[0.1, 0.2, 0.3, 0.4, 0.5]).unwrap();
+
+        let chunk = rx.recv().unwrap();
+        assert_eq!(chunk.len(), 4, "the stray sample must not be sent");
+        assert_eq!(chunk.len() % CHANNELS, 0);
+        assert!(rx.try_recv().is_err(), "nothing else may be sent");
+    }
+
+    #[test]
+    fn long_input_is_split_on_frame_boundaries() {
+        let (tx, rx) = crossbeam_channel::bounded(16);
+        let stop = AtomicBool::new(false);
+        let samples = vec![0.25f32; STREAM_CHUNK_FRAMES * CHANNELS + 3];
+
+        send_pcm(&tx, &stop, &samples).unwrap();
+
+        let mut total = 0usize;
+        let mut chunks = 0usize;
+        while let Ok(chunk) = rx.try_recv() {
+            assert_eq!(chunk.len() % CHANNELS, 0, "odd chunk: {}", chunk.len());
+            total += chunk.len();
+            chunks += 1;
+        }
+        // 1024 frames + one whole frame from the 3-sample tail; the odd sample
+        // that cannot form a frame is dropped.
+        assert_eq!(total, STREAM_CHUNK_FRAMES * CHANNELS + CHANNELS);
+        assert_eq!(chunks, 2);
     }
 }

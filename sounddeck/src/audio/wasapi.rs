@@ -5,10 +5,9 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::Sender;
-use windows::core::{GUID, PCWSTR};
+use windows::core::{GUID, HRESULT, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::BOOL;
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, BOOL, S_FALSE, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -59,12 +58,24 @@ struct ComGuard {
     initialized: bool,
 }
 
+/// Only an `S_OK` from `CoInitializeEx` means *this* guard owns the COM
+/// apartment and may call `CoUninitialize`. `S_FALSE` means the thread was
+/// already initialized by someone else — uninitializing it would tear down COM
+/// underneath that owner.
+fn owns_initialization(result: HRESULT) -> bool {
+    result == S_OK
+}
+
 impl ComGuard {
     fn new() -> Result<Self, String> {
         unsafe {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-            if hr.is_ok() {
+            if owns_initialization(hr) {
                 Ok(Self { initialized: true })
+            } else if hr == S_FALSE {
+                // Already initialized on this thread: usable, but not ours to
+                // release (see `owns_initialization`).
+                Ok(Self { initialized: false })
             } else {
                 Err(format!("COM initialization failed: {}", hr.message()))
             }
@@ -146,7 +157,17 @@ enum SampleKind {
     I32,
 }
 
-impl SampleKind {}
+impl SampleKind {
+    /// Width of one sample in the device buffer, in bytes.
+    fn sample_bytes(self) -> usize {
+        match self {
+            Self::F32 | Self::I32 => 4,
+            Self::F64 => 8,
+            Self::I16 => 2,
+            Self::I24 => 3,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Format {
@@ -200,9 +221,19 @@ unsafe fn parse_format(raw: *const WAVEFORMATEX) -> Result<Format, String> {
 
     let channels = base.nChannels as usize;
     let block_align = base.nBlockAlign as usize;
+    if block_align % channels != 0 {
+        // Truncating division here would silently give the wrong sample stride
+        // and scribble one channel's samples over another's.
+        return Err(format!(
+            "Invalid audio block alignment: {block_align} bytes for {channels} channels"
+        ));
+    }
     let bytes_per_sample = block_align / channels;
-    if bytes_per_sample == 0 {
-        return Err("Invalid audio block alignment".into());
+    if bytes_per_sample < kind.sample_bytes() {
+        return Err(format!(
+            "Invalid audio format: {bytes_per_sample}-byte stride for {}-byte samples",
+            kind.sample_bytes()
+        ));
     }
 
     Ok(Format {
@@ -452,6 +483,33 @@ fn render_loop(
     }
 }
 
+/// 24-bit PCM range, as stored in the low three bytes of an i32.
+const I24_MAX: i32 = 8_388_607;
+const I24_MIN: i32 = -8_388_608;
+
+/// Integer scaling for one float sample: `+1.0` and `-1.0` land the same distance
+/// from zero, rounding half away from zero, and the result is clamped to the
+/// integer range so no value can wrap.
+fn scale_to_int(value: f32, max: f64, min: f64) -> f64 {
+    (value as f64 * max).round().clamp(min, max)
+}
+
+/// Fill one device buffer with the canonical stereo frame data.
+///
+/// # Channel policy (deliberate)
+///
+/// SoundDeck only ever produces stereo. Measured devices get:
+/// * **1 channel** — the mono down-mix `(L + R) / 2`, so nothing is lost.
+/// * **2 channels** — left and right unchanged.
+/// * **more than 2** — left/right in the first two channels, every remaining
+///   channel written as digital silence. A shared-mode 5.1 mix format is normal
+///   on a surround endpoint, but faking a centre/surround up-mix would put audio
+///   where the user never asked for it, so the extra channels stay silent.
+///
+/// # Safety
+///
+/// `dst` must point to at least `frames * format.block_align` writable bytes, as
+/// guaranteed by `IAudioRenderClient::GetBuffer`.
 unsafe fn write_output(format: &Format, stereo: &[f32], frames: usize, dst: *mut u8) {
     let channels = format.channels;
     let bytes = format.bytes_per_sample;
@@ -473,20 +531,161 @@ unsafe fn write_output(format: &Format, stereo: &[f32], frames: usize, dst: *mut
             match format.kind {
                 SampleKind::F32 => (target as *mut f32).write_unaligned(value),
                 SampleKind::F64 => (target as *mut f64).write_unaligned(value as f64),
-                SampleKind::I16 => {
-                    (target as *mut i16).write_unaligned((value * i16::MAX as f32) as i16)
-                }
-                SampleKind::I32 => {
-                    (target as *mut i32).write_unaligned((value as f64 * i32::MAX as f64) as i32)
-                }
+                SampleKind::I16 => (target as *mut i16).write_unaligned(scale_to_int(
+                    value,
+                    i16::MAX as f64,
+                    i16::MIN as f64,
+                ) as i16),
+                SampleKind::I32 => (target as *mut i32).write_unaligned(scale_to_int(
+                    value,
+                    i32::MAX as f64,
+                    i32::MIN as f64,
+                ) as i32),
                 SampleKind::I24 => {
-                    let sample = (value as f64 * 8_388_607.0) as i32;
-                    let bytes = sample.to_le_bytes();
-                    target.write(bytes[0]);
-                    target.add(1).write(bytes[1]);
-                    target.add(2).write(bytes[2]);
+                    let sample = scale_to_int(value, I24_MAX as f64, I24_MIN as f64) as i32;
+                    let raw = sample.to_le_bytes();
+                    target.write(raw[0]);
+                    target.add(1).write(raw[1]);
+                    target.add(2).write(raw[2]);
+                    // A 24-in-32 container leaves pad bytes: clear them instead
+                    // of handing the driver whatever the buffer held.
+                    for pad in 3..bytes {
+                        target.add(pad).write(0);
+                    }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn i16_format(channels: usize) -> Format {
+        Format {
+            channels,
+            rate: SAMPLE_RATE,
+            block_align: channels * 2,
+            bytes_per_sample: 2,
+            kind: SampleKind::I16,
+        }
+    }
+
+    /// Runs `write_output` over one frame and returns the raw device bytes.
+    fn render_frame(format: &Format, left: f32, right: f32) -> Vec<u8> {
+        let mut buffer = vec![0u8; format.block_align];
+        // SAFETY: `buffer` is exactly one frame (`block_align` bytes) and
+        // `write_output` only writes inside that frame.
+        unsafe { write_output(format, &[left, right], 1, buffer.as_mut_ptr()) };
+        buffer
+    }
+
+    fn i16_at(bytes: &[u8], index: usize) -> i16 {
+        i16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]])
+    }
+
+    #[test]
+    fn integer_scaling_is_symmetric_around_zero() {
+        let max = i16::MAX as f64;
+        let min = i16::MIN as f64;
+        assert_eq!(scale_to_int(0.0, max, min), 0.0);
+        assert_eq!(scale_to_int(1.0, max, min), i16::MAX as f64);
+        assert_eq!(scale_to_int(-1.0, max, min), -(i16::MAX as f64));
+        assert_eq!(scale_to_int(0.5, max, min), 16_384.0);
+        assert_eq!(scale_to_int(-0.5, max, min), -16_384.0);
+        // Clamped: cannot wrap the integer, however hot the signal is.
+        assert_eq!(scale_to_int(4.0, max, min), i16::MAX as f64);
+        assert_eq!(scale_to_int(-4.0, max, min), i16::MIN as f64);
+    }
+
+    #[test]
+    fn stereo_output_keeps_left_and_right() {
+        let format = i16_format(2);
+        let bytes = render_frame(&format, 1.0, -1.0);
+        assert_eq!(i16_at(&bytes, 0), i16::MAX);
+        assert_eq!(i16_at(&bytes, 1), -i16::MAX);
+        assert_eq!(bytes.len(), 4);
+    }
+
+    #[test]
+    fn mono_output_is_the_downmix() {
+        let format = i16_format(1);
+        let bytes = render_frame(&format, 1.0, -1.0);
+        assert_eq!(i16_at(&bytes, 0), 0, "(1.0 + -1.0) / 2 == 0");
+
+        let bytes = render_frame(&format, 0.5, 0.5);
+        assert_eq!(i16_at(&bytes, 0), 16_384);
+    }
+
+    #[test]
+    fn surround_output_leaves_the_extra_channels_silent() {
+        let format = i16_format(6);
+        let bytes = render_frame(&format, 0.5, -0.5);
+        assert_eq!(i16_at(&bytes, 0), 16_384);
+        assert_eq!(i16_at(&bytes, 1), -16_384);
+        for channel in 2..6 {
+            assert_eq!(i16_at(&bytes, channel), 0, "channel {channel} not silent");
+        }
+    }
+
+    #[test]
+    fn float_output_writes_the_sample_unchanged() {
+        let format = Format {
+            channels: 2,
+            rate: SAMPLE_RATE,
+            block_align: 8,
+            bytes_per_sample: 4,
+            kind: SampleKind::F32,
+        };
+        let bytes = render_frame(&format, 0.25, -0.75);
+        let left = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let right = f32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!((left, right), (0.25, -0.75));
+    }
+
+    fn wave_format(channels: u16, bits: u16, block_align: u16) -> WAVEFORMATEX {
+        WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_IEEE_FLOAT as u16,
+            nChannels: channels,
+            nSamplesPerSec: SAMPLE_RATE,
+            nAvgBytesPerSec: SAMPLE_RATE * block_align as u32,
+            nBlockAlign: block_align,
+            wBitsPerSample: bits,
+            cbSize: 0,
+        }
+    }
+
+    #[test]
+    fn an_indivisible_block_align_is_rejected() {
+        let raw = wave_format(4, 32, 14); // 14 / 4 would truncate to a 3-byte stride
+                                          // SAFETY: the pointer is a live, fully initialised `WAVEFORMATEX`.
+        let parsed = unsafe { parse_format(&raw) };
+        assert!(parsed.is_err(), "indivisible block align must fail loudly");
+    }
+
+    #[test]
+    fn a_valid_format_parses_the_sample_stride() {
+        let raw = wave_format(2, 32, 8);
+        // SAFETY: the pointer is a live, fully initialised `WAVEFORMATEX`.
+        let format = unsafe { parse_format(&raw) }.expect("stereo f32 is supported");
+        assert_eq!(format.channels, 2);
+        assert_eq!(format.bytes_per_sample, 4);
+        assert_eq!(format.block_align, 8);
+    }
+
+    #[test]
+    fn a_stride_narrower_than_the_sample_is_rejected() {
+        let raw = wave_format(2, 32, 4); // 2-byte stride for a 4-byte f32 sample
+                                         // SAFETY: the pointer is a live, fully initialised `WAVEFORMATEX`.
+        let parsed = unsafe { parse_format(&raw) };
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn only_an_s_ok_com_initialization_is_owned() {
+        assert!(owns_initialization(S_OK));
+        assert!(!owns_initialization(S_FALSE));
+        assert!(!owns_initialization(HRESULT(-1)));
     }
 }
