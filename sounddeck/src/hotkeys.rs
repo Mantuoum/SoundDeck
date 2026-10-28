@@ -413,11 +413,64 @@ where
     duplicates
 }
 
+/// Keys the hook treats as held. Fixed capacity, because the hook runs on every
+/// keystroke and must not allocate: a physical keyboard cannot press more
+/// distinct keys at once than this, and if it somehow does, the extra keys are
+/// simply not tracked (chords keep working, that key's auto-repeat guard opens).
+const HELD_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HeldKeys {
+    keys: [u32; HELD_CAPACITY],
+    len: usize,
+}
+
+impl HeldKeys {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn as_slice(&self) -> &[u32] {
+        &self.keys[..self.len]
+    }
+
+    fn contains(&self, vk: u32) -> bool {
+        self.as_slice().contains(&vk)
+    }
+
+    fn push(&mut self, vk: u32) {
+        if self.len < HELD_CAPACITY {
+            self.keys[self.len] = vk;
+            self.len += 1;
+        }
+    }
+
+    fn retain(&mut self, keep: impl Fn(u32) -> bool) {
+        let mut len = 0;
+        for index in 0..self.len {
+            let key = self.keys[index];
+            if keep(key) {
+                self.keys[len] = key;
+                len += 1;
+            }
+        }
+        self.len = len;
+    }
+}
+
 /// Drops tracked keys the OS reports as released. A missed key-up (the hook was
 /// re-entered, the session was switched) would otherwise keep a key "held"
 /// forever, turning every later press into an auto-repeat.
-fn retain_held(down: &mut Vec<u32>, held: impl Fn(u32) -> bool) {
-    down.retain(|vk| held(*vk));
+fn retain_held(down: &mut HeldKeys, held: impl Fn(u32) -> bool) {
+    down.retain(held);
+}
+
+/// True when a window title belongs to this app. Windows appends suffixes such
+/// as `[Administrator]` or `- Shortcut` to the title it shows in the taskbar, so
+/// the stable title is the *prefix*; the exe-path check in `main_window` still
+/// decides which process the window belongs to.
+fn title_matches(title: &str) -> bool {
+    title.starts_with(crate::model::WINDOW_TITLE)
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +676,7 @@ mod win {
     struct HookShared {
         bindings: Vec<(Hotkey, u64)>,
         stop_all: Option<Hotkey>,
-        down: Vec<u32>,
+        down: HeldKeys,
         hwnd: HWND,
     }
 
@@ -660,6 +713,17 @@ mod win {
 
     unsafe impl Send for State {}
 
+    /// Zeroes the published hook-thread id when the thread leaves, whatever the
+    /// exit path (including an early return and an unwind): a late `wake()` must
+    /// never post to a thread id that no longer exists.
+    struct ThreadIdGuard(Arc<AtomicU32>);
+
+    impl Drop for ThreadIdGuard {
+        fn drop(&mut self) {
+            self.0.store(0, Ordering::SeqCst);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         rx: Receiver<Command>,
@@ -671,6 +735,7 @@ mod win {
         tooltip: String,
         playback: Arc<crate::playback::Playback>,
     ) {
+        let _thread_id_guard = ThreadIdGuard(thread_id.clone());
         unsafe {
             let hinstance: HINSTANCE = GetModuleHandleW(None).map(Into::into).unwrap_or_default();
             let class_name = w!("SoundDeckHiddenWindow");
@@ -702,7 +767,7 @@ mod win {
             let hook = Rc::new(RefCell::new(HookShared {
                 bindings: Vec::new(),
                 stop_all: None,
-                down: Vec::new(),
+                down: HeldKeys::new(),
                 hwnd: HWND::default(),
             }));
             // Liveness lives outside the state box: a wake posted before shutdown
@@ -844,11 +909,11 @@ mod win {
                     let mut keys = std::mem::take(&mut hook.down);
                     retain_held(&mut keys, |key| key_down(key as i32));
                     if is_down {
-                        if !keys.contains(&vk) {
+                        if !keys.contains(vk) {
                             keys.push(vk);
                             // Modifiers come from the tracked keys, not a second
                             // live poll that could disagree with them.
-                            let mods = Mods::from_keys(&keys);
+                            let mods = Mods::from_keys(keys.as_slice());
                             if hook
                                 .stop_all
                                 .map(|hotkey| hotkey.vk == vk && hotkey.mods == mods)
@@ -865,7 +930,7 @@ mod win {
                             }
                         }
                     } else {
-                        keys.retain(|key| *key != vk);
+                        keys.retain(|key| key != vk);
                     }
                     hook.down = keys;
                 }
@@ -1088,7 +1153,7 @@ mod win {
             if len == 0 {
                 return BOOL(1);
             }
-            if String::from_utf16_lossy(&title[..len as usize]) != crate::model::WINDOW_TITLE {
+            if !title_matches(&String::from_utf16_lossy(&title[..len as usize])) {
                 return BOOL(1);
             }
             let mut pid = 0u32;
@@ -1310,9 +1375,35 @@ mod tests {
 
     #[test]
     fn released_keys_are_dropped_from_the_tracked_set() {
-        let mut down = vec![VK_LCONTROL, b'S' as u32];
+        let mut down = HeldKeys::new();
+        down.push(VK_LCONTROL);
+        down.push(b'S' as u32);
         retain_held(&mut down, |vk| vk == VK_LCONTROL);
-        assert_eq!(down, vec![VK_LCONTROL]);
+        assert_eq!(down.as_slice(), &[VK_LCONTROL]);
+    }
+
+    #[test]
+    fn a_full_held_set_ignores_extra_keys_instead_of_growing() {
+        let mut down = HeldKeys::new();
+        for index in 0..HELD_CAPACITY as u32 + 4 {
+            down.push(b'A' as u32 + index);
+        }
+        assert_eq!(down.as_slice().len(), HELD_CAPACITY);
+        assert!(down.contains(b'A' as u32));
+        retain_held(&mut down, |vk| vk % 2 == 0);
+        assert!(!down.as_slice().is_empty());
+        assert!(down.as_slice().iter().all(|vk| vk % 2 == 0));
+    }
+
+    #[test]
+    fn window_title_match_accepts_the_os_appended_suffixes() {
+        let title = crate::model::WINDOW_TITLE;
+        assert!(title_matches(title));
+        assert!(title_matches(&format!("{title} [Administrator]")));
+        assert!(title_matches(&format!("{title} - Shortcut")));
+        assert!(!title_matches("SoundDeck"));
+        assert!(!title_matches("SoundDeck - Something Else"));
+        assert!(!title_matches(""));
     }
 
     #[test]

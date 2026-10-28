@@ -23,8 +23,12 @@ static MIXER_ITERS: AtomicU64 = AtomicU64::new(0);
 static MIXER_RENDERS: AtomicU64 = AtomicU64::new(0);
 static MIXER_SLEEPS: AtomicU64 = AtomicU64::new(0);
 
-static POP_CALLS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
-static POP_EMPTY: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// One counter pair per audio output slot (`Slot::index()`). The arrays, the
+/// bounds check in [`ring_pop`] and the label loop in [`report`] all read this,
+/// so a third output slot cannot be half-added: it is one number to change.
+const SLOT_PAIRS: usize = 2;
+static POP_CALLS: [AtomicU64; SLOT_PAIRS] = [const { AtomicU64::new(0) }; SLOT_PAIRS];
+static POP_EMPTY: [AtomicU64; SLOT_PAIRS] = [const { AtomicU64::new(0) }; SLOT_PAIRS];
 
 static VOICES: AtomicU32 = AtomicU32::new(0);
 /// Voice underruns: a stream voice asked the mixer for samples and the channel
@@ -72,14 +76,14 @@ fn report(elapsed: f64) -> String {
     let iters = MIXER_ITERS.swap(0, Ordering::Relaxed);
     let renders = MIXER_RENDERS.swap(0, Ordering::Relaxed);
     let sleeps = MIXER_SLEEPS.swap(0, Ordering::Relaxed);
-    let pop = [
-        POP_CALLS[0].swap(0, Ordering::Relaxed),
-        POP_CALLS[1].swap(0, Ordering::Relaxed),
-    ];
-    let empty = [
-        POP_EMPTY[0].swap(0, Ordering::Relaxed),
-        POP_EMPTY[1].swap(0, Ordering::Relaxed),
-    ];
+    // One segment per slot pair: the loop covers every counter the module has,
+    // so adding a slot cannot leave its numbers unreported.
+    let mut pops = String::new();
+    for slot in 0..SLOT_PAIRS {
+        let calls = POP_CALLS[slot].swap(0, Ordering::Relaxed) as f64 / elapsed;
+        let empty = POP_EMPTY[slot].swap(0, Ordering::Relaxed) as f64 / elapsed;
+        pops.push_str(&format!(" pop{slot}={calls:.0}/{empty:.0}"));
+    }
     let stream_underruns = STREAM_UNDERRUNS.swap(0, Ordering::Relaxed);
 
     let fps = frames as f64 / elapsed;
@@ -95,18 +99,14 @@ fn report(elapsed: f64) -> String {
     };
     format!(
         "[stats] fps={fps:.1} frame_avg_ms={avg_ms:.2} frame_max_ms={:.2} hidden={} repaint={}ms \
-         mixer_iters={:.0} mixer_renders={:.0} mixer_sleeps={:.0} \
-         pop0={:.0}/{:.0} pop1={:.0}/{:.0} voices={} loop={loop_label} stream_underruns={}",
+         mixer_iters={:.0} mixer_renders={:.0} mixer_sleeps={:.0}{pops} \
+         voices={} loop={loop_label} stream_underruns={}",
         frame_max as f64 / 1_000_000.0,
         HIDDEN.load(Ordering::Relaxed) as u8,
         REPAINT_MS.load(Ordering::Relaxed),
         iters as f64 / elapsed,
         renders as f64 / elapsed,
         sleeps as f64 / elapsed,
-        pop[0] as f64 / elapsed,
-        empty[0] as f64 / elapsed,
-        pop[1] as f64 / elapsed,
-        empty[1] as f64 / elapsed,
         VOICES.load(Ordering::Relaxed),
         stream_underruns,
     )
@@ -157,7 +157,7 @@ pub fn ring_pop(slot: usize, frames: usize) {
     }
     // The slot comes from a device route; an unexpected index must skip the
     // counter, not panic (there is one counter pair per output slot).
-    if slot >= POP_CALLS.len() {
+    if slot >= SLOT_PAIRS {
         return;
     }
     if frames == 0 {
@@ -190,5 +190,16 @@ mod tests {
         ring_pop(usize::MAX, 0);
         ring_pop(0, 480);
         ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    /// The label loop is what keeps a new output slot out of the "silently
+    /// dropped" class: every counter pair must appear in the report line.
+    #[test]
+    fn report_should_name_every_slot_pair() {
+        let line = report(1.0);
+        for slot in 0..SLOT_PAIRS {
+            assert!(line.contains(&format!("pop{slot}=")), "{line}");
+        }
+        assert!(line.contains("stream_underruns="), "{line}");
     }
 }

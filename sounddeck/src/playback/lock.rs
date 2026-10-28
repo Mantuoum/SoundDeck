@@ -9,6 +9,11 @@
 //!
 //! The lock expires when the sound is removed from the board (the entry, and
 //! therefore the handle, is dropped) or when the app exits.
+//!
+//! **Windows only.** Off Windows the share mode is never set, so the handle is an
+//! ordinary read-only open: the file lock is a no-op and a file can be renamed or
+//! deleted while it is on the board. That is documented, not hidden — the product
+//! contract (SPEC ENV-1) scopes SoundDeck to Windows.
 
 use std::fs::{File, OpenOptions};
 use std::io;

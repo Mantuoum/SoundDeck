@@ -502,12 +502,10 @@ impl App {
         anim::set_os(anim::os_animations_enabled());
 
         let mut statuses = VecDeque::new();
+        // Same cap/de-dup rule as `log()`: startup repeats collapse instead of
+        // stacking, so the activity log reads the same however it was filled.
         let mut push_status = |kind: StatusKind, text: String| {
-            statuses.push_back(StatusEntry {
-                kind,
-                text,
-                at: Instant::now(),
-            });
+            record_status(&mut statuses, kind, text);
         };
 
         for warning in warnings {
@@ -3802,6 +3800,7 @@ impl App {
                 Id::new("settings_loop_enabled"),
                 "Enabled",
                 &mut enabled,
+                false,
                 true,
             ) {
                 self.set_loop_enabled(enabled);
@@ -3820,6 +3819,7 @@ impl App {
                     Id::new("settings_loop_monitor"),
                     "Monitor",
                     &mut monitor,
+                    false,
                     true,
                 ) {
                     self.cfg.loop_on_monitor = monitor;
@@ -3835,6 +3835,7 @@ impl App {
                     Id::new("settings_loop_cable"),
                     "Cable",
                     &mut cable,
+                    false,
                     true,
                 ) {
                     self.cfg.loop_on_cable = cable;
@@ -3848,12 +3849,16 @@ impl App {
         settings_group(ui, "Hotkey sounds", |ui| {
             let ram = self.playback_stats();
             let enabled = ram.is_some();
+            // A partly loaded board is neither on nor off: show the half-knob
+            // instead of claiming "off". A click still loads everything.
+            let mixed = matches!(ram, Some(RamState::Mixed));
             let mut on = matches!(ram, Some(RamState::On));
             if settings_toggle(
                 ui,
                 Id::new("settings_ram"),
                 "Load into RAM",
                 &mut on,
+                mixed,
                 enabled,
             ) {
                 self.set_all_hotkey_ram(on);
@@ -3865,6 +3870,7 @@ impl App {
                 Id::new("settings_show_ram"),
                 "Show RAM state",
                 &mut show_state,
+                false,
                 true,
             ) {
                 self.cfg.show_ram_state = show_state;
@@ -3910,6 +3916,7 @@ impl App {
                 Id::new("settings_stop_all"),
                 "Stop-all hotkey",
                 &mut enabled,
+                false,
                 true,
             ) {
                 self.cfg.stop_all_hotkey_enabled = enabled;
@@ -4008,6 +4015,7 @@ impl App {
                 Id::new("settings_animate"),
                 "Animate UI",
                 &mut animate,
+                false,
                 true,
             ) {
                 self.cfg.animate_ui = animate;
@@ -4025,6 +4033,7 @@ impl App {
                 Id::new("settings_minimize_to_tray"),
                 "Minimize to tray",
                 &mut minimize,
+                false,
                 self.tray_available,
             ) {
                 self.cfg.minimize_to_tray = minimize;
@@ -4039,6 +4048,7 @@ impl App {
                 Id::new("settings_show_gain"),
                 "Show gain",
                 &mut show_gain,
+                false,
                 true,
             ) {
                 self.cfg.show_gain_slider = show_gain;
@@ -5341,10 +5351,20 @@ fn settings_value(ui: &mut Ui, title: &str, control_width: f32, add_control: imp
 /// One boolean setting: a [`settings_value`] row holding a switch. The value is
 /// flipped in place; the return value says whether the user changed it, which is
 /// when the caller applies the side effects and saves.
-fn settings_toggle(ui: &mut Ui, id: Id, title: &str, value: &mut bool, enabled: bool) -> bool {
+///
+/// `mixed` paints the half-knob "some but not all" state (a value that is not
+/// `true`, yet is not a plain `false` either); it never changes what a click does.
+fn settings_toggle(
+    ui: &mut Ui,
+    id: Id,
+    title: &str,
+    value: &mut bool,
+    mixed: bool,
+    enabled: bool,
+) -> bool {
     let mut changed = false;
     settings_value(ui, title, SETTINGS_SWITCH_SIZE.x, |ui| {
-        changed = settings_switch(ui, id, value, enabled);
+        changed = settings_switch(ui, id, value, mixed, enabled);
     });
     changed
 }
@@ -5406,7 +5426,7 @@ fn open_url(url: &str) {
     }
 }
 
-fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool {
+fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, mixed: bool, enabled: bool) -> bool {
     let inner = ui.allocate_ui_with_layout(
         Vec2::new(ui.available_width(), SETTINGS_SWITCH_SIZE.y),
         Layout::right_to_left(Align::Min),
@@ -5431,7 +5451,7 @@ fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool
             theme::alpha(theme::accent(), (14.0 * hover) as u8),
         );
     }
-    paint_switch(painter, rect, *value, false, enabled);
+    paint_switch(painter, rect, *value, mixed, enabled);
     pressable(ui, id.with("press"), &response, theme::RADIUS_MD, 0.0);
 
     let clicked = enabled && response.clicked();
@@ -5609,7 +5629,7 @@ fn draw_grid(
                     let sound = &sounds[index];
                     let info = infos.get(&sound.id).unwrap_or(&no_info);
                     let state = playing.get(&sound.id).copied();
-                    let (rect, card_actions) = sound_item(
+                    let rect = sound_item(
                         ui,
                         Vec2::new(card_width, CARD_HEIGHT),
                         sound,
@@ -5622,9 +5642,9 @@ fn draw_grid(
                         show_ram,
                         libraries,
                         ItemLayout::Grid,
+                        actions,
                     );
                     rects.push((sound.id, rect));
-                    actions.extend(card_actions);
                 }
             });
             ui.add_space(spacing);
@@ -5660,7 +5680,7 @@ fn draw_list(
                 let sound = &sounds[index];
                 let info = infos.get(&sound.id).unwrap_or(&no_info);
                 let state = playing.get(&sound.id).copied();
-                let (rect, row_actions) = sound_item(
+                let rect = sound_item(
                     ui,
                     Vec2::new(ui.available_width(), ROW_HEIGHT),
                     sound,
@@ -5673,9 +5693,9 @@ fn draw_list(
                     show_ram,
                     libraries,
                     ItemLayout::List,
+                    actions,
                 );
                 rects.push((sound.id, rect));
-                actions.extend(row_actions);
                 ui.add_space(6.0);
             }
         });
@@ -6153,7 +6173,8 @@ fn item_geometry(
 
 /// One sound item for both the grid and the list. Painting follows the list's
 /// order (name, pill, chip, close, volume, progress); the layouts never overlap
-/// those rects, so the order is invisible.
+/// those rects, so the order is invisible. Actions are appended to the caller's
+/// buffer, so a frame of cards allocates nothing per item.
 #[allow(clippy::too_many_arguments)]
 fn sound_item(
     ui: &mut Ui,
@@ -6168,9 +6189,9 @@ fn sound_item(
     show_ram: bool,
     libraries: &[Library],
     layout: ItemLayout,
-) -> (Rect, Vec<Action>) {
+    actions: &mut Vec<Action>,
+) -> Rect {
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let mut actions = Vec::new();
     let painter = ui.painter().clone();
     let has_hotkey = sound.hotkey.is_some();
     let ram_active = has_hotkey && info.loaded;
@@ -6222,7 +6243,7 @@ fn sound_item(
         actions.push(Action::DragStop);
     }
     response.context_menu(|ui| {
-        sound_context_menu(ui, sound, info, libraries, &mut actions);
+        sound_context_menu(ui, sound, info, libraries, &mut *actions);
     });
 
     // Name.
@@ -6323,7 +6344,7 @@ fn sound_item(
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
 
-    (rect, actions)
+    rect
 }
 
 /// The per-sound trim row: −, the signed value, +, and a reset once it is not

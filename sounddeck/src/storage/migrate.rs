@@ -106,10 +106,25 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
     let legacy: LegacyConfig = match serde_json::from_str(text) {
         Ok(value) => value,
         Err(err) => {
-            let corrupt = base.join("sounddeck.json.corrupt");
-            let _ = fs::rename(&legacy_path, &corrupt);
+            // The snapshot must never clobber an earlier one: same numbering
+            // rule as `io::load_json` (`sounddeck.json.corrupt.2`, …).
+            let preferred = io::sidecar(&legacy_path, "corrupt");
+            let kept = match io::free_path(&preferred) {
+                Some(corrupt) => match fs::rename(&legacy_path, &corrupt) {
+                    Ok(()) => format!("Kept as {}.", io::file_label(&corrupt)),
+                    Err(_) => format!(
+                        "Kept as {} (could not be moved).",
+                        io::file_label(&legacy_path)
+                    ),
+                },
+                None => format!(
+                    "It was left in place: every {} name is taken.",
+                    io::file_label(&preferred)
+                ),
+            };
             warnings.push(format!(
-                "sounddeck.json was unreadable ({err}). Kept as sounddeck.json.corrupt; starting fresh."
+                "{} was unreadable ({err}). {kept} Starting fresh.",
+                io::file_label(&legacy_path)
             ));
             return None;
         }
@@ -336,6 +351,29 @@ mod tests {
 
         assert!(
             warnings.iter().any(|w| w.contains("unreadable")),
+            "{warnings:?}"
+        );
+        assert!(!base.join(CONFIG_FILE).exists());
+    }
+
+    #[test]
+    fn second_corrupt_legacy_file_should_not_clobber_the_first_snapshot() {
+        let base = test_dir("migrate-corrupt-twice");
+        let mut warnings = Vec::new();
+
+        fs::write(base.join(CONFIG_FILE), "{ broken one").unwrap();
+        assert!(import(&base, &mut warnings).is_none());
+        fs::write(base.join(CONFIG_FILE), "{ broken two").unwrap();
+        assert!(import(&base, &mut warnings).is_none());
+
+        let first = base.join("sounddeck.json.corrupt");
+        let second = base.join("sounddeck.json.corrupt.2");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "{ broken one");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "{ broken two");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("sounddeck.json.corrupt.2")),
             "{warnings:?}"
         );
         assert!(!base.join(CONFIG_FILE).exists());

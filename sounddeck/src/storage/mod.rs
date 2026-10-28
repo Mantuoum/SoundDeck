@@ -200,6 +200,19 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
     }
 }
 
+/// First id at or above `from` that no entry holds, falling back to the low ids
+/// once the counter saturates. A hostile `u64::MAX` id from a hand-edited file
+/// must neither overflow the increment nor spin the search (D14/B38 class):
+/// `seen` is finite, so one of the first `len + 1` ids is always free.
+fn next_free_id(seen: &HashSet<u64>, from: u64) -> u64 {
+    if from != 0 && !seen.contains(&from) {
+        return from;
+    }
+    (1..=seen.len() as u64 + 1)
+        .find(|id| !seen.contains(id))
+        .unwrap_or(1)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SoundConfig {
@@ -275,13 +288,10 @@ impl LibrariesFile {
         let mut next_library = 1u64;
         for library in &mut self.libraries {
             if library.id == 0 || !seen_libraries.insert(library.id) {
-                while seen_libraries.contains(&next_library) {
-                    next_library += 1;
-                }
-                library.id = next_library;
+                library.id = next_free_id(&seen_libraries, next_library);
                 seen_libraries.insert(library.id);
             }
-            next_library = next_library.max(library.id + 1);
+            next_library = next_library.max(library.id.saturating_add(1));
             if library.name.trim().is_empty() {
                 library.name = format!("Library {}", library.id);
             }
@@ -787,6 +797,40 @@ mod tests {
         assert_eq!(file.libraries[0].sounds[0].id, 4);
         assert_eq!(file.libraries[0].sounds[1].id, 5);
         assert_eq!(file.libraries[1].sounds[0].id, 6);
+    }
+
+    #[test]
+    fn generated_library_ids_should_saturate_on_a_hostile_max_id() {
+        // `u64::MAX` from a hand-edited file used to overflow `id + 1` (a debug
+        // panic) and to spin the "next free id" search.
+        let mut file = LibrariesFile {
+            version: LIBRARIES_VERSION,
+            libraries: vec![
+                LibraryConfig {
+                    id: u64::MAX,
+                    name: "Max".into(),
+                    sounds: Vec::new(),
+                },
+                LibraryConfig {
+                    id: 0,
+                    name: "Zero".into(),
+                    sounds: Vec::new(),
+                },
+                LibraryConfig {
+                    id: u64::MAX,
+                    name: "Dup".into(),
+                    sounds: Vec::new(),
+                },
+            ],
+        };
+        file.normalize();
+
+        assert_eq!(file.libraries[0].id, u64::MAX);
+        assert_eq!(
+            file.libraries[1].id, 1,
+            "the search falls back to the low ids"
+        );
+        assert_eq!(file.libraries[2].id, 2);
     }
 
     #[test]

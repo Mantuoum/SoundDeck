@@ -8,6 +8,12 @@
 //! [`Refusal`] on failure, and [`Refusal::message`] is the only place the
 //! user-visible wording lives. There is no second function that re-derives the
 //! caps just to describe them.
+//!
+//! **Windows only.** Off Windows [`process_bytes`] returns `None`, which
+//! [`admit`] treats as "do not grow" ([`Refusal::ProcessUnreadable`]): the cache
+//! fails closed, so nothing is ever preloaded and every sound streams from disk.
+//! SoundDeck is a Windows product (SPEC ENV-1); that is a documented limit of the
+//! portability shims, not a silent failure.
 
 use crate::audio::decode::{CHANNELS, SAMPLE_RATE};
 
