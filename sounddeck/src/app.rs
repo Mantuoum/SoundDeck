@@ -12,7 +12,10 @@ use eframe::egui::{
 use crate::audio::engine::{AudioEvent, DeviceRoute, Engine, Slot};
 use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
-use crate::hotkeys::{main_window_minimized, Hotkey, HotkeyService, ServiceEvent, TrayCommand};
+use crate::hotkeys::{
+    chord_owner, duplicate_sounds, main_window_minimized, mods_from_egui, ChordOwner, Hotkey,
+    HotkeyService, ServiceEvent, TrayCommand,
+};
 use crate::icon;
 use crate::model::{
     self, display_name, format_bytes, format_duration, is_supported_file, Layout as SoundLayout,
@@ -789,13 +792,10 @@ impl App {
                     }
                 }
                 Action::ClearHotkey(id) => {
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        sound.hotkey = None;
-                        sound.hotkey_error = None;
-                        sound.ram = false;
+                    if self.clear_sound_hotkey(id).is_some() {
+                        self.sync_active_library();
+                        self.mark_dirty();
                     }
-                    self.sync_active_library();
-                    self.mark_dirty();
                 }
                 Action::ToggleRam(id) => self.toggle_sound_ram(id),
                 Action::MoveSound(id, library_id) => {
@@ -1190,46 +1190,70 @@ impl App {
         }
     }
 
-    fn sync_hotkeys(&mut self) {
-        let mut used: HashSet<String> = HashSet::new();
-        let mut bindings = Vec::new();
-        for sound in &mut self.sounds {
-            if sound.library_id != self.active_library {
-                sound.hotkey_error = None;
-                continue;
-            }
-            let Some(hotkey) = sound.hotkey else {
-                continue;
-            };
-            let label = hotkey.label();
-            if used.contains(&label) {
-                sound.hotkey_error = Some(format!("{label} is also used by another sound"));
-                continue;
-            }
-            used.insert(label);
-            bindings.push((sound.id, hotkey));
-        }
+    /// The active library's sounds in tab order, in the shape the chord rules
+    /// want. Only the active library is registered (FR-5.7.7), so only it can
+    /// conflict.
+    fn chord_sounds(&self) -> impl Iterator<Item = (u64, Option<Hotkey>)> + '_ {
+        self.sounds
+            .iter()
+            .filter(|sound| sound.library_id == self.active_library)
+            .map(|sound| (sound.id, sound.hotkey))
+    }
+
+    /// The stop-all chord that is actually live, if the feature is enabled.
+    fn stop_all_chord(&self) -> Option<Hotkey> {
         if self.cfg.stop_all_hotkey_enabled {
-            if let Some(hotkey) = self.stop_all {
-                let label = hotkey.label();
-                if used.contains(&label) {
-                    self.log(
-                        StatusKind::Warning,
-                        format!("Stop-all hotkey {label} is used by a sound; cleared"),
-                    );
-                    self.stop_all = None;
-                } else {
-                    used.insert(label);
-                }
+            self.stop_all
+        } else {
+            None
+        }
+    }
+
+    /// How a chord conflict is worded in the capture dialog and the log.
+    fn owner_label(&self, owner: ChordOwner) -> String {
+        match owner {
+            ChordOwner::StopAll => "Stop all".to_string(),
+            ChordOwner::Sound(id) => format!("\"{}\"", self.sound_name(id)),
+        }
+    }
+
+    fn sync_hotkeys(&mut self) {
+        // One owner for the duplicate rules (FR-5.7.5): the stop-all chord beats
+        // sounds and the first sound in tab order beats later ones. Every loser is
+        // unbound like a manual clear, logged, and the change is persisted.
+        let mut changed = false;
+        for id in duplicate_sounds(self.chord_sounds(), self.stop_all_chord()) {
+            if let Some((name, hotkey)) = self.clear_sound_hotkey(id) {
+                self.log(
+                    StatusKind::Warning,
+                    format!(
+                        "Hotkey {} is already in use; cleared for \"{name}\"",
+                        hotkey.label()
+                    ),
+                );
+                changed = true;
             }
         }
-        self.hotkeys
-            .set_stop_all(if self.cfg.stop_all_hotkey_enabled {
-                self.stop_all
-            } else {
-                None
-            });
+        let bindings: Vec<(u64, Hotkey)> = self
+            .chord_sounds()
+            .filter_map(|(id, hotkey)| hotkey.map(|hotkey| (id, hotkey)))
+            .collect();
+        self.hotkeys.set_stop_all(self.stop_all_chord());
         self.hotkeys.set_bindings(bindings);
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
+    /// Drops a sound's hotkey and returns it with the sound's name, so the caller
+    /// can explain the change. The one unbind path (FR-5.3.5): RAM off, not
+    /// retained, no stale error.
+    fn clear_sound_hotkey(&mut self, id: u64) -> Option<(String, Hotkey)> {
+        let sound = self.sounds.iter_mut().find(|sound| sound.id == id)?;
+        let hotkey = unbind(sound)?;
+        let name = sound.name.clone();
+        self.playback.set_retain(id, false);
+        Some((name, hotkey))
     }
 
     /// Only the active library is live: its hotkeys are registered and only its
@@ -1293,12 +1317,6 @@ impl App {
             self.cfg.preload_hotkey_sounds = on;
             self.mark_dirty();
         }
-    }
-
-    fn find_conflict(&self, hotkey: Hotkey, except_id: u64) -> Option<&Sound> {
-        self.sounds.iter().find(|s| {
-            s.id != except_id && s.library_id == self.active_library && s.hotkey == Some(hotkey)
-        })
     }
 
     fn toggle_sound_ram(&mut self, id: u64) {
@@ -3406,7 +3424,7 @@ impl App {
                     close = true;
                     continue;
                 }
-                let plain = !(modifiers.ctrl || modifiers.alt || modifiers.shift);
+                let plain = mods_from_egui(&modifiers).is_empty();
                 if (key == Key::Backspace || key == Key::Delete) && plain {
                     capture.current = None;
                     continue;
@@ -3424,18 +3442,20 @@ impl App {
                 "Stops every playing sound".to_string(),
             ),
         };
-        let conflict = capture.current.and_then(|hotkey| match capture.target {
-            CaptureTarget::Sound(id) => {
-                if self.cfg.stop_all_hotkey_enabled && self.stop_all == Some(hotkey) {
-                    Some("Stop all".to_string())
-                } else {
-                    self.find_conflict(hotkey, id)
-                        .map(|sound| sound.name.clone())
-                }
-            }
-            CaptureTarget::StopAll => self
-                .find_conflict(hotkey, u64::MAX)
-                .map(|sound| sound.name.clone()),
+        // A taken chord cannot be saved (FR-5.7.5). `chord_owner` owns the rules,
+        // so the dialog, the rebind and the stop-all path all agree.
+        let conflict = capture.current.and_then(|hotkey| {
+            let editing = match capture.target {
+                CaptureTarget::Sound(id) => ChordOwner::Sound(id),
+                CaptureTarget::StopAll => ChordOwner::StopAll,
+            };
+            chord_owner(
+                self.chord_sounds(),
+                self.stop_all_chord(),
+                hotkey,
+                Some(editing),
+            )
+            .map(|owner| self.owner_label(owner))
         });
 
         let modal_area = egui::Modal::default_area(Id::new("capture_modal"))
@@ -3491,7 +3511,7 @@ impl App {
                 ui.add_space(6.0);
                 if let Some(conflict) = &conflict {
                     ui.label(
-                        RichText::new(format!("Already assigned to \"{conflict}\""))
+                        RichText::new(format!("Already used by {conflict}"))
                             .size(12.5)
                             .color(theme::red()),
                     );
@@ -3534,27 +3554,23 @@ impl App {
             let mut log_line = None;
             match capture.target {
                 CaptureTarget::Sound(id) => {
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        let had_hotkey = sound.hotkey.is_some();
-                        sound.hotkey = capture.current;
-                        sound.hotkey_error = None;
-                        if capture.current.is_some() {
-                            if !had_hotkey {
-                                sound.ram = self.cfg.preload_hotkey_sounds;
+                    if let Some(hotkey) = capture.current {
+                        // A fresh binding starts with the global RAM preference.
+                        let preload = self.cfg.preload_hotkey_sounds;
+                        if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                            if sound.hotkey.is_none() {
+                                sound.ram = preload;
                             }
-                        } else {
-                            sound.ram = false;
+                            sound.hotkey = Some(hotkey);
+                            sound.hotkey_error = None;
+                            log_line = Some(format!(
+                                "Hotkey {} assigned to \"{}\"",
+                                hotkey.label(),
+                                sound.name
+                            ));
                         }
-                        let label = sound
-                            .hotkey
-                            .map(|h| h.label())
-                            .unwrap_or_else(|| "none".into());
-                        let name = sound.name.clone();
-                        log_line = Some(if capture.current.is_some() {
-                            format!("Hotkey {label} assigned to \"{name}\"")
-                        } else {
-                            format!("Hotkey cleared for \"{name}\"")
-                        });
+                    } else if let Some((name, _)) = self.clear_sound_hotkey(id) {
+                        log_line = Some(format!("Hotkey cleared for \"{name}\""));
                     }
                 }
                 CaptureTarget::StopAll => {
@@ -3575,10 +3591,8 @@ impl App {
         if clear {
             match capture.target {
                 CaptureTarget::Sound(id) => {
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        sound.hotkey = None;
-                        sound.hotkey_error = None;
-                        sound.ram = false;
+                    if let Some((name, _)) = self.clear_sound_hotkey(id) {
+                        self.log(StatusKind::Info, format!("Hotkey cleared for \"{name}\""));
                     }
                 }
                 CaptureTarget::StopAll => {
@@ -4767,6 +4781,16 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
     response
 }
 
+/// Removes a sound's binding and the state that depends on it (FR-5.3.5): the
+/// hotkey is gone, RAM preloading is off and no stale error stays behind. Returns
+/// the dropped hotkey so the caller can name it in the log.
+fn unbind(sound: &mut Sound) -> Option<Hotkey> {
+    let hotkey = sound.hotkey.take()?;
+    sound.ram = false;
+    sound.hotkey_error = None;
+    Some(hotkey)
+}
+
 /// Hotkey pill shared by cards and rows. Returns true when clicked.
 fn hotkey_pill(
     ui: &mut Ui,
@@ -5900,4 +5924,33 @@ fn resolve_device(
 #[cfg(test)]
 mod tests {
     // Volume curve coverage lives in `ui::volume::tests`.
+
+    use super::*;
+
+    fn bound_sound() -> Sound {
+        Sound {
+            id: 7,
+            name: "Airhorn".to_string(),
+            path: PathBuf::from("airhorn.wav"),
+            hotkey: Some(Hotkey::parse("Ctrl+1").expect("test hotkey parses")),
+            hotkey_error: None,
+            volume: 1.0,
+            ram: true,
+            library_id: 1,
+            search_key: "airhorn".to_string(),
+            flash_until: None,
+        }
+    }
+
+    #[test]
+    fn unbinding_clears_the_hotkey_and_ram_preload() {
+        let mut sound = bound_sound();
+        let dropped = unbind(&mut sound).map(|hotkey| hotkey.label());
+        assert_eq!(dropped, Some("Ctrl+1".to_string()));
+        assert_eq!(sound.hotkey, None);
+        assert!(!sound.ram);
+        // Unbinding a sound that has no hotkey is a no-op, never a panic.
+        assert_eq!(unbind(&mut sound), None);
+        assert_eq!(sound.hotkey, None);
+    }
 }

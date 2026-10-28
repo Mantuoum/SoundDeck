@@ -164,7 +164,7 @@ specification:**
 | FR-5.7.2 | A hotkey MUST NOT swallow the keystroke: the focused application still receives it. |
 | FR-5.7.3 | Key auto-repeat MUST trigger at most once per physical press. |
 | FR-5.7.4 | Hotkeys MUST be assignable through a capture dialog that reads the keyboard directly, with `Esc` to cancel. |
-| FR-5.7.5 | The dialog MUST warn when another sound in the active library already uses the combination. |
+| FR-5.7.5 | The capture dialog MUST refuse to bind a combination already used by another sound in the active library or by the stop-all hotkey, naming the current owner. A conflict introduced outside the dialog MUST resolve the same way every time — the stop-all hotkey outranks sounds and the first sound in tab order outranks later ones — with the losing sound's hotkey cleared exactly as if it had no hotkey (FR-5.3.5) and a log entry naming the sound. |
 | FR-5.7.6 | Hotkeys MUST be clearable without removing the sound. |
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
@@ -432,7 +432,7 @@ Rules that enforce them:
 | Save fails | `save_failed` set, warning logged, no empty file written. |
 | Tray unavailable | `minimize_to_tray` disabled in Settings; minimize falls back to the taskbar. |
 | Keyboard hook blocked | Log entry; app remains usable with the board and tray menu. |
-| Hotkey conflict | Warning in the capture dialog (same library). |
+| Hotkey conflict | The capture dialog refuses the combination and names its owner; a conflict found on load, tab switch or stop-all change unbinds the losing sound (hotkey cleared, RAM off) and logs it. |
 
 ## 10. Non-goals
 
