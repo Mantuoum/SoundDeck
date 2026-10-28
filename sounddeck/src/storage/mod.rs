@@ -311,9 +311,11 @@ impl LibrariesFile {
         for library in &mut self.libraries {
             for sound in &mut library.sounds {
                 if sound.id == 0 || !seen_sounds.insert(sound.id) {
-                    sound.id = next_sound;
-                    next_sound += 1;
+                    // Same saturation rule as the library ids: a hand-edited
+                    // `u64::MAX` plus a duplicate must not overflow the counter.
+                    sound.id = next_free_id(&seen_sounds, next_sound);
                     seen_sounds.insert(sound.id);
+                    next_sound = next_sound.max(sound.id.saturating_add(1));
                 }
                 sound.volume = finite_or(sound.volume, 1.0).clamp(0.0, 1.0);
                 sound.gain_db =
@@ -831,6 +833,48 @@ mod tests {
             "the search falls back to the low ids"
         );
         assert_eq!(file.libraries[2].id, 2);
+    }
+
+    #[test]
+    fn hostile_sound_ids_should_normalize_unique_when_counter_saturates() {
+        // A hand-edited file with `u64::MAX` plus duplicates and zeros: the old
+        // `next_sound += 1` assigned a duplicate and then overflowed (debug
+        // panic on user data). Ids must come out unique and never wrap.
+        let mut file = LibrariesFile {
+            version: LIBRARIES_VERSION,
+            libraries: vec![
+                LibraryConfig {
+                    id: 1,
+                    name: "Main".into(),
+                    sounds: vec![
+                        sound(u64::MAX, "max"),
+                        SoundConfig::default(),
+                        sound(u64::MAX, "dup"),
+                    ],
+                },
+                LibraryConfig {
+                    id: 2,
+                    name: "Other".into(),
+                    sounds: vec![SoundConfig::default(), sound(1, "one")],
+                },
+            ],
+        };
+        file.normalize();
+
+        let ids: Vec<u64> = file
+            .libraries
+            .iter()
+            .flat_map(|library| library.sounds.iter().map(|sound| sound.id))
+            .collect();
+        assert_eq!(ids.len(), 5);
+        assert_eq!(ids[0], u64::MAX, "existing ids are preserved");
+        assert!(!ids.contains(&0), "no sound keeps the reserved zero id");
+        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "ids collide: {ids:?}");
+        assert!(
+            ids.iter().filter(|id| **id != u64::MAX).all(|id| *id < 8),
+            "the saturated counter falls back to the low ids: {ids:?}"
+        );
     }
 
     #[test]

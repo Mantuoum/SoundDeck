@@ -4087,6 +4087,12 @@ impl App {
                         .size(10.5)
                         .color(theme::faint()),
                 );
+                // The accessibility gap is stated where users look for app info,
+                // not only in the README (SPEC NFR-8.6.3).
+                settings_detail(
+                    ui,
+                    "No screen-reader support yet - README > Accessibility lists the keyboard coverage.",
+                );
                 settings_divider(ui);
                 settings_value(ui, "Config folder", SETTINGS_BUTTON_SIZE.x, |ui| {
                     if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
