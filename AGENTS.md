@@ -18,7 +18,9 @@ Log: `2026-10-28 — created (codebase review); batch-1 + step-6 syncs` · `2026
 slimmed: non-§2 sections compressed` · `2026-10-28 — A5/A6: config bundle + reset
 groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` · `2026-10-28 — X1/D13:
 per-sound `gain_db` (§2.5), device substitution + name refresh (§2.6)` (detail in git
-history).
+history) · `2026-10-28 — step 9b: measure.ps1 (NFR-8.1/8.2), README accessibility,
+sound-id hardening` · `2026-10-28 — docs pass: SPEC 0.4.0 + FR-5.4.7/FR-5.7.10/UI-6,
+probe thread (§2.2/§2.5), Win chords (§2.7/§7), modals + Settings content (§2.8)`.
 
 ## 1. Repository layout
 
@@ -26,6 +28,7 @@ history).
 SoundBoard/
 ├── SPEC.md, plan.md, AGENTS.md, README.md, context.md   ← docs (root)
 ├── scripts/package.ps1                                   ← release packaging
+├── scripts/measure.ps1                                   ← NFR-8.1/8.2 measurement pass
 └── sounddeck/
     ├── Cargo.toml, build.rs   assets/   ARCHITECTURE.md  ← deps, icon/fonts, dev guide
     └── src/
@@ -98,6 +101,7 @@ Files convert once at decode; devices convert once at output. SFX go to *both* o
 | UI (eframe) | OS | always | draws frames, owns all `App` state |
 | `sounddeck-mixer` | `Engine::new` | always | renders 5 ms chunks into the two rings |
 | `sounddeck-loader` | `Playback::new` | always | decodes sounds into the RAM cache |
+| `sounddeck-probe` | `Playback::spawn_probe` | one shot per unknown-duration sound | reads a streamed file's length off the trigger path |
 | `sounddeck-loop` | `LoopStream::spawn` | while loop plays | decodes loop file into chunks |
 | `sounddeck-stream` | `stream::spawn_once` | per streamed sound | decodes one-shot into chunks |
 | `sounddeck-render-0/1` | `wasapi::spawn_render` | per active device | ring → device buffer |
@@ -157,7 +161,9 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
 
 `Playable` per sound: path, volume, `gain_db` trim, `samples: Option<Arc<Vec<f32>>>`
 (resident), `loading`/`pending_play`, `error`/`missing`, `FileLock`, `refused`,
-`duration`, `generation`, `retain`, `last_used` (LRU).
+`duration`, `probe_pending`, `generation`, `retain`, `last_used` (LRU). `duration`
+starts `None` for a streamed sound, so the card draws no progress line until a
+`sounddeck-probe` worker has read it (FR-5.4.7).
 
 A voice always carries **one linear gain**: `engine::effective_gain(volume, gain_db)` is
 the only place the stored volume and the dB trim are multiplied (FR-5.3.17). Trigger,
@@ -236,7 +242,9 @@ focused app receives every triggering keystroke. Never "fix" this.
 
 Hotkeys are strings (`"Ctrl+Shift+S"`, `"F8"`) parsed via `Hotkey::parse` against the
 single `KEYS` const table — parsing, display and egui mapping all read it (never add a
-second mapping). Duplicate chords are **refused** at capture; conflicts introduced
+second mapping). Win chords are bindable: egui has no Win modifier flag, so the capture
+path reads the physical Win key state, and pass-through means Windows also acts on the
+chord (README warns). Duplicate chords are **refused** at capture; conflicts introduced
 elsewhere are unbound deterministically (new binding wins; `chord_owner` /
 `duplicate_sounds` in `hotkeys.rs` own the rules, FR-5.7.5). Only the active library's
 hotkeys are bound; switching tabs rebinds. The hook is best-effort against elevated windows/AV (FR-5.7.8 — documented,
@@ -278,12 +286,17 @@ always fresh while the allocations are not. Stable per-sound strings are cached 
 after any name/path/hotkey change, never re-derive them while painting.
 
 **Modals** (transparent backdrop, `modal_header` + red-hover close): hotkey capture
-(reads raw keyboard events, Esc cancels), rename, delete library, activity log (last 200
-entries). While any of them is open, `global_shortcuts` stands down. Outside modals, a
-focused text field suppresses every board shortcut (quit and Settings stay live).
+(reads raw keyboard events, Esc cancels), rename, delete library, import confirmation,
+reset-all confirmation, activity log (last 200 entries, a repeated message refreshes the
+newest instead of stacking). While any of them is open, `global_shortcuts` stands down.
+Outside modals, a focused text field suppresses every board shortcut (quit and Settings
+stay live).
 
-**Settings** (immediate save, no Apply): Playback (loop + hotkey RAM), Appearance
-(theme + motion), Window (minimize-to-tray, gain slider visibility), About.
+**Settings** (immediate save, no Apply): Playback (loop enable/file/level/routing,
+hotkey RAM, Show RAM state, stop-all hotkey), Appearance (theme + motion), Window
+(minimize-to-tray, gain slider visibility), About (version, config folder, links, Data:
+export/import/reset all). The three field pages end with a Reset card
+(`Settings::reset_group`); About's Reset all is confirmed.
 
 **Themes** (`ui/theme*`): Markdown `config/themes/<id>.md`, `| token | hex |` table;
 invalid/missing token falls back to Graphite; 5 embedded palettes seed first run;
@@ -396,6 +409,7 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | Decision | Where |
 | --- | --- |
 | **Pass-through hotkeys**: the keystroke also reaches the focused app. Intentional. | SPEC FR-5.7.2 |
+| Win chords are bindable; because of pass-through, Windows also acts on them (README warns) | SPEC FR-5.7.2/5.7.10 |
 | **Exclusive playback**: a trigger fades out all current voices. Intentional. | SPEC FR-5.4.1 |
 | SFX go to both outputs equally (per-sound routing = future item) | SPEC FR-5.5.5 |
 | Volumes stored linear, shown log (−60…0 dBFS); one curve | SPEC UI-4 |

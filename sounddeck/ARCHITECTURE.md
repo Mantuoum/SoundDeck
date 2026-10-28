@@ -21,7 +21,8 @@ service. Everything lives beside the executable.
 | Entry point | `src/main.rs` | Single instance, window, diagnostics, eframe startup |
 | Application/UI | `src/app.rs` | State, actions, panels, board, Settings, modals |
 | Domain helpers | `src/model.rs` | App paths, supported files, formatting, layout enum |
-| Sound registry | `src/playback/mod.rs` | Jobs, cache, streaming handoff, per-sound volume |
+| Sound registry | `src/playback/mod.rs` | Jobs, cache, streaming handoff, duration probe, per-sound volume/trim |
+| Diagnostics | `src/stats.rs` | `--stats` counters and the 5 s log line |
 | Playback policy | `src/playback/policy.rs` | RAM vs stream decisions, caps, admission, process valve |
 | Audio device I/O | `src/audio/wasapi.rs` | Device enumeration and render threads |
 | Mixer | `src/audio/engine.rs` | Voices, loop, rings, gains, metering |
@@ -43,6 +44,7 @@ service. Everything lives beside the executable.
 | UI/event loop | `eframe` | App lifetime | Draw frames, handle input, own the state |
 | Mixer | `Engine::new` | App lifetime | Render 5 ms chunks, feed per-output rings |
 | Playback loader | `Playback::new` | App lifetime | Decode sounds on demand / for RAM |
+| Duration probe | `Playback::spawn_probe` | Per unknown-duration sound | Reads a streamed file's length off the trigger path |
 | Loop decoder | `LoopStream::spawn` | While the loop plays | Decode the loop file into a chunk channel |
 | WASAPI render | `spawn_render`, once per output | While the device is open | Pull the ring, convert to the device format, write WASAPI |
 | Hotkey/tray window | `HotkeyService::start` | App lifetime | Message-only window: hotkeys, tray, focus |
@@ -88,8 +90,10 @@ loop open) hand it to one of the threads above.
 
 ### Startup (`main.rs`)
 
-1. `timeBeginPeriod(1)` improves the mixer's 5 ms tick.
-2. `--diag` runs the audio smoke test and exits; otherwise continue.
+1. `timeBeginPeriod(1)` improves the mixer's 5 ms tick; `--stats` starts the counter
+   thread first (it must cover the whole run).
+2. `--diag` runs the audio smoke test and exits; `--settings` opens on the Settings
+   screen; otherwise continue.
 3. `single_instance()` creates a named mutex derived from the executable path. If it
    already exists, the second process focuses the first window and exits.
 4. `storage::load(app_dir())` reads `config/settings.json` and
@@ -159,6 +163,8 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `animate_ui` | UI motion preference |
 | `minimize_to_tray` | Minimize hides to the tray instead of the taskbar |
 | `show_gain_slider` | Show the master-gain slider in the board sidebar |
+| `show_ram_state` | Reveal RAM/disk chips, counts and the toolbar pill (default off) |
+| `stop_all_hotkey_enabled` / `stop_all_hotkey` | Stop-all hotkey switch and its label form |
 
 `Settings::normalize()` clamps volumes, gain, trims/empties the loop path, and fills
 missing fields through `#[serde(default)]`. `LibrariesFile::normalize()` clamps each
@@ -233,7 +239,8 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 | `error`, `missing` | Last decode/link error; existence checked at startup and on playback when not resident |
 | `lock` | Open read handle that denies delete/rename while the sound is on the board |
 | `refused` | Why the cache declined; cleared by Reload or toggling preload |
-| `duration` | Container duration, used for stream progress |
+| `duration` | Container duration for stream progress |
+| `probe_pending` | A probe worker is reading that duration right now (one per sound) |
 | `generation` | Invalidates stale loader results |
 | `retain` | Per-sound preload toggle |
 
@@ -241,6 +248,10 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 - **Not resident:** `policy::route` decides between a preload job (≤ 30 s, fits the
   budget) and a stream thread. There is no full-file decode on the trigger path.
 - **Stream:** a bounded channel feeds a streamed mixer voice; memory is constant.
+- **Duration probe:** a streamed sound with no known length gets one detached
+  `sounddeck-probe` worker (`probe_pending` deduplicates, `generation` discards stale
+  results), so progress appears from the next trigger instead of probing on the
+  trigger path.
 - **Lock:** every configured file holds a read handle whose share mode omits
   delete. Windows therefore refuses rename/delete until the sound is removed from
   the board or the app exits. Decoders can still open the file.
@@ -313,7 +324,7 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 
 - Spawns one decoder thread when Play is pressed. It opens the file, seeks/reopens at
   end of pass, converts to 48 kHz stereo, and sends 1024-frame chunks.
-- The channel holds 16 chunks (~0.34 s); a full channel parks the decoder in `send`.
+- The channel holds 8 chunks (~170 ms); a full channel parks the decoder in `send`.
 - `LoopState` is `Idle`, `Playing`, or `Error`. Start is optimistic (Playing at once);
   errors replace it. There is no Buffering/Underrun state.
 - Stop drops the receiver first (unblocking the sender), clears the mixer chunk, joins
@@ -339,21 +350,30 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 - The service runs one background thread with a hidden message window and a low-level
   keyboard hook (`WH_KEYBOARD_LL`).
 - `set_bindings` updates the hook's binding list; no OS registration is involved, so a
-  hotkey never conflicts with another app. Duplicate labels are rejected by the app.
+  hotkey never conflicts with another app. Within the app a chord has exactly one
+  owner: `chord_owner` / `duplicate_sounds` hold the rule (stop-all beats sounds, the
+  first sound in tab order beats later ones), the capture dialog refuses a taken chord
+  before it is saved, and `App::sync_hotkeys` re-applies the rule on every rebind,
+  unbinding each loser exactly like a manual clear.
 - The hook callback looks up the modifier+key and posts `PLAY_MSG` to the hidden
   window; the window plays the sound and sends `ServiceEvent::Pressed` for the UI flash.
 - The callback always calls `CallNextHookEx`, so the focused app receives the original
   keystroke. Auto-repeat is ignored per key press until key-up.
-- Registration events now exist only to clear/set UI hotkey errors; the hook cannot
-  report “taken by another app”.
+- Held keys live in a `HeldKeys` set, pruned against the OS key state on every event, so
+  modifiers are derived from what is physically down and a missed key-up cannot wedge a
+  hotkey.
+- The service reports `ServiceEvent::{Pressed, StopAll, Tray, TrayReady, Fatal}`; the UI
+  drains those on its own thread.
 - The tray icon supports double-click show/hide, right-click menu (Show/Hide, Stop
   all, Quit), and a tooltip updated with playing/RAM counts. Single left-click is
   deliberately inert.
 - Minimize follows `minimize_to_tray`: the custom button and an observed OS minimize
   hide to the tray when enabled, otherwise the window stays in the taskbar. Showing
   from the tray restores, focuses and clears stale meter peaks.
-- Only the active library's hotkeys are bound. Win-key chords are not captured in the
-  UI and mouse buttons are unsupported; no administrator rights are needed.
+- Only the active library's hotkeys are bound. Win-key chords are bindable: egui carries
+  no Win modifier flag, so the capture path reads the physical Win key state. Mouse
+  buttons are unsupported; no administrator rights are needed. Because the hook passes
+  the key through, a Win chord also fires the Windows shortcut (the README says so).
 
 ---
 
@@ -443,12 +463,15 @@ above-normal so audio still meets its deadlines.
 
 ### Modals
 
-Capture hotkey, rename, delete library, and activity log use `egui::Modal` with a
-**transparent** backdrop, so the board stays visible without a dim layer and input
+Capture hotkey, rename, delete library, import confirmation, reset-all confirmation and
+activity log use `egui::Modal` with a **transparent** backdrop, so the board stays
+visible without a dim layer and input
 cannot leak through. They share `modal_header` + `close_button` (red hover), are centred
 over the board area, and take keyboard input directly where needed (hotkey capture).
 The delete-library dialog states the sound count and offers move-to-a-library,
-delete-the-sounds, or cancel; nothing is applied until a button is pressed.
+delete-the-sounds, or cancel; nothing is applied until a button is pressed. The import
+dialog states the incoming sound/library counts, and `Replace` is the only path into
+`App::apply_import`; the reset dialog only guards `Settings::reset_all`.
 The sidebar divider is painted inside the central-panel layer, not as a separate
 top-level layer, so it can never draw over modals or popups.
 
@@ -570,7 +593,9 @@ never touched by either action.
 ## 9. Errors and logging
 
 `StatusKind` is `Info`, `Success`, `Warning`, or `Error`; the status bar shows the latest
-entry and `Activity log` keeps the last 200. Sources:
+entry and `Activity log` keeps the last 200. Every entry goes through one
+`record_status` helper, which refreshes the newest entry when the message repeats
+instead of stacking copies (SPEC UI-6) and drops the oldest at the cap. Sources:
 
 - storage recovery/migration warnings;
 - theme parse/reload issues;
@@ -595,12 +620,16 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 41 unit tests cover storage recovery/roundtrip, resampling (chunk invariance),
-  loop streaming (wrap, stop, file release, errors), mixer loop gain/wrap/routing,
-  volume curve/clamps, hotkey matching, and theme-file parsing.
+- 181 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
+  validation, resampling (chunk invariance), loop streaming (wrap, stop, file release,
+  errors), mixer loop gain/wrap/routing, `effective_gain`, volume curve/clamps, hotkey
+  matching, and theme-file parsing.
 - Tests use temporary directories named with the process/time; no user data.
 - `--diag` enumerates devices, opens Monitor/Cable, decodes a file, plays it, and
   prints WASAPI events.
+- `../scripts/measure.ps1` runs the SPEC §8.1/8.2 pass from the `--stats` log (idle,
+  hidden, mixer wakeups, working set). It refuses to start while any SoundDeck process
+  is alive, and the hidden phase needs `minimize_to_tray` enabled.
 - UI layout and interaction are checked manually via screenshots (the development
   workflow uses `PrintWindow` so the app does not need foreground focus).
 - Manual regression list: add/play/relink/remove sounds, tab switching, hotkey RAM,
@@ -668,6 +697,7 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/playback/policy.rs` | RAM vs stream decision, caps, LRU admission, process valve |
 | `src/playback/lock.rs` | Read lock that denies delete/rename while a sound is configured |
 | `src/hotkeys.rs` | Hotkey parse/register, stop-all binding, message window, tray, focus |
+| `src/stats.rs` | `--stats` counters and the periodic log line |
 | `src/icon.rs` | PNG decode/resize for window and tray icons |
 | `src/audio/reader.rs` | One Symphonia reader: open, decode block, resample, rewind |
 | `src/audio/decode.rs` | Collect the reader into RAM (preload only), early length cap |
@@ -687,6 +717,8 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/ui/volume.rs` | Log curve, percentage, shared volume bar |
 | `build.rs` | Windows icon/version resource |
 | `assets/` | Icon and Satoshi font files |
+| `../scripts/package.ps1` | Release packaging: tests, release build, zip, checksum |
+| `../scripts/measure.ps1` | SPEC §8.1/8.2 measurement pass from the `--stats` log |
 
 ---
 

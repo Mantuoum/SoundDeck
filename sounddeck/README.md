@@ -16,6 +16,9 @@ live in `config/` next to the executable.
 - **Libraries/tabs** in the title bar, after the app name. Add with `+`, rename
   or delete from a tab's context menu. Sounds can be moved between libraries from
   a sound's context menu, and the active library is remembered.
+  Deleting a library asks what should happen to its sounds: **move them to** a library
+  you pick, **delete the sounds** (from SoundDeck only), or cancel. Audio files are
+  never touched, and the last remaining library cannot be deleted.
 - **Only the active library is live**: its hotkeys are bound and only its
   hotkey sounds are preloaded. Switching tabs stops playback and swaps the whole
   hotkey set. Hotkeys in background tabs never fire.
@@ -29,12 +32,20 @@ live in `config/` next to the executable.
   bar.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...). The key **passes through** to
   the focused app, so `Shift+T` also types `T` while playing the assigned sound.
+- **One owner per combination**: the hotkey picker refuses a chord that is already used
+  by another sound or by `Stop all`, and names the owner. If a duplicate appears another
+  way (a hand-edited config, or a new stop-all key), the sound loses its hotkey with a
+  warning in the log — it still plays on click, it just has no hotkey and no RAM preload
+  any more.
 - **Stop-all hotkey** (off by default): enable it in Settings → Playback, then set a
   key on the sidebar widget above the meters. Clicking the widget stops everything;
   the key works while hidden and still reaches the focused app.
 - **Long sounds stream from disk**: anything over 30 s, or that does not fit the
   preload budget, streams with constant memory. No file is fully decoded just to be
   played once.
+- **Progress only once the length is known**: a card's progress line appears after
+  SoundDeck has read the sound's total duration, so the first trigger of a long,
+  streamed file may show none. The length is remembered for the next trigger.
 - **Files stay where they are**: SoundDeck never renames or deletes audio files.
   Renaming a card or removing a sound changes only SoundDeck's config. While the
   app is open, configured files are read-locked, so Windows refuses to rename or
@@ -65,10 +76,13 @@ live in `config/` next to the executable.
 - Themes are editable Markdown files in `config/themes/`. Graphite is the default
   and the fallback for any missing token; every colour (including the accent) can
   be overridden per theme. Use **Reload themes** in Settings after editing.
-  The shipped palettes use a `#0097FF` accent.
+  The shipped palettes use a `#0097FF` accent. A file named like a built-in (for example
+  `Graphite.md`) is listed as its own theme alongside the built-in Graphite instead of
+  replacing it — edit `graphite.md` itself to change the default palette.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.
-- Missing file detection with click-to-locate.
+- Missing file detection: the card is marked, triggering it logs an error and does
+  nothing else, and **right-click → Locate** relinks the sound.
 - System tray. **Double-click the tray icon to show or hide SoundDeck**; right-click
   for Show/Hide, Stop all, Quit. Minimizing follows Settings → Window (taskbar by
   default; enable **Minimize to tray** to hide instead). **Close quits the app.**
@@ -194,9 +208,25 @@ Global hotkeys use a low-level keyboard hook, so they do not need administrator
 rights. The hook **always passes the key through** to the focused app: `Shift+T`
 types `T` and plays the sound. Auto-repeat fires once per press.
 
-Windows does not expose mouse buttons through this path, and Win-key combinations
-are not captured in the UI. The hook cannot see keystrokes aimed at elevated
-windows, and some security/anti-cheat tools may block keyboard hooks.
+**Win chords can be bound, but Windows acts on them too.** Because nothing is swallowed,
+`Win+A` still opens Action Center and `Win+D` still shows the desktop while the sound
+plays. Use Ctrl/Alt/plain keys for anything you press live.
+
+Windows does not expose mouse buttons through this path. The hook cannot see keystrokes
+aimed at elevated windows, and some security/anti-cheat tools may block keyboard hooks.
+
+## Accessibility
+
+- **No screen-reader support today.** The UI layer (egui) runs without the accesskit
+  bridge, so Narrator/NVDA get no names, roles or focus announcements from SoundDeck.
+  This is a known gap (SPEC NFR-8.6.3), not a broken control.
+- **Keyboard coverage** is the [Keyboard](#keyboard) table above: add, search,
+  settings, undo, rename, delete, play and quit all have a key. Selecting a card or row
+  on the board is still pointer-driven — there is no arrow-key cursor.
+- **Motion** follows the Windows animation preference: turning off *Show animations in
+  Windows* (or **Animate UI** in Settings → Appearance) skips the hover/press tweens.
+- Contrast is the theme author's responsibility; the bundled themes target normal-text
+  contrast, and a custom theme file can lower it.
 
 ## Credits
 

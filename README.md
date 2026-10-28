@@ -12,16 +12,21 @@ and run `SoundDeck.exe`.
 
 ## What it does
 
-- **Two outputs** — Monitor and Cable, each with its own device, volume and mute.
-  Route sounds to either or both.
+- **Two outputs** — Monitor and Cable, each with its own device and volume, plus a
+  global dB master gain. Sound effects go to both; only the loop track is routed per
+  output.
 - **Global hotkeys** — low-level keyboard hook that passes the key through, so
   the game or app you are in still receives it. Bare keys (F1, `, NumPad5) are
-  allowed.
+  allowed. A combination belongs to one sound only; Win chords work, but Windows acts
+  on them as well.
 - **Loop track** — streamed from disk, so a one-hour file costs no RAM.
 - **Libraries** — grid or list, drag to reorder, search, per-sound volume and a
   per-sound dB trim (`-24` to `+12 dB`) for files that are too loud or too quiet next
-  to the rest.
+  to the rest. Deleting a library asks whether its sounds move to another library or
+  leave the board.
 - **Tray** — minimise to tray; sounds keep working while hidden.
+- **Backup** — export settings and libraries to one JSON file, and import it on
+  another PC. Audio files stay where they are.
 - **Portable** — `config/` is created next to the executable. Copy the folder to
   move your setup.
 
@@ -60,6 +65,7 @@ package and a released one are built the same way.
 | `sounddeck/ARCHITECTURE.md` | Module map and invariants |
 | `SPEC.md` | Behavioural contract and performance budgets |
 | `scripts/package.ps1` | Release packaging |
+| `scripts/measure.ps1` | Performance/memory measurement pass |
 
 ## License
 

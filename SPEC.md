@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Document | `SPEC.md` |
-| Describes | SoundDeck 0.2.0 |
+| Describes | SoundDeck 0.4.0 |
 | Status | Living document; update it with the code |
 | Keywords | **MUST**, **SHOULD**, **MAY** as defined in RFC 2119 |
 
@@ -129,7 +129,7 @@ specification:**
 | FR-5.4.4 | The mixer MUST render 5 ms chunks (240 frames) on its own thread and push them into one ring per output. |
 | FR-5.4.5 | The mixer MUST NOT busy-poll: with no voices and no loop it parks until a producer wakes it. |
 | FR-5.4.6 | Starting a sound MUST be independent of decoding: a disk-backed sound decodes off the UI thread. |
-| FR-5.4.7 | Active sounds MUST expose progress in `0..=1` for the card progress line. |
+| FR-5.4.7 | Active sounds MUST expose progress in `0..=1` for the card progress line once their total duration is known; while it is unknown (a streamed sound's first trigger) no progress line MUST be drawn. |
 | FR-5.4.8 | "Stop all" MUST fade out every voice and MUST be available from the tray menu. |
 
 ### 5.5 Outputs and routing
@@ -170,7 +170,7 @@ specification:**
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
 | FR-5.7.9 | An optional global stop-all hotkey MUST be off by default, own a sidebar widget above the meters when enabled, pass the key through, and work while hidden. |
-| FR-5.7.9 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
+| FR-5.7.10 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
 
 ### 5.8 Window and tray
 
@@ -259,6 +259,9 @@ specification:**
 | `animate_ui` | bool | true | User motion preference |
 | `minimize_to_tray` | bool | false | false = taskbar |
 | `show_gain_slider` | bool | true | Sidebar gain |
+| `show_ram_state` | bool | false | Reveals RAM/disk chips, counts and the toolbar pill (FR-5.9.9) |
+| `stop_all_hotkey_enabled` | bool | false | Enables the stop-all hotkey and its sidebar widget |
+| `stop_all_hotkey` | string? | null | Label form, e.g. `"Ctrl+Alt+S"` |
 | `window_size` | `[f32;2]`? | null | Parsed for old files, unused |
 
 ### 6.2 `config/libraries.json`
@@ -355,7 +358,7 @@ top-level layer, so it cannot draw over modals or popups.
 | UI-3 | Cards and rows share the same chrome: name, hotkey pill, RAM chip, missing state, volume bar, progress line, context menu. |
 | UI-4 | Volume uses one logarithmic curve everywhere; the bar fill and percentage are derived from the same value. |
 | UI-5 | Drop target highlights only while a drag is over the window. |
-| UI-6 | Status messages are terse and never stack duplicates for the same event. |
+| UI-6 | Status messages are terse and never stack duplicates for the same event: a repeated message refreshes the newest entry instead of adding another, and the log keeps the last 200 entries. |
 
 ### 7.4 Keyboard (application-local)
 
@@ -376,7 +379,7 @@ top-level layer, so it cannot draw over modals or popups.
 
 ### 8.1 Performance budgets (measured on the reference machine)
 
-| ID | Budget | Measured 0.2.0 |
+| ID | Budget | Measured (0.2.0 pass) |
 | --- | --- | --- |
 | NFR-8.1.1 | Visible idle ≤ 1 % of one core | **0.26 %** |
 | NFR-8.1.2 | Hidden ≤ 0.3 % of total CPU | **0.07–0.11 %** |
@@ -385,6 +388,11 @@ top-level layer, so it cannot draw over modals or popups.
 | NFR-8.1.5 | Playing audio ≤ 3 % of one core | ~2 % at 30 fps |
 | NFR-8.1.6 | Playback start latency not worse than the 0.15 s ring | unchanged |
 | NFR-8.1.7 | Trigger to audible MUST be ≤ 250 ms | ~165 ms |
+
+The measured column is the 0.2.0 pass and is **pending a 0.4.0 run**:
+`scripts/measure.ps1` performs it at release time (it refuses to start while any
+SoundDeck instance is live) and its numbers replace these cells. No figure here may be
+invented in the meantime.
 
 Rules that enforce them:
 
@@ -399,7 +407,7 @@ Rules that enforce them:
 | ID | Requirement |
 | --- | --- |
 | NFR-8.2.1 | Private working set MUST stay ≤ 100 MB at idle with a normal library. |
-| NFR-8.2.2 | Current measurement: 71–75 MB. The bare eframe/egui/glow window with the same crates measures 54.9 MB, so ~55 MB is the floor of this UI stack. |
+| NFR-8.2.2 | Last measurement (0.2.0): 71–75 MB. The bare eframe/egui/glow window with the same crates measures 54.9 MB, so ~55 MB is the floor of this UI stack. A 0.4.0 figure is pending `scripts/measure.ps1`. |
 | NFR-8.2.3 | 40 MB is an aspiration. It is not reachable with eframe/glow and requires a different UI stack (§13). |
 | NFR-8.2.4 | RAM-preloaded sounds count against the budget; the loop never does (streamed). |
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |
@@ -434,7 +442,7 @@ Rules that enforce them:
 | NFR-8.5.2 | `cargo test` MUST pass; pure logic (paths, normalisation, migration, volume curve, hotkey table, ring/wake behaviour) MUST be covered. |
 | NFR-8.5.3 | Every module carries a `//!` header stating its responsibility. |
 | NFR-8.5.4 | `ARCHITECTURE.md` MUST be updated with any change to threads, storage or the frame loop. |
-| NFR-8.5.5 | 45 tests as of 0.2.0. |
+| NFR-8.5.5 | 181 tests as of 0.4.0. |
 
 ### 8.6 Accessibility
 
@@ -482,9 +490,21 @@ A release is acceptable when all of the following hold.
 5. Loop: choose, play, stop, missing file, corrupt file, both routes off and back on.
 6. Hotkeys: trigger while another app is focused and the keystroke still lands.
 7. Tray: hide, restore, hide again, Stop all, Quit; no taskbar button while hidden.
-8. Settings: every control saves immediately and survives a restart.
-9. Theme: edit a colour in `config/themes`, reload, see it; delete a token, see the fallback.
-10. Budgets: `--stats` shows ≤1 fps idle, ≤25 mixer wakeups/s, hidden CPU ≤0.3 % total,
+8. Settings: every control saves immediately and survives a restart. Each page's Reset
+   restores only that page, Reset all settings survives a restart, and neither touches a
+   library, a sound or an audio file.
+9. Backup: export a config bundle, import it into a fresh config, and the board —
+   libraries, sounds, volumes, trims, hotkeys, settings — returns exactly; a foreign,
+   corrupt or newer bundle is refused and changes nothing.
+10. Delete a library: move its sounds, delete its sounds and cancel each behave as
+    stated; audio files are untouched and the last library cannot be deleted.
+11. Trim: a per-sound gain change is audible on a voice that is already sounding, and a
+    boost past full scale clips instead of being refused.
+12. Hotkeys: capture refuses a chord that is already taken and names its owner; a
+    conflict found on load or when stop-all changes unbinds the losing sound, logs it,
+    and that sound still plays by click.
+13. Theme: edit a colour in `config/themes`, reload, see it; delete a token, see the fallback.
+14. Budgets: `--stats` shows ≤1 fps idle, ≤25 mixer wakeups/s, hidden CPU ≤0.3 % total,
     private working set ≤100 MB.
 
 ## 12. Versioning and compatibility
