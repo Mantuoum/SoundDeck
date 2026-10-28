@@ -22,6 +22,16 @@ The target user is a streamer or caller who needs separate mixes: one output for
 chat (typically a virtual cable), one for the local monitor, with the looped track able
 to go to either, both, or neither.
 
+**Settled decisions — intentional behaviour, do not "fix" without changing this
+specification:**
+
+- **Pass-through hotkeys** (FR-5.7.2): the focused application always receives the
+  triggering keystroke. A hotkey that plays a sound also types its key elsewhere.
+  This is a product decision, not an omission.
+- **Exclusive playback** (FR-5.4.1): every new trigger fades out all current voices,
+  including a retrigger of the same sound. Sounds never overlap. Also a product
+  decision.
+
 ## 2. Scope
 
 **In scope**
