@@ -400,13 +400,20 @@ above-normal so audio still meets its deadlines.
 - Left rail: Back, Playback, Appearance, Window, About (bottom).
 - Content: fixed header + per-tab scroll; grouped cards and label/control rows.
   `SettingsTab` holds the tab metadata. Text is intentionally terse.
+- Layout metrics live in the `SETTINGS_*` consts (SPEC FR-5.9.8 / §7.2); rows stack
+  below `SETTINGS_ROW_STACK_W`.
 - Playback owns loop enable/file, loop output routing and hotkey RAM; Appearance owns
   theme/motion; Window owns minimize-to-tray and sidebar gain visibility; About owns
   version/config/dev.
 - Devices, output volumes, link and master gain live in the sidebar, not Settings.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
-- Shared helpers: `settings_group`, `settings_row`, `settings_switch`,
-  `settings_nav_item`, `settings_back`.
+- Shared helpers: `settings_group`, `settings_value` (one label/control row),
+  `settings_toggle` (row + switch + changed), `settings_detail`, `settings_divider`,
+  `settings_switch`, `settings_nav_item`, `settings_back`; `pressable` is the button
+  press tween + overlay.
+- Values that walk the sound list or lock the playback registry (`ram_summary`,
+  `cache_usage`) are cached in `PlaybackStats`; the theme list is cached in
+  `theme_choices` and rebuilt on reload.
 - Board-only shortcuts are disabled while Settings is open; `Ctrl+Q` still quits.
 - While a text field has focus (`ctx.memory().focused()`), every board shortcut is
   suppressed: add files, focus search, layout, undo, delete, play, rename. `Ctrl+Q`

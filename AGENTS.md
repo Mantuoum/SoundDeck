@@ -1,48 +1,21 @@
-# AGENTS.md — working in the SoundDeck codebase
+# AGENTS.md — SoundDeck
 
-Read this file before changing anything in `sounddeck/src`. It explains how the app
-works, the conventions of this codebase, and the guardrails that keep changes clean.
-
-Companion documents:
-
-| File | Role | Rule |
-| --- | --- | --- |
-| `SPEC.md` | Behavioural contract (MUST/SHOULD) | Source of truth for *behaviour*. Settled decisions live here — never re-litigate them. |
-| `sounddeck/ARCHITECTURE.md` | Implementation map | Update it when threads, storage, or the frame loop change. |
-| `plan.md` | Current iteration decision log | The work list. Do not invent scope beyond it without asking. |
-| `sounddeck/README.md` | User manual | User-facing behaviour only. |
-
----
+| Doc | Role |
+| --- | --- |
+| `SPEC.md` | Behaviour contract (MUST/SHOULD). Settled decisions live here — never re-litigate. |
+| `sounddeck/ARCHITECTURE.md` | Implementation map — update on thread/storage/frame-loop changes. |
+| `plan.md` | Current work list (local, gitignored). No scope beyond it without asking. |
 
 ## 0. Maintaining this file
 
-**AGENTS.md must stay true.** A stale AGENTS.md is worse than none — it misleads every
-future session.
+Update it in the SAME change as the code it describes — a stale AGENTS.md misleads every
+future session. Threads/data flow → §2; boundaries → §3; conventions → §4;
+where-to-change-what → §5; a rule §6 should have caught → §6; behaviour → SPEC first.
+Delete text that stopped being true instead of appending corrections; log entries stay
+one line.
 
-1. **Update in the same change.** If a change alters architecture, threading, data
-   flow, module boundaries, or a convention, update the affected section of this file
-   in the same commit. No separate "docs later" pass.
-2. **Section triggers:**
-
-   | If you changed… | Update… |
-   | --- | --- |
-   | Threads, sample flow, engine/playback/storage behaviour | §2 (How the app works) |
-   | Module responsibilities or dependencies | §3 (Module boundaries) |
-   | Error handling, naming, UI/storage/audio patterns | §4 (Conventions) |
-   | "Where to change what" steps | §5 (Feature playbooks) |
-   | A rule this file should have prevented you from breaking | §6 (Guardrails) |
-   | Product behaviour | `SPEC.md` first, then §7 if it is a settled decision |
-
-3. **Keep it lean.** This file carries rules and mental models, not history. Delete
-   text that no longer describes reality rather than appending corrections. One-line
-   entries in the update log are enough.
-4. **Update log** (newest last):
-   - `2026-10-28 — created from codebase review; Part 1 (how it works), boundaries, conventions, guardrails.`
-   - `2026-10-28 — batch 1 landed (plan.md): one key table + hotkey conflict rules (§2.7, §5), policy::Refusal (§2.5), audio invariants (§4.6), palette snapshot (§4.4), non-clobbering backups (§2.4), storage budget guardrail (§6.13).`
-   - `2026-10-28 — batch 6b: delete-library dialog (§2.8), missing-sound trigger logs instead of opening the picker (§2.5), drag targets by id, Option progress until duration is known (§2.6), RAM eligibility in one predicate (§2.5).`
-   - `2026-10-28 — batch 6c (performance only): board scratch buffers + cached Sound labels (§2.8), activity log on a VecDeque with one append rule (§2.8), single storage serializer for fingerprint + write (§2.4).`
-
----
+Log: `2026-10-28 — created (codebase review); batch-1 + step-6 syncs` · `2026-10-28 —
+slimmed: non-§2 sections compressed` (detail in git history).
 
 ## 1. Repository layout
 
@@ -51,24 +24,19 @@ SoundBoard/
 ├── SPEC.md, plan.md, AGENTS.md, README.md, context.md   ← docs (root)
 ├── scripts/package.ps1                                   ← release packaging
 └── sounddeck/
-    ├── Cargo.toml, build.rs          ← deps; Windows icon/version resource
-    ├── assets/                       ← icon, bundled Satoshi fonts
-    ├── ARCHITECTURE.md               ← developer guide (keep current!)
+    ├── Cargo.toml, build.rs   assets/   ARCHITECTURE.md  ← deps, icon/fonts, dev guide
     └── src/
-        ├── main.rs          boot: single instance, window, --diag/--stats
-        ├── app.rs           ALL UI state + actions (largest file, ~5.6k lines)
-        ├── model.rs         paths, extensions, formatting
-        ├── hotkeys.rs       keyboard hook, hidden window, tray
-        ├── stats.rs         --stats counters
-        ├── icon.rs          PNG → window/tray icon
-        ├── audio/           engine (mixer), wasapi (devices), reader, decode,
-        │                    resample, stream
-        ├── playback/        mod (registry), policy (RAM-vs-disk), lock (file lock)
-        ├── storage/         mod (schemas), io (atomic writes), migrate (legacy import)
-        └── ui/              theme*.rs, volume.rs, anim.rs (paint-side only)
+        ├── main.rs       boot: single instance, window, --diag/--stats
+        ├── app.rs        all UI state + actions (~5.5k lines)
+        ├── model.rs      paths, extensions, formatting
+        ├── hotkeys.rs    keyboard hook, hidden window, tray
+        ├── stats.rs      --stats counters
+        ├── icon.rs       PNG → window/tray icon
+        ├── audio/        engine (mixer), wasapi (devices), reader, decode, resample, stream
+        ├── playback/     mod (registry), policy (RAM-vs-disk), lock (file lock)
+        ├── storage/      mod (schemas), io (atomic writes), migrate (legacy import)
+        └── ui/           theme*.rs, volume.rs, anim.rs (paint-side only)
 ```
-
----
 
 ## 2. How the app works
 
@@ -308,238 +276,114 @@ Satoshi via `theme::ui_font`/`medium`; `theme::truncate` for ellipsis.
 
 ---
 
-## 3. Module boundaries (keep the app modular)
+## 3. Module boundaries
 
-The codebase is deliberately layered so a broken part breaks **only its own layer**.
-Preserve these dependency directions; arrows mean "may use".
+Dependencies point downward (arrows = "may use"):
 
 ```
 app.rs ──► playback/ ──► audio/          app.rs ──► ui/ (paint only)
-   │            │                            app.rs ──► storage/, hotkeys(), model
-   │            └──► storage/ (schemas only, no I/O side effects in policy)
-   └──► audio/ (Engine handle only)
-hotkeys.rs ──► playback (play/stop_all calls only) + model
-audio/*  ──► (nothing above it; no UI, no storage, no app)
-ui/*     ──► egui + theme internals only; NEVER engine/playback/storage state
-storage/* ─► serde + io only; NEVER audio/ui
+   │            └──► storage/ (schemas)      app.rs ──► storage/, hotkeys(), model
+   └──► audio/ (Engine handle)            hotkeys.rs ──► playback (play/stop only)
+audio/* ─► nothing above it              ui/* ─► egui + theme only, never app state
 ```
 
-Rules:
-
-1. **Dependencies point downward only.** `audio/*` must never reference `ui/*`,
-   `app`, `storage`, or `playback`. `ui/*` must never touch the engine or registry —
-   it receives data and returns interactions. If you feel the urge to import `app` from
-   a leaf module, the design is wrong; introduce a channel/event or move the logic up.
-2. **`app.rs` is the wiring layer, not a dumping ground.** New *behaviour* belongs to
-   the domain module (playback/audio/storage/hotkeys); `app.rs` gets at most a call site
-   and UI. New *widgets* go to `ui/` (or a new `ui/` submodule if one file would
-   exceed ~500 lines).
-3. **One decision, one place.** RAM-vs-disk is only `policy.rs`; "is this file missing"
-   is only `Playback::info`; the volume curve is only `ui/volume.rs`. See §6.
-4. **Cross-thread talk uses channels** (`Job`, `PlaybackEvent`, `AudioEvent`,
-   `ServiceEvent`, loop chunks) drained on the UI thread. Do not add shared mutable
-   state without discussing the lock order (§4.2).
-5. **A module's `//!` header states its responsibility** (NFR-8.5.3). If the header no
-   longer matches the code, one of them must change in the same commit.
-
-This is also why parallel work is safe when it touches disjoint modules (see
-`plan.md` execution notes) and unsafe when two work items touch `app.rs`.
-
----
+- **Downward only.** `audio/*` never references ui/storage/app; `ui/*` never touches
+  engine/playback/storage state; `app.rs` is the wiring layer — behaviour goes to the
+  domain module, widgets to `ui/`.
+- **One decision, one place**: RAM-vs-disk = `policy.rs`; missing-file = `Playback::info`;
+  volume curve = `ui/volume.rs`. Cross-thread talk = channels drained on the UI thread.
+- Modules keep truthful `//!` headers. Parallel work only on disjoint modules;
+  `app.rs`/`hotkeys.rs` always serially.
 
 ## 4. Conventions
 
-### 4.1 Errors
+- **Errors**: anyhow at boundaries, `Option` internally, `?` over nested match. No
+  `unwrap`/`expect`/`panic` outside tests. Workers report failures via event channels.
+  No silent `let _ =` on user-visible work. Poison: one graceful helper idiom, not
+  per-call-site inventions.
+- **Concurrency**: lock order UI → `Playback.state` → `Engine.mixer`; never call the
+  engine under the state lock; never block the UI thread (decode/join/probe/dialogs go
+  to workers); no disk I/O on the mixer thread; `generation` invalidates stale worker
+  results.
+- **Naming/ids**: `Slot::index()` iteration (no bare `0..2`); egui ids
+  `ui.id().with((tag, id))` (no `enum as i32`); function names state side effects.
+- **UI**: cards/rows collect `Action`s (painting doesn't mutate; singleton chrome
+  excepted). Reuse `sound_item`, `modal_shell`, `settings_*`, `hotkey_pill`,
+  `volume::bar`, `theme::truncate`, `press_overlay`. Colors = theme tokens only. Radii
+  SM/MD/LG/XL. Volumes/percentages only via `ui/volume.rs`. Fetch `theme::palette()`
+  once per paint; theme locks go through `theme::read_lock`/`write_lock`.
+- **Storage**: settings field = struct + `Default` + `normalize()` clamp +
+  `#[serde(default)]` + control + consumer. Writes only via `io::write_json_atomic`.
+  Keep save fingerprints accurate.
+- **Audio**: 48 kHz stereo f32 in, device format out; fades on every voice start/stop;
+  buffers pass `is_valid_buffer`; stream chunks are whole frames (truncated tail
+  dropped); `Ring` drops stray samples; integer scaling symmetric (`scale_to_int`).
+- **Gates before "done"**: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+  warnings`, `cargo test`; tests named `thing_should_behave_when_condition`; pure logic
+  stays covered. Visual checks via PrintWindow — never steal focus, never leave test
+  instances running, never touch `sounddeck/review/`.
+- **Windows traps**: `app.rs` mixes CRLF/LF (the edit tool handles it); egui 0.31
+  `Margin` is `i8`; PowerShell `Set-Content -Encoding utf8` writes a BOM — use
+  `[System.IO.File]::WriteAllText($p,$t,(New-Object System.Text.UTF8Encoding($false)))`;
+  quote paths with spaces.
+- **Storage budget**: repo ≤ ~5 GB (`target` ≈ 3.3 GB). Parallel worktrees share
+  `CARGO_TARGET_DIR` or run sequentially; `cargo clean` stale caches.
 
-- `anyhow::Result` at boundaries; plain `Option` for internal "absent" cases. Prefer
-  `?` over nested `match`.
-- **No `unwrap()`/`expect()` outside tests** (NFR-8.3.3: user data must never panic the
-  app). No `panic!` as a control-flow path in production code.
-- Workers return errors through their event channels (FR-5.1.6) — never panic for an
-  expected failure (missing file, decode error, device gone).
-- No silent `let _ =` on anything user-visible. Where the user cares (decode, save,
-  device, spawn), log or surface it. `let _ =` is acceptable only for best-effort
-  cleanup (e.g. a tray remove during teardown).
-- Lock poisoning: handle it with the graceful idiom (`if let Ok(...)`, `into_inner`,
-  or `unwrap_or_else` to a default) — pick the helper, don't re-invent per call site.
-
-### 4.2 Concurrency
-
-- **Lock order: UI → `Playback.state` → `Engine.mixer`.** Never acquire in reverse.
-  Never call engine methods while holding the playback state lock (drop the guard
-  first) — today's code mostly complies; keep it that way.
-- Do not block the UI thread on decode, joins, device work, or file dialogs' internals
-  (NFR-8.3.1). Slow work goes to a worker thread.
-- The mixer thread must never do disk I/O or lock anything it doesn't own for the
-  chunk it is rendering.
-- Atomic counters use `Relaxed` unless ordering with payload data is needed.
-- Generations (`Playable.generation`) invalidate stale worker results — use this
-  pattern instead of trying to cancel threads.
-
-### 4.3 Naming and types
-
-- `Slot` is `Monitor`/`Cable`; use `slot.index()`/`Slot::BOTH`-style iteration — no
-  bare `0..2` loops over device arrays.
-- Overloaded names to avoid: `set_master` is per-output (call it output/slot gain);
-  `hex` exists in two directions in theme code (`to_hex`/`from_u32`); `cfg` is
-  `storage::Settings`.
-- egui widget ids: `ui.id().with((tag, entity_id))` with lowercase string tags
-  (`"cardvol"`, `"rowvol"`). Never `enum as i32` in ids.
-- Function names state side effects (`ensure_loaded`, `mark_missing`, `save_now`).
-
-### 4.4 UI patterns
-
-- Cards/rows collect `Action`s; painting never mutates state (except singleton chrome —
-  that is deliberate, per ARCHITECTURE.md §6).
-- Reuse before writing: `settings_row`/`settings_switch`/`settings_group`,
-  `hotkey_pill`, `modal_header`/`close_button`, `accent_button`/`ghost_button`/
-  `tiny_button`, `press_overlay` + `anim::press`, `volume::bar`, `theme::truncate`.
-  If a widget appears twice, it becomes a shared helper on the third thought.
-- Colors come from theme tokens (FR-5.10.5). No raw `Color32::from_rgb` outside
-  `ui/theme*` (except the documented white on the active layout segment).
-- Fetch `theme::palette()` once per paint function (it is `Copy`) instead of calling
-  per-colour accessors repeatedly; theme locks degrade poison-tolerantly through
-  `theme::read_lock`/`write_lock` — use those, never raw `.read()`/`.write()`.
-- Use radii constants `SM/MD/LG/XL`; layout sizes become named consts at the top of
-  the file, not inline magic numbers.
-- Percentages and volumes render through `ui/volume.rs` only.
-- Modals use `egui::Modal` + transparent backdrop (UI-1). Status messages are terse,
-  never stacked duplicates (UI-6).
-
-### 4.5 Storage
-
-- New settings field: `storage::Settings` + `Default` + `normalize()` clamp +
-  `#[serde(default)]`, then the Settings control, then the consumer. Bump `version`
-  only for breaking shape changes. Add a storage test when the value is clamped or
-  transformed.
-- All persistence goes through `io::write_json_atomic`. Never write JSON by hand.
-- Fingerprints (`last_settings_json`/`last_libraries_json`) prevent gratuitous writes —
-  keep them accurate when adding fields.
-
-### 4.6 Audio
-
-- 48 kHz stereo `f32` in, device format out; add formats in `reader.rs`/`resample.rs`,
-  not ad hoc.
-- Fades on every voice start/stop (2.5 ms / 5 ms) — never hard-cut samples.
-- Buffers entering the mixer pass `is_valid_buffer` (extend it rather than trusting
-  callers).
-- Chunk parity is a tested invariant: stream chunks carry whole frames only (a
-  truncated tail is dropped at the producer), `Ring::pop_into` drops a stray
-  non-frame-aligned sample deliberately, and integer sample scaling is symmetric with
-  clamping (`scale_to_int`). Do not regress these.
-- Test WAV helpers are shared test-only utilities; don't copy `write_wav` again.
-
-### 4.7 Testing & release gates
-
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` must
-  pass before any "done" claim. Tests are named `thing_should_behave_when_condition`.
-- Pure logic (paths, normalize, migration, volume curve, hotkey parse, ring/resampler)
-  MUST stay covered (NFR-8.5.2).
-- Manual verification uses `PrintWindow` screenshots — **never steal foreground
-  focus**; never leave test instances running (two instances fight over hotkeys).
-- Never touch `sounddeck/review/config/` — it is the user's real config and audio.
-
-### 4.8 Environment traps (Windows)
-
-- `app.rs` mixes CRLF and LF — the `edit` tool handles both; .NET string `Replace`
-  with LF-only strings does not.
-- egui 0.31 `Margin` fields are `i8`, not `f32`.
-- PowerShell 5.1 `Set-Content -Encoding utf8` writes a BOM; for JSON use
-  `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))`.
-- `paths` with spaces: quote everything in shell commands.
-
----
-
-## 5. Feature playbooks (where to change what)
+## 5. Feature playbooks
 
 | To add… | Steps |
 | --- | --- |
-| **A setting** | 1) field + `Default` + `normalize()` in `storage::Settings` 2) control in the right `settings_page_*` 3) apply where it belongs (engine/config) + `mark_dirty()` 4) storage test if clamped 5) SPEC §6.1 + README. |
-| **A theme token** | 1) `Palette` field in `ui/theme.rs` 2) default in `theme_defaults.rs` 3) one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` — parser, template and the field-coverage test all derive from that table 4) use `theme::token()`. |
-| **A sound action** | 1) `Action` variant 2) handler in `handle_actions` 3) trigger in card/row/context menu 4) keep painting side-effect free. |
-| **A Settings tab** | 1) `SettingsTab` variant + `title()` + `ALL` 2) rail item (About stays pinned) 3) `settings_page_*` + `settings_content` match. |
-| **A volume** | Only `ui/volume.rs` — store linear, display via `to_position`/`percent_text`. Never a second curve. |
-| **A file format** | 1) Symphonia feature in `Cargo.toml` 2) `model::SUPPORTED_EXTENSIONS` 3) file-dialog filter 4) test file + decode test. |
-| **Audio routing changes** | `Engine` owns devices/routes, `Mixer` owns voices/loop/gains, `Ring` is the only producer→device boundary. Keep blocking work off the mixer thread. |
-| **Hotkey behaviour** | Rules live in `hotkeys.rs`: the `KEYS` table and `chord_owner`/`duplicate_sounds` (one rule owner — extend, never copy). Capture UI = the shared capture path in `app.rs`. Update SPEC §5.7. |
-| **A modal** | Reuse the modal shell + `modal_header` + `close_button`. No new backdrop/frame one-offs. |
-| **A tray/menu item** | `hotkeys.rs` `WM_COMMAND` + tray menu build share one `handle_menu_command`; add the id in both places it is matched (or the shared helper). |
+| A setting | field + `Default` + `normalize()` clamp + `#[serde(default)]` → control in the right `settings_page_*` → consumer + `mark_dirty()` → test if clamped → SPEC §6.1 + README |
+| A theme token | `Palette` field → default in `theme_defaults.rs` → one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` (parser/template/coverage test follow) → use `theme::token()` |
+| A sound action | `Action` variant → `handle_actions` arm → trigger in `sound_item`/context menu |
+| A Settings tab | `SettingsTab` variant + `title()` + `ALL` → rail item (About stays pinned) → `settings_page_*` + `settings_content` match |
+| A volume | only `ui/volume.rs` — store linear, display via `to_position`/`percent_text` |
+| A file format | Symphonia feature → `model::SUPPORTED_EXTENSIONS` → dialog filter → test file |
+| Audio routing | `Engine` = devices/routes, `Mixer` = voices/loop/gains, `Ring` = producer→device boundary; nothing blocking on the mixer thread |
+| Hotkey behaviour | `hotkeys.rs`: `KEYS` table + `chord_owner`/`duplicate_sounds` (extend, never copy) → shared capture path in `app.rs` → SPEC §5.7 |
+| A modal | `modal_shell` + `modal_header` + `close_button`; no one-off backdrops |
+| A tray/menu item | `handle_menu_command` in `hotkeys.rs` |
 
----
+## 6. Guardrails (refuse these)
 
-## 6. Guardrails (bad practices to refuse)
-
-These exist because the codebase review found each of them in practice.
-
-1. **No drift-class code (the big one).** Never keep the same knowledge in two places.
-   One key table (not three), one policy function that both decides *and* explains,
-   one renderer for cards/rows. Before writing a helper: search for it. Before writing
-   a second copy of anything: parameterize the first. *Symptom to watch for: two
-   functions whose doc comments say the same thing.*
-2. **No new `unwrap`/`expect`/indexing assumptions** in production paths. Lengths of
-   arrays (`[T; 2]` meters, slot-indexed stats) are checked or typed (`Slot`), not
-   trusted.
-3. **No blocking the UI thread.** No decode, join, `probe_seconds`, device open, or
-   long dialog work inside `update`/painting/event handlers without an async plan.
-4. **No per-frame allocation creep** in paint code: no `String` formatting, `clone()`,
-   `HashSet`, or `Vec` building per card per frame when a cached/`&` version exists.
-   Immediate mode makes this easy to add accidentally — check `paint` functions.
-5. **No magic numbers** in new code. Named consts at file top (layout, timing, limits).
-   Theme metrics via `SM/MD/LG/XL`.
-6. **No dead state.** No fields written and never read, no `#[allow(dead_code)]`
-   parked indefinitely, no ignored `Result` on user-visible operations. If the plan
-   says "use or drop", drop it.
-7. **No lock-across-call.** Drop guards before calling into another subsystem (§4.2).
-   No new global mutable state (`OnceLock`/`static`) without a stated reason.
-8. **No behavior changes without a SPEC pass.** Behaviour is a contract
-   (SPEC.md). If a fix changes what the user sees/does, update SPEC in the same change.
-   But never "fix" a **settled decision** (§7) — those are intentional.
-9. **No scope creep in a work unit.** Each `plan.md` item is implemented and verified
-   on its own; opportunistic refactors go in the refactor batch, not smuggled into a
-   bug fix.
-10. **No panic on user data** (paths, names, hotkeys, themes, JSON) — NFR-8.3.3. Corrupt
-    input degrades to defaults with the original preserved.
-11. **Don't grow `app.rs` sideways.** If a change adds more than ~50 lines of new logic
-    to `app.rs`, ask whether it belongs in a domain module or `ui/`.
-12. **Keep the docs trio in sync**: code ↔ `ARCHITECTURE.md` ↔ `SPEC.md`, plus this
-    file per §0.
-13. **Respect the storage budget.** Keep the repo ≤ ~5 GB (`sounddeck/target` is ~3.3 GB
-    of that). Never give parallel worktrees their own `target` dirs — share
-    `CARGO_TARGET_DIR` or run them sequentially — and `cargo clean` heavy build caches
-    when they are no longer needed.
-
----
+1. **No drift-class code**: one key table, one policy function, one renderer. Search
+   before writing a helper; parameterize before copying. Symptom: two doc comments
+   saying the same thing.
+2. No `unwrap`/`expect`/trusted indices in production paths — slot arrays are typed.
+3. No blocking the UI thread.
+4. No per-frame allocation creep in paint code (String/clone/HashSet/Vec per item).
+5. No magic numbers — named consts (radii SM/MD/LG/XL exist).
+6. No dead state: write-only fields, parked `#[allow(dead_code)]`, ignored user-visible
+   Results.
+7. No lock-across-call; no new globals without a stated reason.
+8. No behaviour change without a SPEC pass — but never "fix" a settled decision (§7).
+9. No scope creep in a work unit; opportunistic refactors go to the refactor batch.
+10. No panic on user data (paths, names, hotkeys, themes, JSON) — degrade + preserve.
+11. Don't grow `app.rs` sideways: >~50 lines of new logic → question the module.
+12. Keep code ↔ ARCHITECTURE ↔ SPEC ↔ this file in sync (§0).
+13. Storage budget (§4): repo ≤ ~5 GB; no per-worktree target dirs.
 
 ## 7. Settled decisions (do not re-litigate)
 
-Behavioural decisions are **settled in SPEC.md** — read it before proposing behaviour
-changes. The ones agents most often get wrong:
+Behaviour lives in SPEC.md. The ones agents most often get wrong:
 
-| Decision | Where | Note |
-| --- | --- | --- |
-| **Pass-through hotkeys** | SPEC FR-5.7.2 + §1 | Triggering a hotkey also types the key into the focused app. Intentional. |
-| **Exclusive playback** | SPEC FR-5.4.1 + §1 | A trigger fades out all current voices; sounds never overlap. Intentional. |
-| SFX go to both outputs equally | SPEC FR-5.5.5 | Per-sound routing is a *future* item, not a bug. |
-| Volumes stored linear, shown log (−60…0 dBFS) | SPEC UI-4 | One curve. |
-| Portable, no installer/registry/AppData, no network | SPEC ENV-2/4 | |
-| JSON config + Markdown themes, audio never copied | SPEC FR-5.3.14 | |
-| Single instance per exe path | SPEC ENV-5 | |
-| Window size not persisted | SPEC FR-5.8.1 | |
-| RAM state hidden by default (diagnostics, not control) | SPEC FR-5.9.9 | |
-| Hidden = minimize + taskbar-DeleteTab, never `Visible(false)` | ARCHITECTURE §6 | The `Visible(false)` path burns a core and freezes tray events. |
-| Stream buffer 8 chunks unless measured underruns | SPEC FR-5.3.13 | |
+| Decision | Where |
+| --- | --- |
+| **Pass-through hotkeys**: the keystroke also reaches the focused app. Intentional. | SPEC FR-5.7.2 |
+| **Exclusive playback**: a trigger fades out all current voices. Intentional. | SPEC FR-5.4.1 |
+| SFX go to both outputs equally (per-sound routing = future item) | SPEC FR-5.5.5 |
+| Volumes stored linear, shown log (−60…0 dBFS); one curve | SPEC UI-4 |
+| Portable: no installer/registry/AppData/network; JSON + Markdown themes; audio files never copied | SPEC ENV-2/4, FR-5.3.14 |
+| Single instance per exe path; window size not persisted | SPEC ENV-5, FR-5.8.1 |
+| RAM state hidden by default (diagnostics) | SPEC FR-5.9.9 |
+| Hidden = minimize + taskbar-DeleteTab, never `Visible(false)` (burns a core) | ARCHITECTURE §6 |
+| Stream buffer 8 chunks unless measured underruns | SPEC FR-5.3.13 |
+| Duplicate hotkeys refused; conflicts unbind (new binding wins) | SPEC FR-5.7.5 |
+| Delete-library dialog: move to chosen library / remove sounds / cancel; no undo | SPEC FR-5.2.3 |
+| Missing sound: trigger logs an error; relink via context menu only | SPEC FR-5.3.6 |
+| No progress bar until duration is known | decided 2026-10-28 |
+| User `Graphite.md` shows alongside the built-in theme | decided 2026-10-28 |
 
-Product scope exclusions: SPEC §10 Non-goals (no macOS/Linux, no recording/effects, no
-cloud, no FFmpeg, no installer…).
-
----
-
-## 8. Working with plans and agents
-
-- `plan.md` is the iteration's work list. Implement items **in order**; parallel work
-  is allowed only for items whose files are disjoint (see the plan's execution notes).
-  Items touch `app.rs` and `hotkeys.rs` serially.
-- When a plan item completes: update `plan.md` status, run the release gates (§4.7),
-  and apply §0's update triggers to this file.
-- When the iteration ends, `plan.md` is wiped and rewritten from the new state of the
-  world (implemented work disappears from the plan; the code and docs carry it).
+Scope exclusions: SPEC §10 Non-goals. `plan.md` is the work list — implement items in
+order; parallel work only on disjoint file sets (`app.rs`/`hotkeys.rs` serial); mark
+items done as they land; the plan is wiped and rewritten when the iteration ends.

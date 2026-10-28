@@ -33,6 +33,49 @@ const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
 
+// Settings layout metrics (SPEC FR-5.9.8 spacing, §7.2 widths). Every number the
+// settings screen uses comes from here so the four pages keep one rhythm.
+const SETTINGS_CONTENT_MAX_W: f32 = 780.0;
+const SETTINGS_ABOUT_MAX_W: f32 = 680.0;
+const SETTINGS_CARD_PADDING: i8 = 10;
+/// Title of a group to the top of its card.
+const SETTINGS_GROUP_TITLE_GAP: f32 = 5.0;
+/// Card to the next group title, and the header to the first group.
+const SETTINGS_GROUP_GAP: f32 = 8.0;
+/// Height of one label/control row (and of the controls inside it).
+const SETTINGS_ROW_H: f32 = 28.0;
+/// Space between a row's label and its control.
+const SETTINGS_ROW_LABEL_GAP: f32 = 16.0;
+const SETTINGS_ROW_LABEL_MIN_W: f32 = 160.0;
+/// Content width below which a row stacks its label above the control. This is a
+/// width breakpoint; it is unrelated to the sidebar's 620 px *height* rule.
+const SETTINGS_ROW_STACK_W: f32 = 620.0;
+/// Space above and below a divider rule.
+const SETTINGS_DIVIDER_GAP: f32 = 7.0;
+/// Row to the muted detail line under it.
+const SETTINGS_DETAIL_GAP: f32 = 6.0;
+/// A stacked row's label to the control under it.
+const SETTINGS_STACK_LABEL_GAP: f32 = 6.0;
+/// Every settings button shares one size, so the rows line up.
+const SETTINGS_BUTTON_SIZE: Vec2 = Vec2::new(96.0, SETTINGS_ROW_H);
+const SETTINGS_SWITCH_SIZE: Vec2 = Vec2::new(40.0, 22.0);
+/// Wide text value column (licence, version): long values wrap instead of being
+/// clipped, and `right_to_left` keeps the text flush with the other controls.
+const SETTINGS_TEXT_COL_W: f32 = 200.0;
+const SETTINGS_THEME_W: f32 = 240.0;
+const SETTINGS_RULE_H: f32 = 1.0;
+const SETTINGS_RAIL_ITEM_H: f32 = 34.0;
+const SETTINGS_RAIL_ITEM_GAP: f32 = 3.0;
+const SETTINGS_RAIL_SECTION_GAP: f32 = 8.0;
+const SETTINGS_RAIL_RULE_GAP: f32 = 6.0;
+/// Left inset of a rail item's glyph centre and of its text, shared by Back and
+/// the tab items so the rail lines up.
+const SETTINGS_RAIL_GLYPH_X: f32 = 18.0;
+const SETTINGS_RAIL_TEXT_X: f32 = 34.0;
+/// What the pinned About item needs at the bottom of the rail: the rule, the gap
+/// under it and the item itself.
+const SETTINGS_RAIL_FOOTER_H: f32 = SETTINGS_RULE_H + SETTINGS_RAIL_RULE_GAP + SETTINGS_RAIL_ITEM_H;
+
 /// Width of the chip the drag ghost shows for a list row (a card-sized ghost
 /// would be wider than the row it came from).
 const ROW_DRAG_WIDTH: f32 = 220.0;
@@ -274,6 +317,18 @@ enum Action {
     DragStop,
 }
 
+/// The Playback page's readouts. Recomputing them every frame walks the whole
+/// sound list and locks the playback registry, so they are cached and refreshed
+/// only when something that can change them happens.
+#[derive(Default)]
+struct PlaybackStats {
+    fresh: bool,
+    ram: Option<RamState>,
+    usage: policy::Usage,
+    /// The cache line, formatted when the numbers change rather than per frame.
+    label: String,
+}
+
 pub struct App {
     cfg: storage::Settings,
     sounds: Vec<Sound>,
@@ -329,6 +384,9 @@ pub struct App {
     settings_was_open: bool,
     settings_tab: SettingsTab,
     settings_tab_fade: Instant,
+    /// Theme ids/names for the Appearance dropdown; rebuilt only on reload.
+    theme_choices: Vec<(String, String)>,
+    playback_stats: PlaybackStats,
     dirty: bool,
     save_failed: bool,
     last_save: Instant,
@@ -385,6 +443,8 @@ impl App {
             cfg.theme = "graphite".to_string();
             theme::set_theme("graphite");
         }
+        // Read once: the Appearance dropdown draws from this list every frame.
+        let theme_choices = theme::available();
 
         // The stop-all binding is stored as a label string like every other
         // hotkey; a hand-edited file must not take the app down.
@@ -591,6 +651,8 @@ impl App {
             settings_was_open: false,
             settings_tab: SettingsTab::Playback,
             settings_tab_fade: since(10),
+            theme_choices,
+            playback_stats: PlaybackStats::default(),
             dirty: theme_was_corrected,
             save_failed: false,
             last_save: Instant::now(),
@@ -623,6 +685,8 @@ impl App {
 
     fn poll_events(&mut self, ctx: &egui::Context) {
         for event in self.playback.poll_events() {
+            // Every load/refusal/eviction changes what the Playback page reports.
+            self.invalidate_playback_stats();
             match event {
                 PlaybackEvent::Loaded {
                     id,
@@ -1331,6 +1395,33 @@ impl App {
                 self.playback.ensure_loaded(sound.id);
             }
         }
+        self.invalidate_playback_stats();
+    }
+
+    /// The Playback page's RAM state. Cached because the same refresh also
+    /// locks the playback registry for the cache line; invalidated by
+    /// [`App::invalidate_playback_stats`] rather than recomputed per frame.
+    fn playback_stats(&mut self) -> Option<RamState> {
+        if !self.playback_stats.fresh {
+            let usage = self.playback.cache_usage();
+            self.playback_stats.ram = self.ram_summary();
+            self.playback_stats.usage = usage;
+            self.playback_stats.label = format!(
+                "{} of {} MB - {} of {} sounds",
+                usage.bytes / (1024 * 1024),
+                policy::RETAINED_BYTES_CAP / (1024 * 1024),
+                usage.sounds,
+                policy::RETAINED_SOUND_CAP
+            );
+            self.playback_stats.fresh = true;
+        }
+        self.playback_stats.ram
+    }
+
+    /// Call from anything that changes RAM eligibility, retention or the decoded
+    /// cache: RAM toggles, tab switches, playback events, opening the screen.
+    fn invalidate_playback_stats(&mut self) {
+        self.playback_stats.fresh = false;
     }
 
     fn ram_summary(&self) -> Option<RamState> {
@@ -1387,6 +1478,7 @@ impl App {
             self.cfg.preload_hotkey_sounds = on;
             self.mark_dirty();
         }
+        self.invalidate_playback_stats();
     }
 
     fn toggle_sound_ram(&mut self, id: u64) {
@@ -1404,6 +1496,7 @@ impl App {
             self.playback.ensure_loaded(id);
         }
         self.mark_dirty();
+        self.invalidate_playback_stats();
     }
 
     fn toggle_layout(&mut self) {
@@ -2972,7 +3065,7 @@ impl App {
                     .color(theme::muted()),
                 );
                 ui.add_space(10.0);
-                settings_row(ui, "Move to", 190.0, |ui| {
+                settings_value(ui, "Move to", 190.0, |ui| {
                     ComboBox::from_id_salt("delete_library_target")
                         .width(190.0)
                         .selected_text(RichText::new(&selected_name).size(13.5))
@@ -3249,7 +3342,7 @@ impl App {
         if settings_back(ui) {
             self.close_settings(ui.ctx());
         }
-        ui.add_space(8.0);
+        ui.add_space(SETTINGS_RAIL_SECTION_GAP);
         for tab in SettingsTab::ALL
             .into_iter()
             .filter(|tab| *tab != SettingsTab::About)
@@ -3257,14 +3350,13 @@ impl App {
             if settings_nav_item(ui, tab, self.settings_tab == tab) {
                 self.select_settings_tab(tab, ui.ctx());
             }
-            ui.add_space(3.0);
+            ui.add_space(SETTINGS_RAIL_ITEM_GAP);
         }
 
         // About pinned to the bottom; everything else is a normal tab.
-        let footer_height = 40.0;
-        ui.add_space((ui.available_height() - footer_height).max(8.0));
+        ui.add_space((ui.available_height() - SETTINGS_RAIL_FOOTER_H).max(SETTINGS_GROUP_GAP));
         settings_rule(ui);
-        ui.add_space(6.0);
+        ui.add_space(SETTINGS_RAIL_RULE_GAP);
         if settings_nav_item(
             ui,
             SettingsTab::About,
@@ -3293,21 +3385,21 @@ impl App {
 
         let tab = self.settings_tab;
         settings_header(ui, tab);
-        ui.add_space(6.0);
+        ui.add_space(SETTINGS_GROUP_GAP);
 
         egui::ScrollArea::vertical()
             .id_salt(("settings_scroll", tab.title()))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.scope(|ui| {
-                    ui.set_width(ui.available_width().min(780.0));
+                    ui.set_width(ui.available_width().min(SETTINGS_CONTENT_MAX_W));
                     match tab {
                         SettingsTab::Playback => self.settings_page_playback(ui),
                         SettingsTab::Appearance => self.settings_page_appearance(ctx, ui),
                         SettingsTab::Window => self.settings_page_window(ui),
                         SettingsTab::About => self.settings_page_about(ui),
                     }
-                    ui.add_space(8.0);
+                    ui.add_space(SETTINGS_GROUP_GAP);
                 });
             });
     }
@@ -3315,11 +3407,13 @@ impl App {
     fn settings_page_playback(&mut self, ui: &mut Ui) {
         settings_group(ui, "Looping track", |ui| {
             let mut enabled = self.cfg.loop_enabled;
-            let mut toggled = false;
-            settings_row(ui, "Enabled", 80.0, |ui| {
-                toggled = settings_switch(ui, Id::new("settings_loop_enabled"), &mut enabled, true);
-            });
-            if toggled {
+            if settings_toggle(
+                ui,
+                Id::new("settings_loop_enabled"),
+                "Enabled",
+                &mut enabled,
+                true,
+            ) {
                 self.set_loop_enabled(enabled);
             }
             if self.cfg.loop_enabled {
@@ -3331,12 +3425,13 @@ impl App {
         if self.cfg.loop_enabled {
             settings_group(ui, "Loop outputs", |ui| {
                 let mut monitor = self.cfg.loop_on_monitor;
-                let mut monitor_changed = false;
-                settings_row(ui, "Monitor", 80.0, |ui| {
-                    monitor_changed =
-                        settings_switch(ui, Id::new("settings_loop_monitor"), &mut monitor, true);
-                });
-                if monitor_changed {
+                if settings_toggle(
+                    ui,
+                    Id::new("settings_loop_monitor"),
+                    "Monitor",
+                    &mut monitor,
+                    true,
+                ) {
                     self.cfg.loop_on_monitor = monitor;
                     self.engine
                         .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
@@ -3345,12 +3440,13 @@ impl App {
 
                 settings_divider(ui);
                 let mut cable = self.cfg.loop_on_cable;
-                let mut cable_changed = false;
-                settings_row(ui, "Cable", 80.0, |ui| {
-                    cable_changed =
-                        settings_switch(ui, Id::new("settings_loop_cable"), &mut cable, true);
-                });
-                if cable_changed {
+                if settings_toggle(
+                    ui,
+                    Id::new("settings_loop_cable"),
+                    "Cable",
+                    &mut cable,
+                    true,
+                ) {
                     self.cfg.loop_on_cable = cable;
                     self.engine
                         .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
@@ -3360,42 +3456,32 @@ impl App {
         }
 
         settings_group(ui, "Hotkey sounds", |ui| {
-            let ram = self.ram_summary();
+            let ram = self.playback_stats();
             let enabled = ram.is_some();
             let mut on = matches!(ram, Some(RamState::On));
-            let mut changed = false;
-            settings_row(ui, "Load into RAM", 80.0, |ui| {
-                changed = settings_switch(ui, Id::new("settings_ram"), &mut on, enabled);
-            });
-            if changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_ram"),
+                "Load into RAM",
+                &mut on,
+                enabled,
+            ) {
                 self.set_all_hotkey_ram(on);
-                self.mark_dirty();
             }
             settings_divider(ui);
             let mut show_state = self.cfg.show_ram_state;
-            let mut state_changed = false;
-            settings_row(ui, "Show RAM state", 80.0, |ui| {
-                state_changed =
-                    settings_switch(ui, Id::new("settings_show_ram"), &mut show_state, true);
-            });
-            if state_changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_show_ram"),
+                "Show RAM state",
+                &mut show_state,
+                true,
+            ) {
                 self.cfg.show_ram_state = show_state;
                 self.mark_dirty();
             }
             if self.cfg.show_ram_state {
-                let usage = self.playback.cache_usage();
-                ui.add_space(6.0);
-                ui.label(
-                    RichText::new(format!(
-                        "{} of {} MB - {} of {} sounds",
-                        usage.bytes / (1024 * 1024),
-                        policy::RETAINED_BYTES_CAP / (1024 * 1024),
-                        usage.sounds,
-                        policy::RETAINED_SOUND_CAP
-                    ))
-                    .size(10.5)
-                    .color(theme::faint()),
-                );
+                settings_detail(ui, self.playback_stats.label.as_str());
             }
         });
 
@@ -3408,10 +3494,14 @@ impl App {
                 } else {
                     (format!("{}: not connected", slot.label()), theme::muted())
                 };
-                ui.horizontal(|ui| {
-                    status_dot(ui, color);
-                    ui.label(RichText::new(text).size(11.0).color(color));
-                });
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), SETTINGS_ROW_H),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        status_dot(ui, color);
+                        ui.label(RichText::new(text).size(11.0).color(color));
+                    },
+                );
                 if index == 0 {
                     settings_divider(ui);
                 }
@@ -3420,24 +3510,25 @@ impl App {
 
         settings_group(ui, "Stop everything", |ui| {
             let mut enabled = self.cfg.stop_all_hotkey_enabled;
-            let mut changed = false;
-            settings_row(ui, "Stop-all hotkey", 80.0, |ui| {
-                changed = settings_switch(ui, Id::new("settings_stop_all"), &mut enabled, true);
-            });
-            if changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_stop_all"),
+                "Stop-all hotkey",
+                &mut enabled,
+                true,
+            ) {
                 self.cfg.stop_all_hotkey_enabled = enabled;
                 self.sync_active_library();
                 self.mark_dirty();
             }
             if self.cfg.stop_all_hotkey_enabled {
-                ui.add_space(4.0);
                 let detail = match self.stop_all {
                     Some(hotkey) => {
                         format!("Key: {}. Set or change it in the sidebar.", hotkey.label())
                     }
                     None => "Set the key in the sidebar widget.".to_string(),
                 };
-                ui.label(RichText::new(detail).size(10.5).color(theme::faint()));
+                settings_detail(ui, detail);
             }
         });
     }
@@ -3455,10 +3546,11 @@ impl App {
         let has_file = path.is_some() && !missing;
 
         ui.horizontal(|ui| {
-            let controls_width = 110.0;
-            let label_width = (ui.available_width() - controls_width - 10.0).max(120.0);
+            let label_width =
+                (ui.available_width() - SETTINGS_BUTTON_SIZE.x - SETTINGS_ROW_LABEL_GAP)
+                    .max(SETTINGS_ROW_LABEL_MIN_W);
             ui.allocate_ui_with_layout(
-                Vec2::new(label_width, 34.0),
+                Vec2::new(label_width, SETTINGS_ROW_H + SETTINGS_DETAIL_GAP),
                 Layout::top_down(Align::Min),
                 |ui| {
                     let name_color = if missing || error.is_some() {
@@ -3488,7 +3580,7 @@ impl App {
                 if ghost_button(
                     ui,
                     if missing { "Locate" } else { "Choose file" },
-                    Vec2::new(100.0, 26.0),
+                    SETTINGS_BUTTON_SIZE,
                 )
                 .clicked()
                 {
@@ -3500,12 +3592,12 @@ impl App {
 
     fn settings_page_appearance(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         settings_group(ui, "Theme", |ui| {
-            settings_row(ui, "Theme", 260.0, |ui| {
-                self.theme_picker(ctx, ui, 240.0);
+            settings_value(ui, "Theme", SETTINGS_THEME_W, |ui| {
+                self.theme_picker(ctx, ui, SETTINGS_THEME_W);
             });
             settings_divider(ui);
-            settings_row(ui, "Reload themes", 200.0, |ui| {
-                if ghost_button(ui, "Reload", Vec2::new(100.0, 26.0))
+            settings_value(ui, "Reload themes", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button(ui, "Reload", SETTINGS_BUTTON_SIZE)
                     .on_hover_text("Re-read config/themes/*.md")
                     .clicked()
                 {
@@ -3516,11 +3608,13 @@ impl App {
 
         settings_group(ui, "Motion", |ui| {
             let mut animate = self.cfg.animate_ui;
-            let mut changed = false;
-            settings_row(ui, "Animate UI", 80.0, |ui| {
-                changed = settings_switch(ui, Id::new("settings_animate"), &mut animate, true);
-            });
-            if changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_animate"),
+                "Animate UI",
+                &mut animate,
+                true,
+            ) {
                 self.cfg.animate_ui = animate;
                 anim::set_user(animate);
                 self.mark_dirty();
@@ -3531,16 +3625,13 @@ impl App {
     fn settings_page_window(&mut self, ui: &mut Ui) {
         settings_group(ui, "Tray", |ui| {
             let mut minimize = self.cfg.minimize_to_tray;
-            let mut changed = false;
-            settings_row(ui, "Minimize to tray", 80.0, |ui| {
-                changed = settings_switch(
-                    ui,
-                    Id::new("settings_minimize_to_tray"),
-                    &mut minimize,
-                    self.tray_available,
-                );
-            });
-            if changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_minimize_to_tray"),
+                "Minimize to tray",
+                &mut minimize,
+                self.tray_available,
+            ) {
                 self.cfg.minimize_to_tray = minimize;
                 self.mark_dirty();
             }
@@ -3548,11 +3639,13 @@ impl App {
 
         settings_group(ui, "Sidebar", |ui| {
             let mut show_gain = self.cfg.show_gain_slider;
-            let mut changed = false;
-            settings_row(ui, "Show gain", 80.0, |ui| {
-                changed = settings_switch(ui, Id::new("settings_show_gain"), &mut show_gain, true);
-            });
-            if changed {
+            if settings_toggle(
+                ui,
+                Id::new("settings_show_gain"),
+                "Show gain",
+                &mut show_gain,
+                true,
+            ) {
                 self.cfg.show_gain_slider = show_gain;
                 self.mark_dirty();
             }
@@ -3563,8 +3656,11 @@ impl App {
         // Narrow column: the page is short text, so a 780 px card reads as an
         // empty box.
         ui.scope(|ui| {
-            ui.set_max_width(680.0);
+            ui.set_max_width(SETTINGS_ABOUT_MAX_W.min(ui.available_width()));
 
+            // One card: name/version, config folder, licence, project links and
+            // the credit. A second group of two rows pushed the credit off a
+            // 540 px window.
             settings_group(ui, "Application", |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -3587,33 +3683,27 @@ impl App {
                         .color(theme::faint()),
                 );
                 settings_divider(ui);
-                settings_row(ui, "Config folder", 200.0, |ui| {
-                    if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
+                settings_value(ui, "Config folder", SETTINGS_BUTTON_SIZE.x, |ui| {
+                    if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
                         let _ = std::process::Command::new("explorer")
                             .arg(model::config_dir())
                             .spawn();
                     }
                 });
                 settings_divider(ui);
-                settings_row(ui, "License", 200.0, |ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(LICENSE_NAME).size(11.5).color(theme::muted()));
-                    });
+                settings_value(ui, "License", SETTINGS_TEXT_COL_W, |ui| {
+                    ui.label(RichText::new(LICENSE_NAME).size(11.5).color(theme::muted()));
                 });
+                for (label, url) in ABOUT_LINKS.iter().filter(|(_, url)| !url.is_empty()) {
+                    settings_divider(ui);
+                    settings_value(ui, label, SETTINGS_BUTTON_SIZE.x, |ui| {
+                        if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
+                            open_url(url);
+                        }
+                    });
+                }
             });
 
-            // Project links live in the same card: a second group of two rows
-            // pushes the credit line off a 540 px window.
-            for (label, url) in ABOUT_LINKS.iter().filter(|(_, url)| !url.is_empty()) {
-                settings_divider(ui);
-                settings_row(ui, label, 200.0, |ui| {
-                    if ghost_button(ui, "Open", Vec2::new(90.0, 26.0)).clicked() {
-                        open_url(url);
-                    }
-                });
-            }
-
-            ui.add_space(3.0);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("Made by {DEVELOPER_NAME}"))
@@ -3647,18 +3737,23 @@ impl App {
 
     fn theme_picker(&mut self, ctx: &egui::Context, ui: &mut Ui, width: f32) {
         let mut selected = self.cfg.theme.clone();
-        let current_name = theme::available()
+        // The list is read once per reload, not per frame.
+        let current_name = self
+            .theme_choices
             .iter()
-            .find(|(id, _)| id == &selected)
+            .find(|(id, _)| id == &self.cfg.theme)
             .map(|(_, name)| name.clone())
             .unwrap_or_else(|| selected.clone());
         ComboBox::from_id_salt("settings_theme")
             .width(width)
             .selected_text(current_name)
             .show_ui(ui, |ui| {
-                for (id, name) in theme::available() {
-                    if ui.selectable_label(selected == id, name).clicked() {
-                        selected = id;
+                for (id, name) in &self.theme_choices {
+                    if ui
+                        .selectable_label(selected.as_str() == id.as_str(), name)
+                        .clicked()
+                    {
+                        selected = id.clone();
                         ui.close_menu();
                     }
                 }
@@ -3676,7 +3771,9 @@ impl App {
         for warning in theme::reload() {
             self.log(StatusKind::Warning, warning);
         }
-        if !theme::available()
+        self.theme_choices = theme::available();
+        if !self
+            .theme_choices
             .iter()
             .any(|(id, _)| id == &self.cfg.theme)
         {
@@ -4407,6 +4504,7 @@ impl eframe::App for App {
             self.settings_opened = Instant::now();
             self.settings_tab_fade = Instant::now();
             self.focus_search = false;
+            self.invalidate_playback_stats();
             ctx.memory_mut(|memory| memory.stop_text_input());
         }
         self.settings_was_open = self.show_settings;
@@ -4754,63 +4852,89 @@ fn settings_group(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui)) 
             .font(theme::medium(13.0))
             .color(theme::text()),
     );
-    ui.add_space(5.0);
+    ui.add_space(SETTINGS_GROUP_TITLE_GAP);
     Frame::NONE
         .fill(theme::card())
         .stroke(Stroke::new(1.0_f32, theme::border_soft()))
         .corner_radius(theme::RADIUS_LG)
-        .inner_margin(Margin::same(10))
+        .inner_margin(Margin::same(SETTINGS_CARD_PADDING))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             add_contents(ui);
         });
-    ui.add_space(8.0);
+    ui.add_space(SETTINGS_GROUP_GAP);
 }
 
-fn settings_row(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
+/// Whether a settings row stacks its label above its control instead of sitting
+/// beside it (narrow content column).
+fn row_stacks(content_width: f32) -> bool {
+    content_width < SETTINGS_ROW_STACK_W
+}
+
+/// One label/control row: the label on the left, the control flush with the
+/// right edge whatever its own width. `control_width` reserves the space the
+/// control needs; rows stack on a narrow content column.
+fn settings_value(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
     let width = ui.available_width();
-    if width < 620.0 {
+    if row_stacks(width) {
         ui.vertical(|ui| {
             ui.label(RichText::new(title).size(12.5).color(theme::text()));
-            ui.add_space(6.0);
+            ui.add_space(SETTINGS_STACK_LABEL_GAP);
             ui.allocate_ui_with_layout(
-                Vec2::new(ui.available_width(), 28.0),
+                Vec2::new(ui.available_width(), SETTINGS_ROW_H),
                 Layout::top_down(Align::Min),
                 |ui| add_control(ui),
             );
         });
     } else {
         ui.horizontal_top(|ui| {
-            let label_width = (width - control_width - 16.0).max(160.0);
+            ui.set_min_height(SETTINGS_ROW_H);
+            let label_width =
+                (width - control_width - SETTINGS_ROW_LABEL_GAP).max(SETTINGS_ROW_LABEL_MIN_W);
             ui.vertical(|ui| {
                 ui.set_max_width(label_width);
                 ui.label(RichText::new(title).size(12.5).color(theme::text()));
             });
+            // Right-to-left, so the control ends flush with the row's edge
+            // whether it is a switch, a dropdown or a text button.
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                ui.allocate_ui_with_layout(
-                    Vec2::new(control_width, 28.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        ui.set_width(control_width);
-                        add_control(ui);
-                    },
-                );
+                add_control(ui);
             });
         });
     }
 }
 
+/// One boolean setting: a [`settings_value`] row holding a switch. The value is
+/// flipped in place; the return value says whether the user changed it, which is
+/// when the caller applies the side effects and saves.
+fn settings_toggle(ui: &mut Ui, id: Id, title: &str, value: &mut bool, enabled: bool) -> bool {
+    let mut changed = false;
+    settings_value(ui, title, SETTINGS_SWITCH_SIZE.x, |ui| {
+        changed = settings_switch(ui, id, value, enabled);
+    });
+    changed
+}
+
+/// The muted one-line explanation under a row.
+fn settings_detail(ui: &mut Ui, text: impl Into<String>) {
+    ui.add_space(SETTINGS_DETAIL_GAP);
+    ui.label(RichText::new(text).size(10.5).color(theme::faint()));
+}
+
 fn settings_rule(ui: &mut Ui) {
-    let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 1.0));
+    let rect = Rect::from_min_size(
+        ui.cursor().min,
+        Vec2::new(ui.available_width(), SETTINGS_RULE_H),
+    );
     ui.painter()
         .rect_filled(rect, CornerRadius::ZERO, theme::border_soft());
     ui.allocate_space(rect.size());
 }
 
 fn settings_divider(ui: &mut Ui) {
-    ui.add_space(7.0);
+    ui.add_space(SETTINGS_DIVIDER_GAP);
     settings_rule(ui);
-    ui.add_space(7.0);
+    ui.add_space(SETTINGS_DIVIDER_GAP);
 }
 
 /// A muted text link. Returns true when clicked.
@@ -4850,11 +4974,11 @@ fn open_url(url: &str) {
 
 fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool {
     let inner = ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), 22.0),
+        Vec2::new(ui.available_width(), SETTINGS_SWITCH_SIZE.y),
         Layout::right_to_left(Align::Min),
         |ui| {
             ui.allocate_exact_size(
-                Vec2::new(40.0, 22.0),
+                SETTINGS_SWITCH_SIZE,
                 if enabled {
                     Sense::click()
                 } else {
@@ -4874,8 +4998,7 @@ fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool
         );
     }
     paint_switch(painter, rect, *value, false, enabled);
-    let press = anim::press(ui, id.with("press"), response.is_pointer_button_down_on());
-    press_overlay(painter, rect, theme::RADIUS_MD, press);
+    pressable(ui, id.with("press"), &response, theme::RADIUS_MD, 0.0);
 
     let clicked = enabled && response.clicked();
     if clicked {
@@ -4885,8 +5008,10 @@ fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, enabled: bool) -> bool
 }
 
 fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SETTINGS_RAIL_ITEM_H),
+        Sense::click(),
+    );
     let hover = anim::hover(
         ui,
         Id::new(("settings_nav", tab.title())),
@@ -4921,12 +5046,12 @@ fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
         theme::muted()
     };
     let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 18.0, rect.center().y),
+        Pos2::new(rect.left() + SETTINGS_RAIL_GLYPH_X, rect.center().y),
         Vec2::splat(15.0),
     );
     paint_settings_icon(painter, icon_rect, tab, color);
     painter.text(
-        Pos2::new(rect.left() + 34.0, rect.center().y),
+        Pos2::new(rect.left() + SETTINGS_RAIL_TEXT_X, rect.center().y),
         Align2::LEFT_CENTER,
         tab.title(),
         theme::ui_font(12.5),
@@ -4936,15 +5061,17 @@ fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
 }
 
 fn settings_back(ui: &mut Ui) -> bool {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SETTINGS_RAIL_ITEM_H),
+        Sense::click(),
+    );
     let hover = anim::hover(ui, Id::new("settings_back"), response.hovered());
     let painter = ui.painter();
     if hover > 0.01 {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::text(), (7.0 * hover) as u8),
+            theme::alpha(theme::text(), (8.0 * hover) as u8),
         );
     }
     let color = if response.hovered() {
@@ -4953,11 +5080,13 @@ fn settings_back(ui: &mut Ui) -> bool {
         theme::muted()
     };
     let stroke = Stroke::new(1.4_f32, color);
-    let center = rect.left_center() + Vec2::new(9.0, 0.0);
+    // Same glyph centre and text origin as the nav items, so the whole rail
+    // lines up down both edges.
+    let center = rect.left_center() + Vec2::new(SETTINGS_RAIL_GLYPH_X, 0.0);
     painter.line_segment([center + Vec2::new(4.0, -4.0), center], stroke);
     painter.line_segment([center, center + Vec2::new(4.0, 4.0)], stroke);
     painter.text(
-        rect.left_center() + Vec2::new(22.0, 0.0),
+        rect.left_center() + Vec2::new(SETTINGS_RAIL_TEXT_X, 0.0),
         Align2::LEFT_CENTER,
         "Back",
         theme::ui_font(11.5),
@@ -5358,6 +5487,13 @@ fn icon_hover(painter: &egui::Painter, rect: Rect, t: f32) {
 fn is_missing(info: &SoundInfo) -> bool {
     (info.error.is_some() && !info.loading) || info.missing
 }
+/// Press feedback for a widget that has already been added: the tween and its
+/// darkening overlay in one place, so every button presses identically.
+fn pressable(ui: &Ui, id: Id, response: &egui::Response, radius: u8, inset: f32) {
+    let press = anim::press(ui, id, response.is_pointer_button_down_on());
+    press_overlay(ui.painter(), response.rect.shrink(inset), radius, press);
+}
+
 /// Darken a control while it is held. One alpha for every button so press
 /// feedback feels identical across the app.
 fn press_overlay(painter: &egui::Painter, rect: Rect, radius: u8, press: f32) {
@@ -5964,16 +6100,12 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     if !enabled {
         response = response.on_disabled_hover_text("Not available");
     }
-    let press = anim::press(
+    pressable(
         ui,
         Id::new(("accent", text, size.x as i32, size.y as i32)),
-        response.is_pointer_button_down_on(),
-    );
-    press_overlay(
-        ui.painter(),
-        response.rect.shrink2(Vec2::new(2.0, 2.0)),
+        &response,
         theme::RADIUS_MD,
-        press,
+        2.0,
     );
     response
 }
@@ -5992,16 +6124,12 @@ fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> 
             .stroke(Stroke::new(1.0_f32, theme::border()))
             .corner_radius(theme::RADIUS_MD),
     );
-    let press = anim::press(
+    pressable(
         ui,
         Id::new(("ghost", text, size.x as i32, size.y as i32)),
-        response.is_pointer_button_down_on(),
-    );
-    press_overlay(
-        ui.painter(),
-        response.rect.shrink2(Vec2::new(2.0, 2.0)),
+        &response,
         theme::RADIUS_MD,
-        press,
+        2.0,
     );
     response
 }
@@ -6009,12 +6137,13 @@ fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> 
 fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
     let response =
         ui.add(Button::new(RichText::new(text).size(11.5).color(theme::muted())).frame(false));
-    let press = anim::press(
+    pressable(
         ui,
         Id::new(("tiny", text)),
-        response.is_pointer_button_down_on(),
+        &response,
+        theme::RADIUS_SM,
+        0.0,
     );
-    press_overlay(ui.painter(), response.rect, theme::RADIUS_SM, press);
     response
 }
 
@@ -6649,5 +6778,28 @@ mod tests {
         assert!(item_geometry(ItemLayout::List, tight, true, true, false)
             .volume
             .is_none());
+    }
+
+    /// A settings row stacks below the width breakpoint and keeps the control
+    /// beside the label above it, with room for both.
+    #[test]
+    fn settings_rows_stack_only_below_the_breakpoint() {
+        assert!(row_stacks(SETTINGS_ROW_STACK_W - 1.0));
+        assert!(!row_stacks(SETTINGS_ROW_STACK_W));
+        assert!(
+            !row_stacks(SETTINGS_CONTENT_MAX_W),
+            "the widest settings column keeps rows side by side"
+        );
+        for control in [
+            SETTINGS_SWITCH_SIZE.x,
+            SETTINGS_BUTTON_SIZE.x,
+            SETTINGS_THEME_W,
+            SETTINGS_TEXT_COL_W,
+        ] {
+            assert!(
+                SETTINGS_ROW_STACK_W - control - SETTINGS_ROW_LABEL_GAP >= SETTINGS_ROW_LABEL_MIN_W,
+                "a {control} px control leaves no room for the label at the breakpoint"
+            );
+        }
     }
 }
