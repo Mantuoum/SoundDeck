@@ -653,7 +653,7 @@ mod win {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CallNextHookEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
         DestroyWindow, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW, GetWindowLongPtrW,
-        GetWindowTextW, GetWindowThreadProcessId, IsIconic, LoadIconW, PostMessageW,
+        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, LoadIconW, PostMessageW,
         PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
         SetWindowLongPtrW, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
         UnhookWindowsHookEx, CREATESTRUCTW, GWLP_USERDATA, HHOOK, HMENU, IDI_APPLICATION,
@@ -1206,9 +1206,23 @@ mod win {
         }
     }
 
+    /// Cached handle of this executable's main window. The window lives for the
+    /// whole process, so the expensive enumeration runs at most once and the
+    /// minimize poll then costs one `IsIconic` (NFR-8.1: no window enumeration
+    /// on a timer).
+    static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
     /// True when this executable's main window is minimized to the taskbar.
     pub unsafe fn main_window_minimized() -> bool {
-        let hwnd = main_window();
+        let cached =
+            HWND(MAIN_HWND.load(std::sync::atomic::Ordering::Relaxed) as *mut core::ffi::c_void);
+        let hwnd = if !cached.is_invalid() && IsWindow(cached).as_bool() {
+            cached
+        } else {
+            let found = main_window();
+            MAIN_HWND.store(found.0 as isize, std::sync::atomic::Ordering::Relaxed);
+            found
+        };
         !hwnd.is_invalid() && IsIconic(hwnd).as_bool()
     }
 

@@ -379,20 +379,23 @@ top-level layer, so it cannot draw over modals or popups.
 
 ### 8.1 Performance budgets (measured on the reference machine)
 
-| ID | Budget | Measured (0.2.0 pass) |
+| ID | Budget | Measured |
 | --- | --- | --- |
-| NFR-8.1.1 | Visible idle ≤ 1 % of one core | **0.26 %** |
-| NFR-8.1.2 | Hidden ≤ 0.3 % of total CPU | **0.07–0.11 %** |
-| NFR-8.1.3 | Idle frames ≤ 1/s, each ≤ 1 ms | **0.7 ms/frame** |
-| NFR-8.1.4 | Mixer wakeups ≤ 25/s idle | **20/s** |
-| NFR-8.1.5 | Playing audio ≤ 3 % of one core | ~2 % at 30 fps |
-| NFR-8.1.6 | Playback start latency not worse than the 0.15 s ring | unchanged |
-| NFR-8.1.7 | Trigger to audible MUST be ≤ 250 ms | ~165 ms |
+| NFR-8.1.1 | Visible idle ≤ 1 % of one core | **0.85 %** (0.4.0) |
+| NFR-8.1.2 | Hidden ≤ 0.3 % of total CPU | **0.07 %** (= 0.87 % of one core) (0.4.0) |
+| NFR-8.1.3 | Idle frames ≤ 1/s, each ≤ 1 ms | **0.18 ms/frame**, ~1.0 fps (0.4.0) |
+| NFR-8.1.4 | Mixer wakeups ≤ 25/s idle | **20/s** (0.4.0) |
+| NFR-8.1.5 | Playing audio ≤ 3 % of one core | ~2 % at 30 fps (0.2.0) |
+| NFR-8.1.6 | Playback start latency not worse than the 0.15 s ring | unchanged (0.2.0) |
+| NFR-8.1.7 | Trigger to audible MUST be ≤ 250 ms | ~165 ms (0.2.0) |
 
-The measured column is the 0.2.0 pass and is **pending a 0.4.0 run**:
-`scripts/measure.ps1` performs it at release time (it refuses to start while any
-SoundDeck instance is live) and its numbers replace these cells. No figure here may be
-invented in the meantime.
+The 0.4.0 pass ran 2026-10-28 via `scripts/measure.ps1` on a 12-logical-processor
+machine, with an empty board and **Minimize to tray** on (so the hidden state was
+reached). Hidden CPU is reported in the budget's unit (% of total CPU) with the
+per-core value in brackets; `measure.ps1` refuses to start while any SoundDeck
+instance is live. Run-to-run noise on a shared desktop moved visible idle CPU across
+0.4–3.2 % of one core over four runs; the table records the final run. NFR-8.1.5–8.1.7
+are from the 0.2.0 pass and were not re-measured.
 
 Rules that enforce them:
 
@@ -407,7 +410,7 @@ Rules that enforce them:
 | ID | Requirement |
 | --- | --- |
 | NFR-8.2.1 | Private working set MUST stay ≤ 100 MB at idle with a normal library. |
-| NFR-8.2.2 | Last measurement (0.2.0): 71–75 MB. The bare eframe/egui/glow window with the same crates measures 54.9 MB, so ~55 MB is the floor of this UI stack. A 0.4.0 figure is pending `scripts/measure.ps1`. |
+| NFR-8.2.2 | 0.4.0 pass: **59.6 MB** private working set (max 63.1; 0.2.0 pass: 71–75 MB). The bare eframe/egui/glow window with the same crates measures 54.9 MB, so ~55 MB is the floor of this UI stack. Measured with an empty board; resident sounds add at most the 32 MB cache. |
 | NFR-8.2.3 | 40 MB is an aspiration. It is not reachable with eframe/glow and requires a different UI stack (§13). |
 | NFR-8.2.4 | RAM-preloaded sounds count against the budget; the loop never does (streamed). |
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |

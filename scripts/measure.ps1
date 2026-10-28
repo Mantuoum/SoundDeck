@@ -461,6 +461,7 @@ $visibleCpu = $null
 $visiblePrivate = $null
 $visiblePrivateMax = $null
 $hiddenCpu = $null
+$hiddenCpuOneCore = $null
 $idleFps = Get-StatMean -Samples $visibleSamples -Key 'fps'
 $idleFrameAvg = Get-StatMean -Samples $visibleSamples -Key 'frame_avg_ms'
 $idleFrameMax = Get-StatMax -Samples $visibleSamples -Key 'frame_max_ms'
@@ -472,7 +473,10 @@ if ($null -ne $visiblePhase) {
     $visiblePrivateMax = $visiblePhase.PrivateMaxMb
 }
 if ($null -ne $hiddenPhase) {
-    $hiddenCpu = $hiddenPhase.CpuPercent
+    # NFR-8.1.2's budget is "% of total CPU", but CpuPercent is "% of one core".
+    # Convert once here so the budget check and the paste block use the budget's unit.
+    $hiddenCpuOneCore = $hiddenPhase.CpuPercent
+    $hiddenCpu = $hiddenPhase.CpuPercent / [Environment]::ProcessorCount
 }
 
 Write-Step 'Results'
@@ -517,8 +521,9 @@ if ($null -ne $hiddenPhase) {
     Write-Note ("hidden        {0} s, hidden flag observed: {1}" -f `
             (Format-Number -Value $hiddenPhase.Seconds -Pattern '0.0'), $hiddenReached)
     if ($hiddenReached -and ($null -ne $hiddenCpu)) {
-        Write-Note ("  NFR-8.1.2  CPU {0} % of total CPU    budget <= {1} %   {2}" -f `
-                (Format-Number $hiddenCpu '0.00'), (Format-Number $BudgetHiddenCpu '0.0'),
+        Write-Note ("  NFR-8.1.2  CPU {0} % of total CPU ({1} % of one core)    budget <= {2} %   {3}" -f `
+                (Format-Number $hiddenCpu '0.00'), (Format-Number $hiddenCpuOneCore '0.00'),
+                (Format-Number $BudgetHiddenCpu '0.0'),
                 (Format-Check -Value $hiddenCpu -Budget $BudgetHiddenCpu))
     } else {
         Write-Note '  NFR-8.1.2  not measured - hidden=1 never appeared in the stats log.'
@@ -544,7 +549,8 @@ if ($null -ne $visibleCpu) {
     Write-Host ('| NFR-8.1.1 | **{0} %** of one core |' -f (Format-Number $visibleCpu '0.00'))
 }
 if (($null -ne $hiddenCpu) -and $hiddenReached) {
-    Write-Host ('| NFR-8.1.2 | **{0} %** of total CPU |' -f (Format-Number $hiddenCpu '0.00'))
+    Write-Host ('| NFR-8.1.2 | **{0} %** of total CPU ({1} % of one core) |' -f `
+            (Format-Number $hiddenCpu '0.00'), (Format-Number $hiddenCpuOneCore '0.00'))
 } elseif ($null -ne $hiddenPhase) {
     Write-Host '| NFR-8.1.2 | not measured - hidden state not reached (Minimize to tray off) |'
 }
