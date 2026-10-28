@@ -36,8 +36,9 @@ future session.
 3. **Keep it lean.** This file carries rules and mental models, not history. Delete
    text that no longer describes reality rather than appending corrections. One-line
    entries in the update log are enough.
-4. **Update log** (newest last): `2026-10-28 — created from codebase review; Part 1
-   (how it works), boundaries, conventions, guardrails.`
+4. **Update log** (newest last):
+   - `2026-10-28 — created from codebase review; Part 1 (how it works), boundaries, conventions, guardrails.`
+   - `2026-10-28 — batch 1 landed (plan.md): one key table + hotkey conflict rules (§2.7, §5), policy::Refusal (§2.5), audio invariants (§4.6), palette snapshot (§4.4), non-clobbering backups (§2.4), storage budget guardrail (§6.13).`
 
 ---
 
@@ -164,7 +165,8 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
   fill empty names, bump `version`.
 - **Migration** (`migrate.rs`): legacy `sounddeck.json` imported once; `settings.json`
   written last as the "migration finished" marker so a crash retries next launch;
-  legacy renamed `sounddeck.v1.json.bak`.
+  legacy renamed `sounddeck.v1.json.bak` (`.bak.2`, `.3`, … if taken — backups and
+  `.corrupt` snapshots never clobber an earlier one).
 - **Save lifecycle**: every mutation calls `mark_dirty()`; `tick` debounces saves
   (700 ms); `persist()` diffs **JSON fingerprints** and writes only changed files;
   quit forces a final write.
@@ -189,7 +191,9 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
 Events `Loaded/Failed/Refused/Warning` are polled by the UI.
 
 **Policy caps** (`policy.rs`): ≤ 30 s per sound, ≤ 32 MiB and ≤ 16 sounds resident,
-process commit ≤ 125 MiB (fail **closed** if the query fails). Only sounds with a
+process commit ≤ 125 MiB (fail **closed** if the query fails). Admission decisions and
+their explanations come from one `policy::Refusal` type — extend it, never re-derive
+the rules. Only sounds with a
 hotkey **and** in the active library are RAM-eligible (FR-5.3.5); `sync_active_library`
 re-derives this on every tab switch.
 
@@ -230,16 +234,20 @@ A background thread owns a hidden window + a **low-level keyboard hook**
 (`WH_KEYBOARD_LL`) — not `RegisterHotKey` — which is why hotkeys work while minimized.
 
 **Hook algorithm** (`keyboard_proc`): on key-down, if the key is not already tracked as
-held, track it, read modifiers live (`GetAsyncKeyState` for Ctrl/Alt/Shift/Win), match
-stop-all chord or first binding → `PostMessageW` PLAY/STOP to the hidden window (the
-actual `Playback::play` runs there, keeping the hook fast). Key-up untracks the key
+held, track it, derive modifiers from the tracked held-key set (each event prunes keys
+the OS reports as up, so a missed key-up cannot wedge a hotkey), match stop-all chord or
+first binding → `PostMessageW` PLAY/STOP to the hidden window (the actual
+`Playback::play` runs there, keeping the hook fast). Key-up untracks the key
 (auto-repeat guard: at most one trigger per physical press, FR-5.7.3).
 **Always `CallNextHookEx`** — pass-through is **settled behaviour** (FR-5.7.2): the
 focused app receives every triggering keystroke. Never "fix" this.
 
-Hotkeys are strings (`"Ctrl+Shift+S"`, `"F8"`) parsed via `Hotkey::parse` against
-hand-maintained key tables. Only the active library's hotkeys are bound; switching tabs
-rebinds. The hook is best-effort against elevated windows/AV (FR-5.7.8 — documented,
+Hotkeys are strings (`"Ctrl+Shift+S"`, `"F8"`) parsed via `Hotkey::parse` against the
+single `KEYS` const table — parsing, display and egui mapping all read it (never add a
+second mapping). Duplicate chords are **refused** at capture; conflicts introduced
+elsewhere are unbound deterministically (new binding wins; `chord_owner` /
+`duplicate_sounds` in `hotkeys.rs` own the rules, FR-5.7.5). Only the active library's
+hotkeys are bound; switching tabs rebinds. The hook is best-effort against elevated windows/AV (FR-5.7.8 — documented,
 not hidden). Tray: double-click show/hide, right-click menu (Show/Hide, Stop all,
 Quit), tooltip updated every 3 s.
 
@@ -374,6 +382,9 @@ This is also why parallel work is safe when it touches disjoint modules (see
   If a widget appears twice, it becomes a shared helper on the third thought.
 - Colors come from theme tokens (FR-5.10.5). No raw `Color32::from_rgb` outside
   `ui/theme*` (except the documented white on the active layout segment).
+- Fetch `theme::palette()` once per paint function (it is `Copy`) instead of calling
+  per-colour accessors repeatedly; theme locks degrade poison-tolerantly through
+  `theme::read_lock`/`write_lock` — use those, never raw `.read()`/`.write()`.
 - Use radii constants `SM/MD/LG/XL`; layout sizes become named consts at the top of
   the file, not inline magic numbers.
 - Percentages and volumes render through `ui/volume.rs` only.
@@ -397,8 +408,10 @@ This is also why parallel work is safe when it touches disjoint modules (see
 - Fades on every voice start/stop (2.5 ms / 5 ms) — never hard-cut samples.
 - Buffers entering the mixer pass `is_valid_buffer` (extend it rather than trusting
   callers).
-- Chunk parity (even sample counts) is an invariant of stream chunks — enforce at the
-  producer if you touch `stream.rs`.
+- Chunk parity is a tested invariant: stream chunks carry whole frames only (a
+  truncated tail is dropped at the producer), `Ring::pop_into` drops a stray
+  non-frame-aligned sample deliberately, and integer sample scaling is symmetric with
+  clamping (`scale_to_int`). Do not regress these.
 - Test WAV helpers are shared test-only utilities; don't copy `write_wav` again.
 
 ### 4.7 Testing & release gates
@@ -427,13 +440,13 @@ This is also why parallel work is safe when it touches disjoint modules (see
 | To add… | Steps |
 | --- | --- |
 | **A setting** | 1) field + `Default` + `normalize()` in `storage::Settings` 2) control in the right `settings_page_*` 3) apply where it belongs (engine/config) + `mark_dirty()` 4) storage test if clamped 5) SPEC §6.1 + README. |
-| **A theme token** | 1) `Palette` field in `ui/theme.rs` 2) default in `theme_defaults.rs` 3) parser arm + template in `theme_file.rs` 4) use `theme::token()`. Consider a table-driven parser (§6) instead of a new match arm. |
+| **A theme token** | 1) `Palette` field in `ui/theme.rs` 2) default in `theme_defaults.rs` 3) one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` — parser, template and the field-coverage test all derive from that table 4) use `theme::token()`. |
 | **A sound action** | 1) `Action` variant 2) handler in `handle_actions` 3) trigger in card/row/context menu 4) keep painting side-effect free. |
 | **A Settings tab** | 1) `SettingsTab` variant + `title()` + `ALL` 2) rail item (About stays pinned) 3) `settings_page_*` + `settings_content` match. |
 | **A volume** | Only `ui/volume.rs` — store linear, display via `to_position`/`percent_text`. Never a second curve. |
 | **A file format** | 1) Symphonia feature in `Cargo.toml` 2) `model::SUPPORTED_EXTENSIONS` 3) file-dialog filter 4) test file + decode test. |
 | **Audio routing changes** | `Engine` owns devices/routes, `Mixer` owns voices/loop/gains, `Ring` is the only producer→device boundary. Keep blocking work off the mixer thread. |
-| **Hotkey behaviour** | Go through the `KeyChord`/conflict helper (after the refactor; today `hotkeys.rs` tables + `app.rs::sync_hotkeys`/`find_conflict`). Capture UI = one shared capture widget. Update SPEC §5.7. |
+| **Hotkey behaviour** | Rules live in `hotkeys.rs`: the `KEYS` table and `chord_owner`/`duplicate_sounds` (one rule owner — extend, never copy). Capture UI = the shared capture path in `app.rs`. Update SPEC §5.7. |
 | **A modal** | Reuse the modal shell + `modal_header` + `close_button`. No new backdrop/frame one-offs. |
 | **A tray/menu item** | `hotkeys.rs` `WM_COMMAND` + tray menu build share one `handle_menu_command`; add the id in both places it is matched (or the shared helper). |
 
@@ -475,6 +488,10 @@ These exist because the codebase review found each of them in practice.
     to `app.rs`, ask whether it belongs in a domain module or `ui/`.
 12. **Keep the docs trio in sync**: code ↔ `ARCHITECTURE.md` ↔ `SPEC.md`, plus this
     file per §0.
+13. **Respect the storage budget.** Keep the repo ≤ ~5 GB (`sounddeck/target` is ~3.3 GB
+    of that). Never give parallel worktrees their own `target` dirs — share
+    `CARGO_TARGET_DIR` or run them sequentially — and `cargo clean` heavy build caches
+    when they are no longer needed.
 
 ---
 
