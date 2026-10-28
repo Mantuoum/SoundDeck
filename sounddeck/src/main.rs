@@ -28,10 +28,24 @@ fn path_hash(path: &std::path::Path) -> u64 {
     hash
 }
 
-/// Returns the named-mutex handle that keeps this process the only instance of
-/// this executable, or `None` when another instance already owns it.
+/// What the single-instance guard found at startup.
 #[cfg(windows)]
-fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
+enum Instance {
+    /// This process may run. The handle is `None` only when the mutex could not
+    /// be created at all, in which case exclusivity simply cannot be enforced.
+    Primary(Option<windows::Win32::Foundation::HANDLE>),
+    /// Another instance of this executable path is already running.
+    AlreadyRunning,
+}
+
+/// Claims the named mutex that keeps this process the only instance of this
+/// executable.
+///
+/// "Already running" is decided by `GetLastError()`, never by a failed
+/// `CreateMutexW`: a creation failure means there is no other instance to hand
+/// over to, so the process runs normally instead of exiting silently.
+#[cfg(windows)]
+fn single_instance() -> Instance {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, BOOL, ERROR_ALREADY_EXISTS, WIN32_ERROR,
@@ -43,13 +57,22 @@ fn single_instance() -> Option<windows::Win32::Foundation::HANDLE> {
 
     unsafe {
         SetLastError(WIN32_ERROR(0));
-        let handle = CreateMutexW(None, BOOL(0), PCWSTR(name.as_ptr())).ok()?;
+        let handle = match CreateMutexW(None, BOOL(0), PCWSTR(name.as_ptr())) {
+            Ok(handle) => handle,
+            Err(err) => {
+                eprintln!(
+                    "[startup] single-instance mutex unavailable ({err}); \
+                     continuing as the only instance"
+                );
+                return Instance::Primary(None);
+            }
+        };
         if GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(handle);
             hotkeys::focus_main_window();
-            return None;
+            return Instance::AlreadyRunning;
         }
-        Some(handle)
+        Instance::Primary(Some(handle))
     }
 }
 
@@ -155,8 +178,8 @@ fn main() -> Result<(), eframe::Error> {
     // One instance per executable path. A second launch focuses the window
     // that is already open (including one hidden in the tray) and exits.
     let _instance = match single_instance() {
-        Some(handle) => handle,
-        None => {
+        Instance::Primary(handle) => handle,
+        Instance::AlreadyRunning => {
             unsafe {
                 windows::Win32::Media::timeEndPeriod(1);
             }

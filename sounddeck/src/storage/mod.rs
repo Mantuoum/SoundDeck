@@ -2,7 +2,7 @@
 //!
 //! Both files are JSON, written atomically with one rolling `.bak` each. The
 //! legacy single-file `sounddeck.json` is imported once and kept as
-//! `sounddeck.v1.json.bak`.
+//! `sounddeck.v1.json.bak` (numbered if that name is already taken).
 
 pub mod io;
 pub mod migrate;
@@ -210,13 +210,15 @@ impl LibrariesFile {
         }
 
         // Sound ids must be globally unique: playback, hotkeys and undo key on them.
+        // The first generated id is 1 so an empty board starts from 1, matching
+        // `App::next_id`.
         let mut max_sound = 0u64;
         for library in &self.libraries {
             for sound in &library.sounds {
                 max_sound = max_sound.max(sound.id);
             }
         }
-        let mut next_sound = max_sound.max(1) + 1;
+        let mut next_sound = max_sound.saturating_add(1);
         let mut seen_sounds = HashSet::new();
         for library in &mut self.libraries {
             for sound in &mut library.sounds {
@@ -261,9 +263,9 @@ pub fn load(base: &Path) -> Loaded {
     let mut warnings = Vec::new();
 
     if legacy.exists() && !(settings_file.exists() && libraries_file.exists()) {
-        if let Some(mut loaded) = migrate::import(base, &mut warnings) {
+        if let Some(loaded) = migrate::import(base, &mut warnings) {
             io::sweep_tmp(&dir);
-            loaded.warnings.splice(0..0, warnings);
+            // `import` returns its own warnings inside `loaded`.
             return loaded;
         }
     }
@@ -318,6 +320,15 @@ pub fn serialize_libraries(libraries: &[LibraryConfig]) -> anyhow::Result<String
     Ok(serde_json::to_string_pretty(&file)?)
 }
 
+/// Fresh scratch directory for one storage test, keyed by test name.
+#[cfg(test)]
+pub fn test_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sounddeck-store-{}-{}", std::process::id(), name));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,11 +337,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_base(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("sounddeck-store-{}-{}", std::process::id(), name));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        test_dir(name)
     }
 
     fn sound(id: u64, name: &str) -> SoundConfig {
@@ -583,6 +590,47 @@ mod tests {
         );
         assert!(!file.libraries[0].name.is_empty());
         assert!(!file.libraries[0].sounds[0].name.is_empty());
+    }
+
+    #[test]
+    fn generated_sound_ids_should_start_at_one() {
+        // Ids are generated in document order, so the first missing id is the
+        // first slot: an empty board must not start at 2.
+        let mut file = LibrariesFile::default();
+        file.libraries[0].sounds.push(SoundConfig::default());
+        file.libraries[0].sounds.push(SoundConfig::default());
+        file.normalize();
+
+        assert_eq!(file.libraries[0].sounds[0].id, 1);
+        assert_eq!(file.libraries[0].sounds[1].id, 2);
+    }
+
+    #[test]
+    fn generated_sound_ids_should_stay_above_existing_ones() {
+        let mut file = LibrariesFile {
+            version: LIBRARIES_VERSION,
+            libraries: vec![
+                LibraryConfig {
+                    id: 1,
+                    name: "Main".into(),
+                    sounds: vec![sound(4, "four"), SoundConfig::default()],
+                },
+                LibraryConfig {
+                    id: 2,
+                    name: "Other".into(),
+                    sounds: vec![SoundConfig {
+                        id: 4,
+                        name: "dup".into(),
+                        ..Default::default()
+                    }],
+                },
+            ],
+        };
+        file.normalize();
+
+        assert_eq!(file.libraries[0].sounds[0].id, 4);
+        assert_eq!(file.libraries[0].sounds[1].id, 5);
+        assert_eq!(file.libraries[1].sounds[0].id, 6);
     }
 
     #[test]

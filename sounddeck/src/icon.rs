@@ -1,9 +1,17 @@
 use std::io::Cursor;
 
+/// Only 8-bit PNGs are handled: the RGBA conversion below assumes one byte per
+/// channel, so a 16-bit image would decode with a wrong stride.
+const SUPPORTED_BIT_DEPTH: png::BitDepth = png::BitDepth::Eight;
+
 /// Decode the embedded PNG icon to RGBA8 pixels.
 pub fn decode_png(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info()?;
+    let depth = reader.info().bit_depth;
+    if depth != SUPPORTED_BIT_DEPTH {
+        anyhow::bail!("icon must be 8-bit per channel (found {depth:?})");
+    }
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| anyhow::anyhow!("icon is too large"))?;
@@ -83,12 +91,29 @@ pub fn hicon_from_rgba(
     size: u32,
 ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use windows::Win32::Foundation::BOOL;
+    use windows::Win32::Foundation::E_INVALIDARG;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Graphics::Gdi::{
         CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS,
         HBITMAP, HDC, HGDIOBJ,
     };
     use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
+
+    // Validate before touching GDI: a short buffer would otherwise read past the
+    // end of `rgba` while filling the DIB section.
+    let bytes = (size as usize)
+        .checked_mul(size as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|bytes| *bytes > 0 && *bytes <= rgba.len())
+        .ok_or_else(|| {
+            windows::core::Error::new(
+                E_INVALIDARG,
+                format!(
+                    "rgba buffer of {} bytes cannot hold a {size}x{size} icon",
+                    rgba.len()
+                ),
+            )
+        })?;
 
     unsafe {
         let bmi = BITMAPINFO {
@@ -114,8 +139,8 @@ pub fn hicon_from_rgba(
             0,
         )?;
 
-        let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
-        for i in 0..(size * size) as usize {
+        let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, bytes);
+        for i in 0..bytes / 4 {
             let si = i * 4;
             pixels[si] = rgba[si + 2]; // B
             pixels[si + 1] = rgba[si + 1]; // G
@@ -146,5 +171,57 @@ pub fn hicon_from_rgba(
         let _ = DeleteObject(HGDIOBJ(mask.0));
         let _ = DeleteObject(HGDIOBJ(color.0));
         Ok(icon)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_png(
+        width: u32,
+        height: u32,
+        color: png::ColorType,
+        depth: png::BitDepth,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(Cursor::new(&mut out), width, height);
+            encoder.set_color(color);
+            encoder.set_depth(depth);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(data).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn png_should_be_rejected_when_depth_is_not_eight() {
+        let data = vec![0u8; 2 * 2 * 2];
+        let bytes = encode_png(
+            2,
+            2,
+            png::ColorType::Grayscale,
+            png::BitDepth::Sixteen,
+            &data,
+        );
+        assert!(decode_png(&bytes).is_err());
+    }
+
+    #[test]
+    fn bundled_icon_should_decode_as_rgba8() {
+        let (rgba, width, height) = decode_png(include_bytes!("../assets/icon.png")).unwrap();
+        assert_eq!(width, height);
+        assert_eq!(rgba.len(), (width * height * 4) as usize);
+        assert!(rgba.chunks_exact(4).any(|px| px[3] > 0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hicon_should_be_rejected_when_buffer_is_short() {
+        assert!(hicon_from_rgba(&[0u8; 4], 2).is_err());
+        assert!(hicon_from_rgba(&[], 2).is_err());
+        assert!(hicon_from_rgba(&[0u8; 16], 0).is_err());
     }
 }

@@ -155,6 +155,11 @@ pub fn ring_pop(slot: usize, frames: usize) {
     if !enabled() {
         return;
     }
+    // The slot comes from a device route; an unexpected index must skip the
+    // counter, not panic (there is one counter pair per output slot).
+    if slot >= POP_CALLS.len() {
+        return;
+    }
     if frames == 0 {
         POP_EMPTY[slot].fetch_add(1, Ordering::Relaxed);
     } else {
@@ -171,5 +176,19 @@ pub fn set_voices(count: usize) {
 pub fn set_loop(code: u32) {
     if enabled() {
         LOOP.store(code, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_pop_should_not_panic_when_slot_is_out_of_range() {
+        ENABLED.store(true, Ordering::Relaxed);
+        ring_pop(2, 480);
+        ring_pop(usize::MAX, 0);
+        ring_pop(0, 480);
+        ENABLED.store(false, Ordering::Relaxed);
     }
 }
