@@ -36,7 +36,7 @@ specification:**
 
 **In scope**
 
-- Sound libraries with per-sound volume, hotkey and RAM-preload behaviour.
+- Sound libraries with per-sound volume, gain trim, hotkey and RAM-preload behaviour.
 - Two output slots with independent devices, volumes, link and master gain.
 - A single streamed looping track with independent level and routing.
 - Global hotkeys that pass through to the focused window.
@@ -104,7 +104,7 @@ specification:**
 | FR-5.3.1 | Sounds MUST be addable from a file dialog and by dropping files or folders onto the board. |
 | FR-5.3.2 | Supported extensions: `wav, mp3, ogg, flac, m4a, aac, opus, wma, aif, aiff`. |
 | FR-5.3.3 | Duplicates MUST be rejected by canonical path, including the same file reached through a different case or path form. |
-| FR-5.3.4 | A sound MUST have: id, display name (defaults to the file stem), path, volume in `0..=1`, optional hotkey, optional RAM preload. |
+| FR-5.3.4 | A sound MUST have: id, display name (defaults to the file stem), path, volume in `0..=1`, trim in dB (FR-5.3.17), optional hotkey, optional RAM preload. |
 | FR-5.3.5 | RAM preload MUST only be meaningful for sounds with a hotkey; assigning no hotkey clears it. |
 | FR-5.3.6 | A sound whose file is missing MUST be marked in the UI; triggering it MUST report the failure in the status log and MUST NOT open a dialog on its own. Relinking MUST be offered from the sound's context menu (Locate). |
 | FR-5.3.7 | Removing a sound MUST be undoable once (`Ctrl+Z` restores the last removal at its original index). |
@@ -117,6 +117,7 @@ specification:**
 | FR-5.3.14 | SoundDeck MUST NOT create, rename, move or delete audio files. Renaming a card or removing a sound changes the board only. |
 | FR-5.3.15 | Every configured file MUST be held open for reading with delete sharing denied, so Windows refuses rename and delete until the sound leaves the board or the app exits. Reads and writes by other processes stay allowed. |
 | FR-5.3.16 | If the volume disappears, a resident sound MUST play from memory; a non-resident sound MUST be reported as missing, with no panic and no loss of the other sounds. |
+| FR-5.3.17 | A sound MUST have a trim in dB, `-24..=+12` (default `0`), applied as a linear multiplier on top of its stored volume. The trim MUST apply when the sound starts and to a voice that is already sounding when it changes; a boost that would exceed full scale is clipped by the mix, never rejected. |
 
 ### 5.4 Playback
 
@@ -141,8 +142,8 @@ specification:**
 | FR-5.5.4 | A master gain in `0..=+12 dB` MUST apply to both mixes after the loop is summed in. |
 | FR-5.5.5 | Sound effects MUST go to both slots equally; only the loop is routed per slot. |
 | FR-5.5.6 | Peak metering MUST be measured where the device consumes samples, so it reflects what is heard. |
-| FR-5.5.7 | A slot whose device disappears MUST stop consuming, MUST report the failure, and MUST be restartable without restarting the app. |
-| FR-5.5.8 | Settings MUST show whether each output is ready, with the last error when it is not. |
+| FR-5.5.7 | A slot whose device disappears MUST stop consuming, MUST report the failure, and MUST be restartable without restarting the app. While the configured device is absent the slot MUST play on a substitute — the Windows default, else the first device (the Cable prefers a `cable`/`virtual` device, and never the Monitor's) — and MUST say so in the log; a substitution made while the app is running MUST keep the configured endpoint, so the device is used again when it is re-plugged and the devices are refreshed. |
+| FR-5.5.8 | Settings MUST show whether each output is ready, with the last error when it is not, and MUST name the device that is actually playing when it is a substitute for the configured one. |
 
 ### 5.6 Looping track
 
@@ -276,6 +277,7 @@ specification:**
           "path": "sounds/airhorn.wav",
           "hotkey": "Shift+T",
           "volume": 0.8,
+          "gain_db": -3.0,
           "ram": true
         }
       ]
@@ -284,8 +286,9 @@ specification:**
 }
 ```
 
-`ram: null` means "inherit `preload_hotkey_sounds`". Paths inside the app folder are
-stored relative; anything outside is absolute.
+`ram: null` means "inherit `preload_hotkey_sounds`". `gain_db` is a trim in
+`-24..=+12` dB applied on top of `volume` (FR-5.3.17); a file that predates it is
+unity. Paths inside the app folder are stored relative; anything outside is absolute.
 
 ### 6.3 `config/themes/<id>.md`
 
@@ -449,6 +452,7 @@ Rules that enforce them:
 | Sound decode fails | Log entry with the reason; the sound stays registered. |
 | Loop file missing/corrupt | Loop state `Error`; mixer parks; retry available. |
 | Device unplugged | Slot stops, `DeviceError` logged, `device_ready` cleared, route restartable. |
+| Configured device absent | The stored endpoint is kept; the slot plays on a substitute (default, else first; Cable prefers a cable/virtual device) and the log plus the Settings status line name it. |
 | Device returns no callback for 2 s | Treated as failure rather than polling forever. |
 | Config corrupt | Preserve as `.corrupt`, load defaults, warn. |
 | Save fails | `save_failed` set, warning logged, no empty file written. |

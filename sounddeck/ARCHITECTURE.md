@@ -161,7 +161,8 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `show_gain_slider` | Show the master-gain slider in the board sidebar |
 
 `Settings::normalize()` clamps volumes, gain, trims/empties the loop path, and fills
-missing fields through `#[serde(default)]`.
+missing fields through `#[serde(default)]`. `LibrariesFile::normalize()` clamps each
+sound's `volume` and `gain_db` and fixes ids and empty names.
 
 ### `libraries.json`
 
@@ -171,7 +172,7 @@ missing fields through `#[serde(default)]`.
   "libraries": [
     { "id": 1, "name": "Main", "sounds": [
       { "id": 2, "name": "horn", "path": "audio/horn.wav",
-        "hotkey": "Alt+2", "volume": 1.0, "ram": true }
+        "hotkey": "Alt+2", "volume": 1.0, "gain_db": 0.0, "ram": true }
     ] }
   ]
 }
@@ -179,6 +180,8 @@ missing fields through `#[serde(default)]`.
 
 - Tabs are the array order. Sounds are nested; `library_id` is not stored.
 - `ram: null` means “inherit the global preload setting”.
+- `gain_db` is the per-sound trim (`clamped -24..=+12` on load); a file from before
+  the field is `0.0` through `#[serde(default)]`.
 - IDs are persisted sound IDs. `next_id` is derived from `max(id)+1`.
 
 ### Writes, backups, recovery (`storage/io.rs`)
@@ -224,7 +227,7 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 
 | Field | Meaning |
 | --- | --- |
-| `path`, `volume` | Current file and gain |
+| `path`, `volume`, `gain_db` | Current file, stored linear volume and per-sound dB trim |
 | `samples` | `Some(Arc<Vec<f32>>)` when resident |
 | `loading`, `pending_play` | Preload in flight / play when it finishes |
 | `error`, `missing` | Last decode/link error; existence checked at startup and on playback when not resident |
@@ -297,7 +300,12 @@ full one), `Some(0..=1)` once the probe has reported the duration.
   channels, and writes the WASAPI buffer. If the ring is empty it pads silence.
 - Reports `DeviceStarted`, `DeviceError`, `Stopped`, and warnings through a channel.
 - Two routes may not share an ID; `set_routes` keeps one and warns.
-- Device changes are applied by `App::apply_routes`, which calls `Engine::set_routes`.
+- Device changes are applied by `App::apply_routes`, which calls `Engine::set_routes`
+  with a real device from the current enumeration: `route_slot` resolves the stored
+  endpoint (id → name) and, when it is gone, substitutes the Windows default (Cable:
+  a `cable`/`virtual`-named device first, never the Monitor's) and reports it. The
+  stored id and name are left alone so `Refresh devices` restores a re-plugged
+  device; `retune_slot` refreshes a stale name in place (and saves).
 
 ### The looping track
 
@@ -502,6 +510,12 @@ Sound volume bars and the loop card use `ui/volume.rs`. Output sliders use the s
 curve. `set_slot_volume` applies the link rule. Master gain is dB-only and global;
 the sidebar row can be hidden in Settings → Window.
 All values are persisted immediately (debounced).
+
+A sound also carries a `gain_db` trim (`-24..=+12`, default `0`, in the context menu).
+`audio::engine::effective_gain(volume, gain_db)` is the only place the two are
+multiplied; `Playback::play` / `set_volume` / `set_gain` hand the engine that one
+linear gain, so a live trim step and a live slider move share one path. A boosted
+sound may exceed unity inside the mixer — the master stage clamps the mix.
 
 ### Loop
 

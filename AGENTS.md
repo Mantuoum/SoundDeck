@@ -16,7 +16,9 @@ one line.
 
 Log: `2026-10-28 — created (codebase review); batch-1 + step-6 syncs` · `2026-10-28 —
 slimmed: non-§2 sections compressed` · `2026-10-28 — A5/A6: config bundle + reset
-groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` (detail in git history).
+groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` · `2026-10-28 — X1/D13:
+per-sound `gain_db` (§2.5), device substitution + name refresh (§2.6)` (detail in git
+history).
 
 ## 1. Repository layout
 
@@ -125,7 +127,7 @@ hotkey/tray service → record JSON fingerprints (so the first save rewrites not
 Two versioned JSON files in `config/`: `settings.json` (theme, layout, device ids +
 names, volumes, master gain dB, link flag, loop settings, toggles, stop-all hotkey) and
 `libraries.json` (libraries = tabs; sounds nested with id, name, path, hotkey, volume,
-`ram`). `ram: null` inherits the global preload switch. Paths inside the app folder are
+`gain_db`, `ram`). `ram: null` inherits the global preload switch. Paths inside the app folder are
 stored **relative** (portable); outside, absolute. Audio files are referenced, never
 copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
 
@@ -153,9 +155,14 @@ copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
 
 ### 2.5 Playback registry & RAM policy (`playback/`)
 
-`Playable` per sound: path, volume, `samples: Option<Arc<Vec<f32>>>` (resident),
-`loading`/`pending_play`, `error`/`missing`, `FileLock`, `refused`, `duration`,
-`generation`, `retain`, `last_used` (LRU).
+`Playable` per sound: path, volume, `gain_db` trim, `samples: Option<Arc<Vec<f32>>>`
+(resident), `loading`/`pending_play`, `error`/`missing`, `FileLock`, `refused`,
+`duration`, `generation`, `retain`, `last_used` (LRU).
+
+A voice always carries **one linear gain**: `engine::effective_gain(volume, gain_db)` is
+the only place the stored volume and the dB trim are multiplied (FR-5.3.17). Trigger,
+deferred play, and both live changes (`set_volume`, `set_gain`) read it from the same
+snapshot; the engine itself only knows linear gain.
 
 **`play(id)` trigger algorithm** (UI *or* hotkey thread):
 1. Samples resident? → `engine.play` instantly.
@@ -206,7 +213,12 @@ sharing denied — Windows refuses rename/delete while it is on the board (FR-5.
 - **WASAPI** (`wasapi.rs`): shared mode, event-driven per-device render threads; pulls
   ring → resample → channel map → hardware buffer. Two routes may not share a device
   id (one wins + warning, FR-5.5.2). Device failures are reported, the slot is
-  restartable without an app restart (FR-5.5.7).
+  restartable without an app restart (FR-5.5.7). `App::apply_routes` only ever passes a
+  device from the live enumeration: `route_slot` resolves the stored endpoint and, when
+  it is gone, substitutes the Windows default (Cable: a `cable`/`virtual` name first,
+  never the Monitor's) and reports it in the log + Settings (`device_note`, FR-5.5.8).
+  The stored id/name survive; `refresh_devices`/`retune_slot` refresh a stale name and
+  save only when something changed.
 
 ### 2.7 Hotkeys & tray (`hotkeys.rs`)
 
@@ -297,9 +309,12 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 
 - **Downward only.** `audio/*` never references ui/storage/app; `ui/*` never touches
   engine/playback/storage state; `app.rs` is the wiring layer — behaviour goes to the
-  domain module, widgets to `ui/`.
+  domain module, widgets to `ui/`. One deliberate exception: `storage` reads the
+  per-sound trim range (`SOUND_GAIN_MIN_DB`/`MAX_DB`) from `audio::engine`, because the
+  clamp and the conversion must come from one definition (FR-5.3.17).
 - **One decision, one place**: RAM-vs-disk = `policy.rs`; missing-file = `Playback::info`;
-  volume curve = `ui/volume.rs`. Cross-thread talk = channels drained on the UI thread.
+  volume curve = `ui/volume.rs`; per-sound level = `engine::effective_gain` (volume ×
+  dB trim). Cross-thread talk = channels drained on the UI thread.
 - Modules keep truthful `//!` headers. Parallel work only on disjoint modules;
   `app.rs`/`hotkeys.rs` always serially.
 
@@ -392,6 +407,8 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | Duplicate hotkeys refused; conflicts unbind (new binding wins) | SPEC FR-5.7.5 |
 | Delete-library dialog: move to chosen library / remove sounds / cancel; no undo | SPEC FR-5.2.3 |
 | Missing sound: trigger logs an error; relink via context menu only | SPEC FR-5.3.6 |
+| Per-sound trim multiplies the stored volume via one helper (`engine::effective_gain`); voices stay linear, boosts clip at master | SPEC FR-5.3.17 |
+| A gone output device keeps its stored endpoint; the slot plays on a reported substitute | SPEC FR-5.5.7 |
 | No progress bar until duration is known | decided 2026-10-28 |
 | User `Graphite.md` shows alongside the built-in theme | decided 2026-10-28 |
 

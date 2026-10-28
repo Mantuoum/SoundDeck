@@ -152,6 +152,8 @@ pub fn import(base: &Path, warnings: &mut Vec<String>) -> Option<Loaded> {
                 path: sound.path.clone(),
                 hotkey: sound.hotkey.clone(),
                 volume: sound.volume,
+                // The legacy config predates the trim: unity, like any new sound.
+                gain_db: 0.0,
                 ram: sound.ram,
             });
             imported_sounds += 1;

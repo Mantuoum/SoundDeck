@@ -13,6 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audio::engine::{SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB};
 use crate::model::Layout;
 
 pub const SETTINGS_VERSION: u32 = 2;
@@ -207,6 +208,8 @@ pub struct SoundConfig {
     pub path: String,
     pub hotkey: Option<String>,
     pub volume: f32,
+    /// Per-sound trim in dB, applied on top of `volume` (FR-5.3.17).
+    pub gain_db: f32,
     /// `None` on old files means "inherit the global preload setting".
     pub ram: Option<bool>,
 }
@@ -219,6 +222,7 @@ impl Default for SoundConfig {
             path: String::new(),
             hotkey: None,
             volume: 1.0,
+            gain_db: 0.0,
             ram: None,
         }
     }
@@ -302,6 +306,8 @@ impl LibrariesFile {
                     seen_sounds.insert(sound.id);
                 }
                 sound.volume = finite_or(sound.volume, 1.0).clamp(0.0, 1.0);
+                sound.gain_db =
+                    finite_or(sound.gain_db, 0.0).clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB);
                 if sound.name.trim().is_empty() {
                     sound.name = "Untitled sound".to_string();
                 }
@@ -429,6 +435,7 @@ mod tests {
             path: format!("audio/{name}.wav"),
             hotkey: None,
             volume: 1.0,
+            gain_db: 0.0,
             ram: None,
         }
     }
@@ -459,7 +466,10 @@ mod tests {
             LibraryConfig {
                 id: 2,
                 name: "Voices".into(),
-                sounds: vec![sound(2, "hello")],
+                sounds: vec![SoundConfig {
+                    gain_db: -6.5,
+                    ..sound(2, "hello")
+                }],
             },
         ];
 
@@ -482,6 +492,7 @@ mod tests {
         assert!(!loaded.settings.show_gain_slider);
         assert_eq!(loaded.libraries.len(), 2);
         assert_eq!(loaded.libraries[1].sounds[0].name, "hello");
+        assert!((loaded.libraries[1].sounds[0].gain_db + 6.5).abs() < 1e-6);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     }
 
@@ -691,6 +702,50 @@ mod tests {
         );
         assert!(!file.libraries[0].name.is_empty());
         assert!(!file.libraries[0].sounds[0].name.is_empty());
+    }
+
+    /// The trim is a sound field like any other: defaulted on old files, clamped
+    /// on load, and written back through the same struct serde already handles.
+    #[test]
+    fn a_sound_trim_defaults_to_unity_and_clamps_on_load() {
+        let old: SoundConfig = serde_json::from_str(
+            "{\"id\": 1, \"name\": \"old\", \"path\": \"a.wav\", \"volume\": 0.5}",
+        )
+        .unwrap();
+        assert_eq!(old.gain_db, 0.0, "a file from before the feature is unity");
+
+        let mut file = LibrariesFile {
+            version: LIBRARIES_VERSION,
+            libraries: vec![LibraryConfig {
+                id: 1,
+                name: "Main".into(),
+                sounds: vec![
+                    SoundConfig {
+                        gain_db: 30.0,
+                        ..sound(1, "loud")
+                    },
+                    SoundConfig {
+                        gain_db: -90.0,
+                        ..sound(2, "quiet")
+                    },
+                    SoundConfig {
+                        gain_db: f32::NAN,
+                        ..sound(3, "nan")
+                    },
+                    SoundConfig {
+                        gain_db: -7.5,
+                        ..sound(4, "kept")
+                    },
+                ],
+            }],
+        };
+        file.normalize();
+
+        let sounds = &file.libraries[0].sounds;
+        assert_eq!(sounds[0].gain_db, 12.0);
+        assert_eq!(sounds[1].gain_db, -24.0);
+        assert_eq!(sounds[2].gain_db, 0.0, "a hand-edited NaN becomes unity");
+        assert_eq!(sounds[3].gain_db, -7.5, "an in-range trim survives");
     }
 
     #[test]

@@ -17,6 +17,10 @@ use super::wasapi;
 const MIX_CHUNK_FRAMES: usize = 240; // 5 ms
 const FADE_IN_FRAMES: f32 = 120.0; // 2.5 ms
 const FADE_OUT_FRAMES: f32 = 240.0; // 5 ms
+/// Per-sound trim range: cut a loud file, or lift a quiet one. Loudness is
+/// managed here instead of by re-encoding the file (FR-5.3.17).
+pub const SOUND_GAIN_MIN_DB: f32 = -24.0;
+pub const SOUND_GAIN_MAX_DB: f32 = 12.0;
 /// Attempts at starting the mixer thread before audio is declared dead. One
 /// immediate retry covers a transient OS refusal; beyond that the environment is
 /// broken and the user has to be told, not left with silent audio.
@@ -567,6 +571,26 @@ impl Engine {
         }
     }
 
+    /// Plays a buffer. `gain` is a **linear** gain (the caller's stored volume
+    /// already multiplied by the sound's dB trim, see [`effective_gain`]); it may
+    /// exceed `1.0` for a boosted sound and is clamped by the master stage.
+    /// Whether a slot's render thread is running right now. The UI asks this
+    /// instead of assuming "not ready" until the next event, so a route that did
+    /// not need restarting still reports its real state (FR-5.5.8). A thread that
+    /// failed to open its endpoint has already exited, so this cannot report a
+    /// broken device as running for long.
+    pub fn device_running(&self, slot: Slot) -> bool {
+        self.devices
+            .lock()
+            .map(|devices| {
+                devices[slot.index()]
+                    .as_ref()
+                    .map(DeviceHandle::alive)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    }
+
     pub fn play(&self, sound_id: u64, samples: Arc<Vec<f32>>, volume: f32) {
         if self.report_mixer_failure() {
             return;
@@ -577,6 +601,7 @@ impl Engine {
             )));
             return;
         }
+        let gain = sanitize_gain(volume);
         {
             let Ok(mut mixer) = self.mixer.lock() else {
                 return;
@@ -592,7 +617,7 @@ impl Engine {
                 sound_id,
                 source: VoiceSource::Buffer(samples),
                 position: 0,
-                gain: volume.clamp(0.0, 1.0),
+                gain,
                 stop_at: None,
                 finished: false,
                 total_frames: None,
@@ -615,6 +640,7 @@ impl Engine {
         if self.report_mixer_failure() {
             return;
         }
+        let gain = sanitize_gain(volume);
         {
             let Ok(mut mixer) = self.mixer.lock() else {
                 return;
@@ -633,7 +659,7 @@ impl Engine {
                     ended: false,
                 },
                 position: 0,
-                gain: volume.clamp(0.0, 1.0),
+                gain,
                 stop_at: None,
                 finished: false,
                 total_frames,
@@ -799,6 +825,19 @@ impl Engine {
         [self.rings[0].take_peak(), self.rings[1].take_peak()]
     }
 
+    /// Gain of the newest voice for a sound. Test-only: the live level path
+    /// (volume × trim) is only observable inside the mixer.
+    #[cfg(test)]
+    pub fn voice_gain(&self, sound_id: u64) -> Option<f32> {
+        let mixer = self.mixer.lock().ok()?;
+        mixer
+            .voices
+            .iter()
+            .rev()
+            .find(|voice| voice.sound_id == sound_id)
+            .map(|voice| voice.gain)
+    }
+
     pub fn set_master(&self, slot: Slot, volume: f32) {
         if let Ok(mut mixer) = self.mixer.lock() {
             match slot {
@@ -814,11 +853,14 @@ impl Engine {
         }
     }
 
+    /// Live level change for a sounding voice. `volume` is the linear gain the
+    /// caller already resolved (volume × dB trim); see [`effective_gain`].
     pub fn set_sound_volume(&self, sound_id: u64, volume: f32) {
+        let gain = sanitize_gain(volume);
         if let Ok(mut mixer) = self.mixer.lock() {
             for voice in &mut mixer.voices {
                 if voice.sound_id == sound_id {
-                    voice.gain = volume.clamp(0.0, 1.0);
+                    voice.gain = gain;
                 }
             }
         }
@@ -898,6 +940,37 @@ fn apply_master_gain(buf: &mut [f32], gain: f32) {
 
 fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db.clamp(-60.0, 12.0) / 20.0)
+}
+
+/// The one conversion from a sound's stored level to the gain its voices carry:
+/// the linear volume (`0..=1`) times the per-sound dB trim.
+///
+/// Every trigger and every live level change goes through this, so nothing else
+/// may multiply the two (FR-5.3.17). The result can exceed `1.0` for a boosted
+/// sound; the master stage clips the mix back to full scale.
+pub fn effective_gain(volume: f32, gain_db: f32) -> f32 {
+    let volume = if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let db = if gain_db.is_finite() {
+        gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB)
+    } else {
+        0.0
+    };
+    volume * db_to_gain(db)
+}
+
+/// A voice gain the mixer can multiply with: never negative, never NaN. Values
+/// above `1.0` are legitimate (a boosted trim), so this cannot clamp to unity —
+/// the mix is clamped once, at the master stage.
+fn sanitize_gain(gain: f32) -> f32 {
+    if gain.is_finite() {
+        gain.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 fn mixer_loop(
@@ -1442,6 +1515,41 @@ mod loop_tests {
             .map(|thread| thread.is_some())
             .unwrap_or(false);
         assert!(running, "mixer thread handle must exist");
+    }
+
+    #[test]
+    fn effective_gain_multiplies_volume_by_the_db_trim() {
+        // Unity by default: an untouched sound plays exactly as before.
+        assert!((effective_gain(1.0, 0.0) - 1.0).abs() < 1e-6);
+        assert!((effective_gain(0.5, 0.0) - 0.5).abs() < 1e-6);
+        // -6 dB is about half amplitude; +6 dB about double.
+        assert!((effective_gain(1.0, -6.0) - 0.501_187).abs() < 1e-4);
+        assert!((effective_gain(1.0, 6.0) - 1.995_262).abs() < 1e-4);
+        // The trim multiplies the stored volume instead of replacing it.
+        assert!((effective_gain(0.5, 6.0) - 0.997_631).abs() < 1e-4);
+        // A full-scale boost really is louder than unity (the mixer clips it).
+        assert!(effective_gain(1.0, SOUND_GAIN_MAX_DB) > 1.0);
+        // A zero volume stays silent whatever the trim says.
+        assert_eq!(effective_gain(0.0, SOUND_GAIN_MAX_DB), 0.0);
+    }
+
+    #[test]
+    fn effective_gain_clamps_out_of_range_and_non_finite_values() {
+        assert!((effective_gain(1.0, 99.0) - effective_gain(1.0, SOUND_GAIN_MAX_DB)).abs() < 1e-6);
+        assert!((effective_gain(1.0, -99.0) - effective_gain(1.0, SOUND_GAIN_MIN_DB)).abs() < 1e-6);
+        assert!((effective_gain(1.0, f32::NAN) - 1.0).abs() < 1e-6);
+        assert_eq!(effective_gain(f32::NAN, 6.0), 0.0);
+        assert_eq!(effective_gain(1.5, 0.0), 1.0);
+        assert!(effective_gain(1.0, f32::INFINITY).is_finite());
+    }
+
+    #[test]
+    fn voices_accept_a_boosted_gain_but_never_a_bad_one() {
+        // A boosted sound is legitimate; the master stage does the clipping.
+        assert!((sanitize_gain(3.0) - 3.0).abs() < 1e-6);
+        assert_eq!(sanitize_gain(-1.0), 0.0);
+        assert_eq!(sanitize_gain(f32::NAN), 0.0);
+        assert_eq!(sanitize_gain(f32::INFINITY), 0.0);
     }
 
     #[test]

@@ -9,7 +9,9 @@ use eframe::egui::{
     ViewportCommand,
 };
 
-use crate::audio::engine::{AudioEvent, DeviceRoute, Engine, Slot};
+use crate::audio::engine::{
+    AudioEvent, DeviceRoute, Engine, Slot, SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB,
+};
 use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{
@@ -111,6 +113,10 @@ const MAX_STATUS_ENTRIES: usize = 200;
 /// Hotkey pill text for a sound that has no binding yet.
 const HOTKEY_UNBOUND_LABEL: &str = "Set hotkey";
 
+/// One click of the per-sound trim stepper (FR-5.3.17). The range itself lives
+/// with the audio engine, where the trim is turned into a gain.
+const GAIN_STEP_DB: f32 = 1.0;
+
 const DEVELOPER_NAME: &str = "Mantum";
 
 /// Personal links shown under the credit line in About. Entries with an empty
@@ -174,6 +180,8 @@ pub struct Sound {
     pub path: PathBuf,
     pub hotkey: Option<Hotkey>,
     pub volume: f32,
+    /// Per-sound trim in dB on top of `volume`, −24..=+12 (FR-5.3.17).
+    pub gain_db: f32,
     /// Only meaningful for sounds with a hotkey. Everything else always plays
     /// from disk.
     pub ram: bool,
@@ -217,6 +225,42 @@ struct StatusEntry {
     kind: StatusKind,
     text: String,
     at: Instant,
+}
+
+/// What the user has to know about one output slot beyond "ready": a
+/// substitution (the configured device is gone and another one is playing) or
+/// the engine's last failure. One array per slot, because Settings shows one
+/// status line per slot (FR-5.5.8).
+struct DeviceNote {
+    text: String,
+    kind: StatusKind,
+}
+
+impl DeviceNote {
+    fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: StatusKind::Warning,
+        }
+    }
+
+    fn failure(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: StatusKind::Error,
+        }
+    }
+
+    /// A start confirms the route works, so a failure clears — but a
+    /// substitution stays: audio is coming out of a device the user did not
+    /// choose, and that is still true once it is running.
+    fn cleared_by_start(self) -> Option<Self> {
+        if self.kind == StatusKind::Error {
+            None
+        } else {
+            Some(self)
+        }
+    }
 }
 
 /// Append one activity entry. A repeated message refreshes the newest entry
@@ -337,7 +381,12 @@ enum Action {
     Locate(u64),
     ShowInExplorer(u64),
     Volume(u64, f32),
-    DragStart { id: u64, size: Vec2 },
+    /// Per-sound trim in dB (FR-5.3.17).
+    Gain(u64, f32),
+    DragStart {
+        id: u64,
+        size: Vec2,
+    },
     DragStop,
 }
 
@@ -366,7 +415,7 @@ pub struct App {
     /// fallback when the configured device is gone.
     default_device: Option<String>,
     device_ready: [bool; 2],
-    device_note: [Option<String>; 2],
+    device_note: [Option<DeviceNote>; 2],
     tray_available: bool,
     hidden: bool,
     /// Set when the window is restored from the tray so the OS-minimize
@@ -703,7 +752,9 @@ impl App {
             match event {
                 AudioEvent::DeviceStarted { slot, .. } => {
                     self.device_ready[slot.index()] = true;
-                    self.device_note[slot.index()] = None;
+                    self.device_note[slot.index()] = self.device_note[slot.index()]
+                        .take()
+                        .and_then(DeviceNote::cleared_by_start);
                     ctx.request_repaint();
                 }
                 AudioEvent::DeviceError {
@@ -712,7 +763,7 @@ impl App {
                     message,
                 } => {
                     self.device_ready[slot.index()] = false;
-                    self.device_note[slot.index()] = Some(message.clone());
+                    self.device_note[slot.index()] = Some(DeviceNote::failure(message.clone()));
                     self.log(
                         StatusKind::Error,
                         format!("{} device \"{name}\" failed: {message}", slot.label()),
@@ -917,6 +968,15 @@ impl App {
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
                         sound.volume = volume.clamp(0.0, 1.0);
                         self.playback.set_volume(id, sound.volume);
+                        self.mark_dirty();
+                    }
+                }
+                Action::Gain(id, gain_db) => {
+                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
+                        sound.gain_db = gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB);
+                        // Same live path as a volume move: a sounding voice takes
+                        // the new product immediately.
+                        self.playback.set_gain(id, sound.gain_db);
                         self.mark_dirty();
                     }
                 }
@@ -1220,6 +1280,7 @@ impl App {
                 path: path.clone(),
                 hotkey: None,
                 volume,
+                gain_db: 0.0,
                 ram: false,
                 library_id: self.active_library,
                 search_key: String::new(),
@@ -1228,7 +1289,7 @@ impl App {
                 flash_until: None,
             };
             sound.refresh_labels();
-            self.playback.register(id, path, volume);
+            self.playback.register(id, path, volume, 0.0);
             self.sounds.push(sound);
             added += 1;
             last_id = Some(id);
@@ -1492,6 +1553,7 @@ impl App {
                         path: model::portable_path(&sound.path),
                         hotkey: sound.hotkey.map(|h| h.label()),
                         volume: sound.volume,
+                        gain_db: sound.gain_db,
                         ram: if sound.hotkey.is_some() {
                             Some(sound.ram)
                         } else {
@@ -1944,20 +2006,14 @@ impl App {
             Ok(list) => {
                 self.devices = list.devices;
                 self.default_device = list.default_id;
-                self.cfg.monitor_device = resolve_device(
-                    &self.devices,
-                    self.cfg.monitor_device.as_deref(),
-                    self.cfg.monitor_name.as_deref(),
-                )
-                .map(|d| d.id)
-                .or_else(|| self.cfg.monitor_device.clone());
-                self.cfg.cable_device = resolve_device(
-                    &self.devices,
-                    self.cfg.cable_device.as_deref(),
-                    self.cfg.cable_name.as_deref(),
-                )
-                .map(|d| d.id)
-                .or_else(|| self.cfg.cable_device.clone());
+                // Stored endpoints are re-resolved by id then name so a device
+                // that came back under a new id is picked up again, and the
+                // stored labels follow a device Windows has renamed.
+                let monitor = self.retune_slot(Slot::Monitor);
+                let cable = self.retune_slot(Slot::Cable);
+                if monitor || cable {
+                    self.mark_dirty();
+                }
                 self.apply_routes();
                 self.log(
                     StatusKind::Info,
@@ -1968,6 +2024,26 @@ impl App {
         }
     }
 
+    /// Point one slot's stored endpoint at the device it resolves to now.
+    ///
+    /// Returns whether anything changed (the caller then saves). The id is only
+    /// replaced when the stored one no longer exists — a name match on a
+    /// re-plugged device — and a renamed device keeps its id and takes the new
+    /// label, so the sidebar and Settings stop showing a stale name.
+    fn retune_slot(&mut self, slot: Slot) -> bool {
+        let (id, name) = slot_endpoint(&self.cfg, slot);
+        let Some(found) = resolve_device(&self.devices, id.as_deref(), name.as_deref()) else {
+            return false;
+        };
+        let unchanged = id.as_deref() == Some(found.id.as_str())
+            && name.as_deref() == Some(found.name.as_str());
+        if unchanged {
+            return false;
+        }
+        set_slot_endpoint(&mut self.cfg, slot, Some(found.id), Some(found.name));
+        true
+    }
+
     fn set_device(&mut self, slot: Slot, id: Option<String>) {
         let name = id.as_ref().and_then(|id| {
             self.devices
@@ -1975,16 +2051,7 @@ impl App {
                 .find(|d| &d.id == id)
                 .map(|d| d.name.clone())
         });
-        match slot {
-            Slot::Monitor => {
-                self.cfg.monitor_name = name;
-                self.cfg.monitor_device = id;
-            }
-            Slot::Cable => {
-                self.cfg.cable_name = name;
-                self.cfg.cable_device = id;
-            }
-        }
+        set_slot_endpoint(&mut self.cfg, slot, id, name);
         self.apply_routes();
         self.mark_dirty();
     }
@@ -2019,45 +2086,40 @@ impl App {
     }
 
     fn apply_routes(&mut self) {
-        self.device_ready = [false, false];
-        let monitor = self.cfg.monitor_device.as_ref().and_then(|id| {
-            self.devices
-                .iter()
-                .find(|d| &d.id == id)
-                .cloned()
-                .or_else(|| {
-                    Some(DeviceInfo {
-                        id: id.clone(),
-                        name: self
-                            .cfg
-                            .monitor_name
-                            .clone()
-                            .unwrap_or_else(|| "Device".into()),
-                    })
-                })
-        });
-        let cable = self.cfg.cable_device.as_ref().and_then(|id| {
-            self.devices
-                .iter()
-                .find(|d| &d.id == id)
-                .cloned()
-                .or_else(|| {
-                    Some(DeviceInfo {
-                        id: id.clone(),
-                        name: self
-                            .cfg
-                            .cable_name
-                            .clone()
-                            .unwrap_or_else(|| "Cable".into()),
-                    })
-                })
-        });
+        let monitor = route_slot(
+            &self.devices,
+            self.default_device.as_deref(),
+            Slot::Monitor,
+            &self.cfg,
+            None,
+        );
+        let cable = route_slot(
+            &self.devices,
+            self.default_device.as_deref(),
+            Slot::Cable,
+            &self.cfg,
+            monitor.device.as_ref().map(|device| device.id.as_str()),
+        );
+
+        // A substitution is user-visible, not a silent fix-up: it is logged and
+        // it is what Settings shows for that slot until the device comes back.
+        for (slot, route) in [(Slot::Monitor, &monitor), (Slot::Cable, &cable)] {
+            let note = match &route.substituted {
+                Some(text) => {
+                    self.log(StatusKind::Warning, format!("{}: {text}", slot.label()));
+                    Some(DeviceNote::warning(text.clone()))
+                }
+                None => None,
+            };
+            self.device_note[slot.index()] = note;
+        }
+
         self.engine.set_routes(
-            monitor.map(|d| DeviceRoute {
+            monitor.device.map(|d| DeviceRoute {
                 id: d.id,
                 name: d.name,
             }),
-            cable.map(|d| DeviceRoute {
+            cable.device.map(|d| DeviceRoute {
                 id: d.id,
                 name: d.name,
             }),
@@ -2065,6 +2127,11 @@ impl App {
         self.engine
             .set_master(Slot::Monitor, self.cfg.monitor_volume);
         self.engine.set_master(Slot::Cable, self.cfg.cable_volume);
+        // A route the engine did not need to restart emits no event, so read the
+        // real state instead of clearing the status and waiting for one.
+        for slot in [Slot::Monitor, Slot::Cable] {
+            self.device_ready[slot.index()] = self.engine.device_running(slot);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -3810,12 +3877,17 @@ impl App {
 
         settings_group(ui, "Output devices", |ui| {
             for (index, slot) in [Slot::Monitor, Slot::Cable].into_iter().enumerate() {
-                let (text, color) = if self.device_ready[slot.index()] {
-                    (format!("{}: ready", slot.label()), theme::accent())
-                } else if let Some(note) = self.device_note[slot.index()].as_deref() {
-                    (format!("{}: {note}", slot.label()), theme::red())
-                } else {
-                    (format!("{}: not connected", slot.label()), theme::muted())
+                let (text, color) = match self.device_note[slot.index()].as_ref() {
+                    // A substitution or a failure outranks "ready": the device
+                    // that plays is not the one that was chosen.
+                    Some(note) => (
+                        format!("{}: {}", slot.label(), note.text),
+                        note.kind.color(),
+                    ),
+                    None if self.device_ready[slot.index()] => {
+                        (format!("{}: ready", slot.label()), theme::accent())
+                    }
+                    None => (format!("{}: not connected", slot.label()), theme::muted()),
                 };
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), SETTINGS_ROW_H),
@@ -5131,7 +5203,7 @@ fn restore_sound(sounds: &mut Vec<Sound>, playback: &Playback, undo: UndoDelete)
     let index = undo.index.min(sounds.len());
     let sound = undo.sound;
     let id = sound.id;
-    playback.register(id, sound.path.clone(), sound.volume);
+    playback.register(id, sound.path.clone(), sound.volume, sound.gain_db);
     // `Playback` owns the "is the file missing" decision. Re-registering already set
     // it from the restored path, so the message is refreshed from that; the old code
     // asked the board, which no longer held the sound, and flagged every restore.
@@ -6254,6 +6326,35 @@ fn sound_item(
     (rect, actions)
 }
 
+/// The per-sound trim row: −, the signed value, +, and a reset once it is not
+/// unity. Clicks step by [`GAIN_STEP_DB`] and keep the menu open, so trimming a
+/// loud file takes one visit. Cards and rows share it via `sound_context_menu`.
+fn gain_row(ui: &mut Ui, sound: &Sound, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
+        if tiny_button_with_id(ui, Id::new(("gain-down", sound.id)), "\u{2212}").clicked() {
+            actions.push(Action::Gain(sound.id, sound.gain_db - GAIN_STEP_DB));
+        }
+        ui.label(
+            RichText::new(format_gain_db(sound.gain_db))
+                .size(11.5)
+                .color(theme::text())
+                .monospace(),
+        );
+        if tiny_button_with_id(ui, Id::new(("gain-up", sound.id)), "+").clicked() {
+            actions.push(Action::Gain(sound.id, sound.gain_db + GAIN_STEP_DB));
+        }
+        // The reset appears only when it would do something.
+        if sound.gain_db.abs() > 0.001
+            && tiny_button_with_id(ui, Id::new(("gain-reset", sound.id)), "reset")
+                .on_hover_text("Back to 0.0 dB")
+                .clicked()
+        {
+            actions.push(Action::Gain(sound.id, 0.0));
+        }
+    });
+}
+
 fn sound_context_menu(
     ui: &mut Ui,
     sound: &Sound,
@@ -6269,6 +6370,8 @@ fn sound_context_menu(
         actions.push(Action::Stop(sound.id));
         ui.close_menu();
     }
+    ui.separator();
+    gain_row(ui, sound, actions);
     ui.separator();
     if ui.button("Rename...").clicked() {
         actions.push(Action::Rename(sound.id));
@@ -6497,15 +6600,15 @@ fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> 
 }
 
 fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
+    tiny_button_with_id(ui, Id::new(("tiny", text)), text)
+}
+
+/// [`tiny_button`] with an explicit id, for a row whose label is shared by more
+/// than one button in the frame (the per-sound gain stepper).
+fn tiny_button_with_id(ui: &mut Ui, id: Id, text: &str) -> egui::Response {
     let response =
         ui.add(Button::new(RichText::new(text).size(11.5).color(theme::muted())).frame(false));
-    pressable(
-        ui,
-        Id::new(("tiny", text)),
-        &response,
-        theme::RADIUS_SM,
-        0.0,
-    );
+    pressable(ui, id, &response, theme::RADIUS_SM, 0.0);
     response
 }
 
@@ -6687,7 +6790,8 @@ fn format_gain_db(db: f32) -> String {
     if db.abs() < 0.05 {
         "0.0 dB".to_string()
     } else {
-        format!("{db:.1} dB")
+        // Signed on purpose: the sign carries the meaning (boost or trim).
+        format!("{db:+.1} dB")
     }
 }
 
@@ -6836,6 +6940,109 @@ fn resolve_device(
     None
 }
 
+/// The stored endpoint (id, friendly name) for one slot. One mapping, read by
+/// routing, the device refresh and the device selector.
+fn slot_endpoint(cfg: &storage::Settings, slot: Slot) -> (&Option<String>, &Option<String>) {
+    match slot {
+        Slot::Monitor => (&cfg.monitor_device, &cfg.monitor_name),
+        Slot::Cable => (&cfg.cable_device, &cfg.cable_name),
+    }
+}
+
+/// Write both halves of a slot's endpoint at once, so an id and the label that
+/// describes it can never disagree.
+fn set_slot_endpoint(
+    cfg: &mut storage::Settings,
+    slot: Slot,
+    id: Option<String>,
+    name: Option<String>,
+) {
+    match slot {
+        Slot::Monitor => {
+            cfg.monitor_device = id;
+            cfg.monitor_name = name;
+        }
+        Slot::Cable => {
+            cfg.cable_device = id;
+            cfg.cable_name = name;
+        }
+    }
+}
+
+/// A device whose name says it is a virtual cable. The one predicate for "this
+/// is probably the streaming endpoint": startup resolution and the routing
+/// fallback both read it.
+fn looks_virtual(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("cable") || name.contains("virtual")
+}
+
+/// Where one slot should play now, and what had to be substituted to get there.
+struct SlotRoute {
+    /// A real device from the enumeration — never a configured id dressed up as
+    /// one, so the engine always talks to something that exists.
+    device: Option<DeviceInfo>,
+    /// Set when the configured device is gone: `"Headphones" not found - using
+    /// "Speakers"`, for the log and the Settings status line (FR-5.5.8).
+    substituted: Option<String>,
+}
+
+/// Resolve one slot against the live device list, keeping the stored endpoint
+/// untouched so a re-plugged device comes back on the next refresh (FR-5.5.7).
+///
+/// Order: the stored id, then the stored friendly name, then a substitute —
+/// the Windows default, then the first device; the Cable prefers a device whose
+/// name says "cable"/"virtual" and never the one the Monitor already uses.
+fn route_slot(
+    devices: &[DeviceInfo],
+    default_id: Option<&str>,
+    slot: Slot,
+    cfg: &storage::Settings,
+    monitor: Option<&str>,
+) -> SlotRoute {
+    let (id, name) = slot_endpoint(cfg, slot);
+    if let Some(device) = resolve_device(devices, id.as_deref(), name.as_deref()) {
+        return SlotRoute {
+            device: Some(device),
+            substituted: None,
+        };
+    }
+
+    let free = |device: &&DeviceInfo| monitor.map(|id| device.id != id).unwrap_or(true);
+    let by_default = || {
+        default_id
+            .and_then(|id| {
+                devices
+                    .iter()
+                    .find(|device| device.id == id && free(device))
+            })
+            .cloned()
+    };
+    let first = || devices.iter().find(|device| free(device)).cloned();
+    let fallback = match slot {
+        Slot::Monitor => by_default().or_else(first),
+        Slot::Cable => devices
+            .iter()
+            .find(|device| looks_virtual(&device.name) && free(device))
+            .cloned()
+            .or_else(by_default)
+            .or_else(first),
+    };
+
+    // Nothing configured and nothing to fall back to is the first-run state, not
+    // a failure; only a configured-but-gone device is worth reporting.
+    let configured = name.clone().or_else(|| id.clone());
+    let substituted = fallback.as_ref().and_then(|device| {
+        configured
+            .map(|configured| format!("\"{configured}\" not found - using \"{}\"", device.name))
+    });
+
+    SlotRoute {
+        device: fallback,
+        substituted,
+    }
+}
+
 /// What the configured endpoints resolved to.
 struct OutputSelection {
     monitor: Option<DeviceInfo>,
@@ -6844,12 +7051,15 @@ struct OutputSelection {
     note: Option<String>,
 }
 
-/// The one place Monitor/Cable are resolved from settings: the stored id, then the
-/// friendly name, then (Monitor) the Windows default and the first device; the
-/// Cable falls back to a device whose name says "cable"/"virtual". Both results
-/// are written back into `cfg` so the next launch resolves the same endpoints.
+/// The one place Monitor/Cable are resolved from settings at startup: the stored
+/// id, then the friendly name, then (Monitor) the Windows default and the first
+/// device; the Cable falls back to a device whose name says "cable"/"virtual".
+/// Both results are written back into `cfg` so the next launch resolves the same
+/// endpoints.
 ///
-/// Startup, config import and "Reset all settings" all go through here.
+/// Startup, config import and "Reset all settings" all go through here. Runtime
+/// re-routing deliberately does not: it keeps the stored endpoint and reports a
+/// substitution instead (`route_slot`).
 fn resolve_outputs(
     devices: &[DeviceInfo],
     default_id: Option<&str>,
@@ -6873,8 +7083,7 @@ fn resolve_outputs(
         cable = devices
             .iter()
             .find(|device| {
-                let name = device.name.to_ascii_lowercase();
-                (name.contains("cable") || name.contains("virtual"))
+                looks_virtual(&device.name)
                     && monitor
                         .as_ref()
                         .map(|monitor| monitor.id != device.id)
@@ -6887,12 +7096,20 @@ fn resolve_outputs(
     }
 
     if let Some(device) = &monitor {
-        cfg.monitor_device = Some(device.id.clone());
-        cfg.monitor_name = Some(device.name.clone());
+        set_slot_endpoint(
+            cfg,
+            Slot::Monitor,
+            Some(device.id.clone()),
+            Some(device.name.clone()),
+        );
     }
     if let Some(device) = &cable {
-        cfg.cable_device = Some(device.id.clone());
-        cfg.cable_name = Some(device.name.clone());
+        set_slot_endpoint(
+            cfg,
+            Slot::Cable,
+            Some(device.id.clone()),
+            Some(device.name.clone()),
+        );
     }
 
     OutputSelection {
@@ -6914,7 +7131,7 @@ fn link_output_volumes(cfg: &mut storage::Settings) {
 /// one.
 fn register_sounds(playback: &Playback, sounds: &[Sound]) {
     for sound in sounds {
-        playback.register(sound.id, sound.path.clone(), sound.volume);
+        playback.register(sound.id, sound.path.clone(), sound.volume, sound.gain_db);
     }
 }
 
@@ -6951,6 +7168,7 @@ fn build_board(
                 path: model::resolve_path(&sound.path),
                 hotkey,
                 volume: sound.volume.clamp(0.0, 1.0),
+                gain_db: sound.gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB),
                 // Only a bound sound can be retained (FR-5.3.5).
                 ram: hotkey.is_some() && sound.ram.unwrap_or(preload_hotkey_sounds),
                 library_id: library.id,
@@ -6980,6 +7198,7 @@ mod tests {
             path: PathBuf::from("airhorn.wav"),
             hotkey: Some(Hotkey::parse("Ctrl+1").expect("test hotkey parses")),
             volume: 1.0,
+            gain_db: 0.0,
             ram: true,
             library_id: 1,
             search_key: String::new(),
@@ -7207,6 +7426,7 @@ mod tests {
                     path: "audio/bound.wav".into(),
                     hotkey: Some("Ctrl+1".into()),
                     volume: 2.0,
+                    gain_db: 40.0,
                     ram: None,
                 },
                 storage::SoundConfig {
@@ -7215,6 +7435,7 @@ mod tests {
                     path: "audio/broken.wav".into(),
                     hotkey: Some("Ctrl+Nope".into()),
                     volume: 0.5,
+                    gain_db: 0.0,
                     ram: Some(true),
                 },
             ],
@@ -7228,6 +7449,10 @@ mod tests {
         assert_eq!(sounds[0].path, model::resolve_path("audio/bound.wav"));
         assert_eq!(sounds[0].library_id, 3);
         assert_eq!(sounds[0].volume, 1.0, "volumes are clamped on the way in");
+        assert_eq!(
+            sounds[0].gain_db, SOUND_GAIN_MAX_DB,
+            "trims are clamped on the way in"
+        );
         assert!(sounds[0].ram, "a bound sound follows the preload default");
         assert!(!sounds[0].search_key.is_empty());
         assert!(sounds[1].hotkey.is_none());
@@ -7342,5 +7567,150 @@ mod tests {
                 "a {control} px control leaves no room for the label at the breakpoint"
             );
         }
+    }
+
+    fn device(id: &str, name: &str) -> DeviceInfo {
+        DeviceInfo {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// A configured device that is gone must surface a real substitute instead of
+    /// a fabricated endpoint, and the stored id must survive so it comes back.
+    #[test]
+    fn a_gone_monitor_falls_back_to_the_default_and_says_which_one_plays() {
+        let devices = vec![device("speakers", "Speakers"), device("hdmi", "HDMI")];
+        let mut cfg = storage::Settings::default();
+        set_slot_endpoint(
+            &mut cfg,
+            Slot::Monitor,
+            Some("gone".into()),
+            Some("Headphones".into()),
+        );
+
+        let route = route_slot(&devices, Some("speakers"), Slot::Monitor, &cfg, None);
+        assert_eq!(
+            route.device.as_ref().map(|d| d.id.as_str()),
+            Some("speakers"),
+            "the Windows default is the substitute"
+        );
+        assert_eq!(
+            route.substituted.as_deref(),
+            Some("\"Headphones\" not found - using \"Speakers\"")
+        );
+        assert_eq!(
+            cfg.monitor_device.as_deref(),
+            Some("gone"),
+            "the configured id is kept for a re-plug"
+        );
+    }
+
+    /// Nothing configured is the first-run state: use the default quietly. An
+    /// empty device list is "not connected", not a substitution either.
+    #[test]
+    fn an_unconfigured_slot_takes_the_default_without_a_warning() {
+        let devices = vec![device("speakers", "Speakers")];
+        let cfg = storage::Settings::default();
+        let route = route_slot(&devices, Some("speakers"), Slot::Monitor, &cfg, None);
+        assert_eq!(route.device.map(|d| d.id), Some("speakers".to_string()));
+        assert!(route.substituted.is_none());
+
+        let empty: Vec<DeviceInfo> = Vec::new();
+        let route = route_slot(&empty, None, Slot::Monitor, &cfg, None);
+        assert!(route.device.is_none());
+        assert!(route.substituted.is_none());
+    }
+
+    /// The cable's substitute is a virtual device when one is attached, and never
+    /// the endpoint the monitor already plays on.
+    #[test]
+    fn a_gone_cable_prefers_a_virtual_device_over_the_default() {
+        let devices = vec![
+            device("speakers", "Speakers"),
+            device("cable-in", "CABLE Input (VB-Audio)"),
+            device("hdmi", "HDMI"),
+        ];
+        let mut cfg = storage::Settings {
+            monitor_device: Some("speakers".into()),
+            ..storage::Settings::default()
+        };
+        set_slot_endpoint(
+            &mut cfg,
+            Slot::Cable,
+            Some("gone".into()),
+            Some("VB-Audio".into()),
+        );
+
+        let route = route_slot(
+            &devices,
+            Some("speakers"),
+            Slot::Cable,
+            &cfg,
+            Some("speakers"),
+        );
+        assert_eq!(
+            route.device.as_ref().map(|d| d.id.as_str()),
+            Some("cable-in")
+        );
+        let note = route.substituted.expect("a substitution is reported");
+        assert!(note.contains("CABLE Input"), "{note}");
+
+        // Without a virtual device the cable takes the default, but still not the
+        // one the monitor is using.
+        let only_plain = vec![device("speakers", "Speakers"), device("hdmi", "HDMI")];
+        let route = route_slot(
+            &only_plain,
+            Some("speakers"),
+            Slot::Cable,
+            &cfg,
+            Some("speakers"),
+        );
+        assert_eq!(route.device.as_ref().map(|d| d.id.as_str()), Some("hdmi"));
+        assert!(looks_virtual("CABLE Input") && looks_virtual("Virtual Audio"));
+        assert!(!looks_virtual("Speakers"));
+    }
+
+    /// The id wins over a stale name, and a device that came back under a new id
+    /// is still found by its name.
+    #[test]
+    fn a_device_is_found_by_id_first_and_by_name_second() {
+        let devices = vec![
+            device("speakers", "Speakers (Realtek)"),
+            device("new-cable", "CABLE Input"),
+        ];
+        assert_eq!(
+            resolve_device(&devices, Some("speakers"), Some("Old speakers")).map(|d| d.name),
+            Some("Speakers (Realtek)".to_string())
+        );
+        assert_eq!(
+            resolve_device(&devices, Some("old-id"), Some("CABLE Input")).map(|d| d.id),
+            Some("new-cable".to_string())
+        );
+        assert!(resolve_device(&devices, Some("old-id"), Some("Old cable")).is_none());
+    }
+
+    /// A start clears a failure note but not a substitution: audio is still
+    /// coming out of a device the user did not pick (FR-5.5.8).
+    #[test]
+    fn a_substitution_stays_reported_after_its_route_starts() {
+        let note = DeviceNote::warning("\"Headphones\" not found - using \"Speakers\"");
+        let kept = note
+            .cleared_by_start()
+            .expect("a substitution survives a successful start");
+        assert!(kept.text.contains("not found"));
+        assert!(matches!(kept.kind, StatusKind::Warning));
+        assert!(DeviceNote::failure("device in use")
+            .cleared_by_start()
+            .is_none());
+    }
+
+    /// The trimmed dB reads with a sign, so a boost and a cut never look alike.
+    #[test]
+    fn a_gain_reads_with_an_explicit_sign() {
+        assert_eq!(format_gain_db(0.0), "0.0 dB");
+        assert_eq!(format_gain_db(3.0), "+3.0 dB");
+        assert_eq!(format_gain_db(-3.0), "-3.0 dB");
+        assert_eq!(format_gain_db(0.01), "0.0 dB");
     }
 }

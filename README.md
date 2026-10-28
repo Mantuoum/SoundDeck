@@ -18,7 +18,9 @@ and run `SoundDeck.exe`.
   the game or app you are in still receives it. Bare keys (F1, `, NumPad5) are
   allowed.
 - **Loop track** — streamed from disk, so a one-hour file costs no RAM.
-- **Libraries** — grid or list, drag to reorder, search, per-sound volume.
+- **Libraries** — grid or list, drag to reorder, search, per-sound volume and a
+  per-sound dB trim (`-24` to `+12 dB`) for files that are too loud or too quiet next
+  to the rest.
 - **Tray** — minimise to tray; sounds keep working while hidden.
 - **Portable** — `config/` is created next to the executable. Copy the folder to
   move your setup.
@@ -27,7 +29,9 @@ and run `SoundDeck.exe`.
 
 - Windows 10 or 11, 64-bit.
 - Any WASAPI output device. For routing into voice chat, install a virtual cable
-  and pick it as the Cable output.
+  and pick it as the Cable output. If a chosen device is unplugged, that output falls
+  back to the Windows default and names the substitute in the activity log; plug it
+  back in and use **Refresh devices** to return to it.
 
 ## Build from source
 

@@ -47,7 +47,7 @@ use std::time::Instant;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::audio::decode::decode_file;
-use crate::audio::engine::Engine;
+use crate::audio::engine::{effective_gain, Engine};
 use crate::audio::reader::{frames_for_seconds, probe_seconds};
 use crate::audio::stream;
 
@@ -61,6 +61,8 @@ struct Playable {
     /// Held for as long as the sound is on the board; denies delete and rename.
     lock: Option<FileLock>,
     volume: f32,
+    /// Per-sound trim in dB, applied on top of `volume` (FR-5.3.17).
+    gain_db: f32,
     samples: Option<Arc<Vec<f32>>>,
     loading: bool,
     pending_play: bool,
@@ -79,11 +81,12 @@ struct Playable {
 }
 
 impl Playable {
-    fn new(path: PathBuf, volume: f32) -> Self {
+    fn new(path: PathBuf, volume: f32, gain_db: f32) -> Self {
         Self {
             path,
             lock: None,
             volume,
+            gain_db,
             samples: None,
             loading: false,
             pending_play: false,
@@ -96,6 +99,12 @@ impl Playable {
             retain: false,
             last_used: Instant::now(),
         }
+    }
+
+    /// The linear gain a voice for this sound carries: the stored volume with
+    /// the dB trim folded in. The engine is never handed the two separately.
+    fn voice_gain(&self) -> f32 {
+        effective_gain(self.volume, self.gain_db)
     }
 
     fn bytes(&self) -> usize {
@@ -225,7 +234,7 @@ impl Playback {
         }
     }
 
-    pub fn register(&self, id: u64, path: PathBuf, volume: f32) {
+    pub fn register(&self, id: u64, path: PathBuf, volume: f32, gain_db: f32) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(_) => return,
@@ -237,11 +246,12 @@ impl Playback {
                 entry.reset_audio();
             }
             entry.volume = volume;
+            entry.gain_db = gain_db;
             entry.ensure_lock();
             entry.missing = !entry.path.is_file();
             return;
         }
-        let mut entry = Playable::new(path, volume);
+        let mut entry = Playable::new(path, volume, gain_db);
         entry.ensure_lock();
         entry.missing = !entry.path.is_file();
         state.insert(id, entry);
@@ -281,13 +291,34 @@ impl Playback {
         self.send_job(job);
     }
 
+    /// Live volume change. The trim is untouched, so the applied gain is
+    /// volume × trim for whatever is sounding right now.
     pub fn set_volume(&self, id: u64, volume: f32) {
+        let mut gain = None;
         if let Ok(mut state) = self.state.lock() {
             if let Some(entry) = state.get_mut(&id) {
                 entry.volume = volume;
+                gain = Some(entry.voice_gain());
             }
         }
-        self.engine.set_sound_volume(id, volume);
+        if let Some(gain) = gain {
+            self.engine.set_sound_volume(id, gain);
+        }
+    }
+
+    /// Live trim change, the same path as [`Playback::set_volume`]: the volume is
+    /// untouched and the new gain applies to a voice that is already sounding.
+    pub fn set_gain(&self, id: u64, gain_db: f32) {
+        let mut gain = None;
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(entry) = state.get_mut(&id) {
+                entry.gain_db = gain_db;
+                gain = Some(entry.voice_gain());
+            }
+        }
+        if let Some(gain) = gain {
+            self.engine.set_sound_volume(id, gain);
+        }
     }
 
     /// Retry the read lock for a configured sound. Used after startup failures
@@ -404,8 +435,8 @@ impl Playback {
             };
             entry.last_used = Instant::now();
             if let Some(samples) = entry.samples.clone() {
-                // Resident: take the volume along with the samples and leave.
-                resident = Some((samples, entry.volume));
+                // Resident: take the gain along with the samples and leave.
+                resident = Some((samples, entry.voice_gain()));
             } else {
                 entry.ensure_lock();
                 entry.missing = !entry.path.is_file();
@@ -431,12 +462,12 @@ impl Playback {
                         entry.probe_pending = true;
                         probe = Some((entry.path.clone(), entry.generation));
                     }
-                    stream_request = Some((entry.path.clone(), entry.volume, entry.duration));
+                    stream_request = Some((entry.path.clone(), entry.voice_gain(), entry.duration));
                 }
             }
         }
-        if let Some((samples, volume)) = resident {
-            self.engine.play(id, samples, volume);
+        if let Some((samples, gain)) = resident {
+            self.engine.play(id, samples, gain);
             return;
         }
         if let Some(message) = failure {
@@ -453,8 +484,8 @@ impl Playback {
         if let Some((path, generation)) = probe {
             self.spawn_probe(id, path, generation);
         }
-        if let Some((path, volume, duration)) = stream_request {
-            self.start_stream(id, &path, volume, duration);
+        if let Some((path, gain, duration)) = stream_request {
+            self.start_stream(id, &path, gain, duration);
         }
     }
 
@@ -564,11 +595,11 @@ impl Playback {
         }
     }
 
-    fn start_stream(&self, id: u64, path: &Path, volume: f32, duration: Option<f32>) {
+    fn start_stream(&self, id: u64, path: &Path, gain: f32, duration: Option<f32>) {
         match stream::spawn_once(path) {
             Ok(rx) => {
                 let total = duration.map(frames_for_seconds);
-                self.engine.play_stream(id, rx, volume, total);
+                self.engine.play_stream(id, rx, gain, total);
             }
             Err(err) => {
                 let message = format!("{err:#}");
@@ -609,16 +640,17 @@ fn usage_of(state: &HashMap<u64, Playable>, skip: u64) -> Usage {
     usage
 }
 
-/// Samples and volume as they are *now*, for a play that was deferred while the
-/// file was decoding. The volume is read here rather than carried from the job,
-/// so a slider move during the decode is still honoured.
+/// Gain as it is *now*, for a play that was deferred while the file was
+/// decoding. The volume and the trim are read here rather than carried from the
+/// job, so a slider move or a gain step during the decode is still honoured, and
+/// the two always travel together through one conversion.
 fn playback_snapshot(
     state: &Mutex<HashMap<u64, Playable>>,
     id: u64,
 ) -> Option<(Option<Arc<Vec<f32>>>, f32)> {
     let state = state.lock().ok()?;
     let entry = state.get(&id)?;
-    Some((entry.samples.clone(), entry.volume))
+    Some((entry.samples.clone(), entry.voice_gain()))
 }
 
 /// Picks the buffers to drop so `need` more bytes fit: LRU order (`candidates`
@@ -783,10 +815,10 @@ fn loader_loop(
                     });
                 }
                 if pending {
-                    let Some((_, volume)) = playback_snapshot(&state, job.id) else {
+                    let Some((_, gain)) = playback_snapshot(&state, job.id) else {
                         continue;
                     };
-                    start_stream_from(&engine, &events, &state, job.id, &path, volume, duration);
+                    start_stream_from(&engine, &events, &state, job.id, &path, gain, duration);
                 }
             }
             Route::Preload => {
@@ -839,14 +871,14 @@ fn loader_loop(
                         }
                         if pending {
                             // Same lock that fetches the samples supplies the
-                            // volume, so a slider move during the decode counts.
-                            let Some((samples, volume)) = playback_snapshot(&state, job.id) else {
+                            // gain, so a level change during the decode counts.
+                            let Some((samples, gain)) = playback_snapshot(&state, job.id) else {
                                 continue;
                             };
                             match samples {
-                                Some(samples) => engine.play(job.id, samples, volume),
+                                Some(samples) => engine.play(job.id, samples, gain),
                                 None => start_stream_from(
-                                    &engine, &events, &state, job.id, &path, volume, duration,
+                                    &engine, &events, &state, job.id, &path, gain, duration,
                                 ),
                             }
                         }
@@ -885,11 +917,11 @@ fn start_stream_from(
     state: &Arc<Mutex<HashMap<u64, Playable>>>,
     id: u64,
     path: &Path,
-    volume: f32,
+    gain: f32,
     duration: Option<f32>,
 ) {
     match stream::spawn_once(path) {
-        Ok(rx) => engine.play_stream(id, rx, volume, duration.map(frames_for_seconds)),
+        Ok(rx) => engine.play_stream(id, rx, gain, duration.map(frames_for_seconds)),
         Err(err) => {
             let message = format!("{err:#}");
             if let Ok(mut state) = state.lock() {
@@ -980,7 +1012,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(1, path, 1.0);
+        playback.register(1, path, 1.0, 0.0);
         playback.set_retain(1, true);
 
         let events = wait_for_events(&playback, Duration::from_secs(5));
@@ -1004,7 +1036,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(1, path, 1.0);
+        playback.register(1, path, 1.0, 0.0);
         playback.set_retain(1, true);
 
         let events = wait_for_events(&playback, Duration::from_secs(5));
@@ -1029,7 +1061,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(2, path, 1.0);
+        playback.register(2, path, 1.0, 0.0);
         playback.set_retain(2, false);
         playback.play(2);
         assert!(playback.cache_usage().sounds == 0);
@@ -1042,7 +1074,7 @@ mod tests {
     fn missing_file_reports_failure() {
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(3, PathBuf::from("Z:\\nope.wav"), 1.0);
+        playback.register(3, PathBuf::from("Z:\\nope.wav"), 1.0, 0.0);
         playback.play(3);
         let events = wait_for_events(&playback, Duration::from_secs(2));
         assert!(
@@ -1061,7 +1093,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(9, path.clone(), 1.0);
+        playback.register(9, path.clone(), 1.0, 0.0);
 
         assert!(
             fs::remove_file(&path).is_err(),
@@ -1084,7 +1116,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine.clone());
-        playback.register(4, path, 1.0);
+        playback.register(4, path, 1.0, 0.0);
         playback.set_retain(4, true);
         let events = wait_for_events(&playback, Duration::from_secs(5));
         assert!(events
@@ -1119,7 +1151,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(12, path, 1.0);
+        playback.register(12, path, 1.0, 0.0);
         playback.set_retain(12, true);
         let events = wait_for_events(&playback, Duration::from_secs(5));
         assert!(events
@@ -1144,7 +1176,7 @@ mod tests {
     fn a_missing_sound_that_cannot_play_reports_the_message() {
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(13, PathBuf::from("Z:\\nope.wav"), 1.0);
+        playback.register(13, PathBuf::from("Z:\\nope.wav"), 1.0, 0.0);
 
         playback.mark_missing(13, true, Some("volume disconnected".into()));
 
@@ -1166,11 +1198,11 @@ mod tests {
     }
 
     #[test]
-    fn a_deferred_play_reads_the_volume_at_playback_time() {
+    fn a_deferred_play_reads_the_level_at_playback_time() {
         let state = Mutex::new(HashMap::new());
         {
             let mut entries = state.lock().unwrap();
-            let mut entry = Playable::new(PathBuf::from("tone.wav"), 0.9);
+            let mut entry = Playable::new(PathBuf::from("tone.wav"), 0.9, 0.0);
             entry.samples = Some(Arc::new(vec![0.0; 480]));
             entries.insert(5, entry);
         }
@@ -1181,10 +1213,65 @@ mod tests {
             }
         }
 
-        let (samples, volume) = playback_snapshot(&state, 5).unwrap();
+        let (samples, gain) = playback_snapshot(&state, 5).unwrap();
         assert!(samples.is_some());
-        assert_eq!(volume, 0.2, "the deferred play must use the latest volume");
+        assert_eq!(gain, 0.2, "the deferred play must use the latest volume");
         assert!(playback_snapshot(&state, 404).is_none());
+
+        // A trim set during the decode is part of the same snapshot: the voice
+        // gets volume x trim, never one without the other.
+        if let Ok(mut entries) = state.lock() {
+            if let Some(entry) = entries.get_mut(&5) {
+                entry.gain_db = 6.0;
+            }
+        }
+        let (_, gain) = playback_snapshot(&state, 5).unwrap();
+        assert!((gain - 0.2 * 1.995_262).abs() < 1e-4, "got {gain}");
+    }
+
+    #[test]
+    fn registering_a_sound_keeps_its_trim_with_its_volume() {
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine);
+        playback.register(5, PathBuf::from("Z:\\nope.wav"), 0.5, -3.0);
+
+        let gain = playback
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.get(&5).map(Playable::voice_gain))
+            .unwrap_or_default();
+        // 10^(-3/20) = 0.70795; half volume on top of that.
+        assert!((gain - 0.353_973).abs() < 1e-4, "got {gain}");
+
+        // Re-registering (a relink, a config import) replaces both values.
+        playback.register(5, PathBuf::from("Z:\\nope.wav"), 1.0, 0.0);
+        let gain = playback
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.get(&5).map(Playable::voice_gain))
+            .unwrap_or_default();
+        assert!((gain - 1.0).abs() < 1e-6, "got {gain}");
+    }
+
+    #[test]
+    fn a_level_change_reaches_the_voice_that_is_already_playing() {
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine.clone());
+        playback.register(31, PathBuf::from("Z:\\nope.wav"), 0.5, 0.0);
+        // A stand-in voice: no decode, just something for the live path to reach.
+        engine.play(31, Arc::new(vec![0.0; 480]), 0.5);
+
+        // A gain step keeps the volume and re-applies the product.
+        playback.set_gain(31, 6.0);
+        let gain = engine.voice_gain(31).expect("the voice is still sounding");
+        assert!((gain - 0.5 * 1.995_262).abs() < 1e-4, "got {gain}");
+
+        // A slider move keeps the trim.
+        playback.set_volume(31, 1.0);
+        let gain = engine.voice_gain(31).expect("the voice is still sounding");
+        assert!((gain - 1.995_262).abs() < 1e-4, "got {gain}");
     }
 
     #[test]
@@ -1195,7 +1282,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine.clone());
-        playback.register(21, path, 1.0);
+        playback.register(21, path, 1.0, 0.0);
         playback.set_retain(21, true);
         playback.play(21);
         playback.set_volume(21, 0.25);
@@ -1220,7 +1307,7 @@ mod tests {
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
-        playback.register(11, path, 1.0);
+        playback.register(11, path, 1.0, 0.0);
         playback.play(11);
 
         let start = Instant::now();
@@ -1332,14 +1419,14 @@ mod tests {
 
         let mut entries = HashMap::new();
         for id in 0..policy::RETAINED_SOUND_CAP as u64 {
-            let mut entry = Playable::new(PathBuf::from(format!("{id}.wav")), 1.0);
+            let mut entry = Playable::new(PathBuf::from(format!("{id}.wav")), 1.0, 0.0);
             entry.samples = Some(frame.clone());
             entry.last_used = base - Duration::from_secs(1000 - id);
             entries.insert(id, entry);
         }
         // The sound being admitted is the least recently used of them all: it
         // must still survive, or admitting it would evict itself.
-        let mut head = Playable::new(PathBuf::from("head.wav"), 1.0);
+        let mut head = Playable::new(PathBuf::from("head.wav"), 1.0, 0.0);
         head.samples = Some(frame.clone());
         head.last_used = base - Duration::from_secs(10_000);
         entries.insert(admitted_id, head);

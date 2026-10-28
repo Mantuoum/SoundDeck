@@ -137,6 +137,7 @@ mod tests {
             path: format!("audio/{name}.wav"),
             hotkey: Some("Ctrl+1".into()),
             volume: 0.8,
+            gain_db: 0.0,
             ram: Some(true),
         }
     }
@@ -151,7 +152,10 @@ mod tests {
             LibraryConfig {
                 id: 2,
                 name: "Voices".into(),
-                sounds: vec![sound(2, "hello")],
+                sounds: vec![SoundConfig {
+                    gain_db: 3.5,
+                    ..sound(2, "hello")
+                }],
             },
         ]
     }
@@ -197,6 +201,7 @@ mod tests {
         assert!(bundle.settings.minimize_to_tray);
         assert_eq!(bundle.libraries.len(), 2);
         assert_eq!(bundle.libraries[1].sounds[0].name, "hello");
+        assert!((bundle.libraries[1].sounds[0].gain_db - 3.5).abs() < 1e-6);
     }
 
     #[test]

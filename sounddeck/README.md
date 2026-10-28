@@ -42,10 +42,19 @@ live in `config/` next to the executable.
   applies to ejecting a drive that holds locked sounds.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
-  so the track matches perceived loudness; stored gains stay linear.
+  so the track matches perceived loudness; stored gains stay linear. If a chosen
+  device is missing, that output plays on the Windows default (the cable prefers a
+  device named "cable"/"virtual") and both the log and Settings → Output devices say
+  which one is playing; the chosen device is remembered, so it comes back when it is
+  plugged in again.
 - **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
   outputs. Right-click the slider to reset it to `0.0 dB`. It can be hidden from the
   sidebar in Settings → Window.
+- **Per-sound trim** — right-click a sound → `Gain`: step it with `−`/`+` by 1 dB
+  (`-24` to `+12 dB`), `reset` back to `0.0 dB`. It multiplies the sound's own volume,
+  so a loud file can sit under everything else without touching its file or the output
+  volumes. Changing it while the sound plays is heard immediately; a boost past full
+  scale is clipped, not refused.
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one full-width
   bar per output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
