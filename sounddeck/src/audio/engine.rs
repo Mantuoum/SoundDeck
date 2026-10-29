@@ -1587,4 +1587,70 @@ mod loop_tests {
         assert_eq!(engine.loop_state(), LoopState::Idle);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// FR-5.5.9: a slot routed to nothing is closed, not left playing on the
+    /// device it used to have.
+    #[test]
+    fn a_none_route_closes_the_slot_and_keeps_its_ring_empty() {
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        engine.set_routes(None, None);
+        assert!(!engine.device_running(Slot::Monitor));
+        assert!(!engine.device_running(Slot::Cable));
+
+        // Nothing consumes the rings now, so the mixer must not fill them: a
+        // closed slot queues no audio and cannot grow without bound.
+        engine.play(1, Arc::new(vec![0.5f32; 4_800]), 1.0);
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(
+            engine.buffered_frames(),
+            (0, 0),
+            "a slot with no device must not accumulate samples"
+        );
+
+        // The engine still parks and stops as usual.
+        engine.stop_all();
+        thread::sleep(Duration::from_millis(80));
+        assert!(!engine.is_playing());
+    }
+
+    /// FR-5.5.7: the closed slot is restartable without an app restart.
+    #[test]
+    fn a_closed_slot_reopens_with_a_fresh_render_thread() {
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        engine.set_routes(None, None);
+
+        // No such endpoint: the point is that a render thread was started for the
+        // slot again and reported the device, instead of the slot staying dead.
+        engine.set_routes(
+            Some(DeviceRoute {
+                id: "sounddeck-no-such-endpoint".into(),
+                name: "Missing".into(),
+            }),
+            None,
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut reported = false;
+        while Instant::now() < deadline && !reported {
+            reported = engine.poll_events().iter().any(|event| {
+                matches!(
+                    event,
+                    AudioEvent::DeviceError {
+                        slot: Slot::Monitor,
+                        ..
+                    }
+                )
+            });
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            reported,
+            "reopening a slot must start a fresh render thread"
+        );
+
+        while Instant::now() < deadline && engine.device_running(Slot::Monitor) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!engine.device_running(Slot::Monitor));
+    }
 }

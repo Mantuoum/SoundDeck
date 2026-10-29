@@ -518,8 +518,8 @@ impl App {
         }
         let theme_was_corrected = !theme::available().iter().any(|(id, _)| id == &cfg.theme);
         if theme_was_corrected {
+            // `install` already fell back (and logged why); just persist the id in use.
             cfg.theme = "graphite".to_string();
-            theme::set_theme("graphite");
         }
         // Read once: the Appearance dropdown draws from this list every frame.
         let theme_choices = theme::available();
@@ -729,15 +729,14 @@ impl App {
                     };
                     self.log(StatusKind::Error, text);
                 }
-                PlaybackEvent::Refused { id, message } => {
+                PlaybackEvent::Refused { id, reason } => {
                     let label = self.sound_name(id);
                     if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
                         sound.ram = false;
                     }
-                    self.log(
-                        StatusKind::Warning,
-                        format!("\"{label}\" plays from disk: {message}"),
-                    );
+                    // The refusal owns its wording (`policy::Refusal::message`);
+                    // the board only supplies the name the user knows.
+                    self.log(StatusKind::Warning, reason.message(&label));
                 }
                 PlaybackEvent::Warning(message) => {
                     self.log(StatusKind::Warning, message);
@@ -1920,7 +1919,11 @@ impl App {
     fn apply_config(&mut self, ctx: &egui::Context) {
         anim::set_user(self.cfg.animate_ui);
 
-        // An unknown theme id falls back to Graphite, exactly as on load.
+        // An unknown theme id falls back to Graphite, exactly as on load. Resolve
+        // first so the fallback is logged instead of silently swapping the theme.
+        for warning in theme::set_theme(&self.cfg.theme) {
+            self.log(StatusKind::Warning, warning);
+        }
         if !self
             .theme_choices
             .iter()
@@ -1928,7 +1931,6 @@ impl App {
         {
             self.cfg.theme = "graphite".to_string();
         }
-        theme::set_theme(&self.cfg.theme);
         theme::apply_style(ctx);
 
         link_output_volumes(&mut self.cfg);
@@ -2043,12 +2045,16 @@ impl App {
     }
 
     fn set_device(&mut self, slot: Slot, id: Option<String>) {
+        let silent = id.is_none();
         let name = id.as_ref().and_then(|id| {
             self.devices
                 .iter()
                 .find(|d| &d.id == id)
                 .map(|d| d.name.clone())
         });
+        // Picking "None (silent)" stores the choice, not an empty field, so it
+        // survives a restart instead of being re-resolved to a device.
+        let name = name.or_else(|| silent.then(|| SILENT_DEVICE_LABEL.to_string()));
         set_slot_endpoint(&mut self.cfg, slot, id, name);
         self.apply_routes();
         self.mark_dirty();
@@ -2548,7 +2554,7 @@ impl App {
             .show_ui(ui, |ui| {
                 ui.set_min_width(width - 20.0);
                 if ui
-                    .selectable_label(current_id.is_none(), "None (silent)")
+                    .selectable_label(current_id.is_none(), SILENT_DEVICE_LABEL)
                     .clicked()
                 {
                     chosen = Some(None);
@@ -2583,9 +2589,7 @@ impl App {
     fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
         let mut position = volume::to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
-            let (icon_rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
-            theme::speaker_icon(ui.painter(), icon_rect, theme::muted());
-            ui.spacing_mut().slider_width = (ui.available_width() - 44.0).max(60.0);
+            ui.spacing_mut().slider_width = (ui.available_width() - 22.0).max(60.0);
             let changed = ui
                 .add(
                     egui::Slider::new(&mut position, 0.0..=1.0)
@@ -4205,7 +4209,9 @@ impl App {
             });
         if selected != self.cfg.theme {
             self.cfg.theme = selected;
-            theme::set_theme(&self.cfg.theme);
+            for warning in theme::set_theme(&self.cfg.theme) {
+                self.log(StatusKind::Warning, warning);
+            }
             theme::apply_style(ctx);
             self.mark_dirty();
             ctx.request_repaint();
@@ -4217,6 +4223,12 @@ impl App {
             self.log(StatusKind::Warning, warning);
         }
         self.theme_choices = theme::available();
+        // Re-resolve before the membership check: a colour edit must repaint from
+        // the freshly parsed file, and a vanished id must say so before the app
+        // quietly corrects it to Graphite.
+        for warning in theme::set_theme(&self.cfg.theme) {
+            self.log(StatusKind::Warning, warning);
+        }
         if !self
             .theme_choices
             .iter()
@@ -4224,7 +4236,6 @@ impl App {
         {
             self.cfg.theme = "graphite".to_string();
         }
-        theme::set_theme(&self.cfg.theme);
         theme::apply_style(ctx);
         self.mark_dirty();
         ctx.request_repaint();
@@ -6967,6 +6978,22 @@ fn resolve_device(
     None
 }
 
+/// The stored label for "this slot is deliberately silent" — the device
+/// selector's None row (FR-5.5.9).
+///
+/// Silence is stored as the slot's *name* with no id, because a settings field
+/// cannot express "chosen to be silent" and "never configured" at once: an empty
+/// pair is the first-run state that startup resolution fills in, while this label
+/// is a choice that survives a restart. It is also what the selector shows, so the
+/// board names the state the same way the user picked it.
+const SILENT_DEVICE_LABEL: &str = "None (silent)";
+
+/// Whether the user chose "None (silent)" for this slot.
+fn slot_is_silent(cfg: &storage::Settings, slot: Slot) -> bool {
+    let (id, name) = slot_endpoint(cfg, slot);
+    id.is_none() && name.as_deref() == Some(SILENT_DEVICE_LABEL)
+}
+
 /// The stored endpoint (id, friendly name) for one slot. One mapping, read by
 /// routing, the device refresh and the device selector.
 fn slot_endpoint(cfg: &storage::Settings, slot: Slot) -> (&Option<String>, &Option<String>) {
@@ -7020,6 +7047,11 @@ struct SlotRoute {
 /// Order: the stored id, then the stored friendly name, then a substitute —
 /// the Windows default, then the first device; the Cable prefers a device whose
 /// name says "cable"/"virtual" and never the one the Monitor already uses.
+///
+/// A slot the user set to "None (silent)" resolves to no device at all: it is
+/// not "unconfigured", and substituting a device here is exactly the bug where
+/// the previous output kept playing after the user switched the slot off
+/// (FR-5.5.9).
 fn route_slot(
     devices: &[DeviceInfo],
     default_id: Option<&str>,
@@ -7027,6 +7059,12 @@ fn route_slot(
     cfg: &storage::Settings,
     monitor: Option<&str>,
 ) -> SlotRoute {
+    if slot_is_silent(cfg, slot) {
+        return SlotRoute {
+            device: None,
+            substituted: None,
+        };
+    }
     let (id, name) = slot_endpoint(cfg, slot);
     if let Some(device) = resolve_device(devices, id.as_deref(), name.as_deref()) {
         return SlotRoute {
@@ -7084,6 +7122,9 @@ struct OutputSelection {
 /// Both results are written back into `cfg` so the next launch resolves the same
 /// endpoints.
 ///
+/// A slot the user set to "None (silent)" is left empty and stays silent: the
+/// stored choice is not overwritten by a fresh guess (FR-5.5.9).
+///
 /// Startup, config import and "Reset all settings" all go through here. Runtime
 /// re-routing deliberately does not: it keeps the stored endpoint and reports a
 /// substitution instead (`route_slot`).
@@ -7092,21 +7133,33 @@ fn resolve_outputs(
     default_id: Option<&str>,
     cfg: &mut storage::Settings,
 ) -> OutputSelection {
-    let monitor = resolve_device(
-        devices,
-        cfg.monitor_device.as_deref(),
-        cfg.monitor_name.as_deref(),
-    )
-    .or_else(|| default_id.and_then(|id| devices.iter().find(|device| device.id == id).cloned()))
-    .or_else(|| devices.first().cloned());
+    let monitor_silent = slot_is_silent(cfg, Slot::Monitor);
+    let monitor = if monitor_silent {
+        None
+    } else {
+        resolve_device(
+            devices,
+            cfg.monitor_device.as_deref(),
+            cfg.monitor_name.as_deref(),
+        )
+        .or_else(|| {
+            default_id.and_then(|id| devices.iter().find(|device| device.id == id).cloned())
+        })
+        .or_else(|| devices.first().cloned())
+    };
 
     let mut note = None;
-    let mut cable = resolve_device(
-        devices,
-        cfg.cable_device.as_deref(),
-        cfg.cable_name.as_deref(),
-    );
-    if cable.is_none() {
+    let cable_silent = slot_is_silent(cfg, Slot::Cable);
+    let mut cable = if cable_silent {
+        None
+    } else {
+        resolve_device(
+            devices,
+            cfg.cable_device.as_deref(),
+            cfg.cable_name.as_deref(),
+        )
+    };
+    if cable.is_none() && !cable_silent {
         cable = devices
             .iter()
             .find(|device| {
@@ -7647,6 +7700,55 @@ mod tests {
         let route = route_slot(&empty, None, Slot::Monitor, &cfg, None);
         assert!(route.device.is_none());
         assert!(route.substituted.is_none());
+    }
+
+    /// "None (silent)" is a stored choice, not an empty endpoint: both routing
+    /// and startup resolution must leave the slot with no device, otherwise the
+    /// output the user switched off keeps playing (FR-5.5.9).
+    #[test]
+    fn a_silent_slot_is_never_given_a_substitute_device() {
+        let devices = vec![
+            device("speakers", "Speakers"),
+            device("cable-in", "CABLE Input (VB-Audio)"),
+        ];
+        let mut cfg = storage::Settings::default();
+        set_slot_endpoint(
+            &mut cfg,
+            Slot::Monitor,
+            None,
+            Some(SILENT_DEVICE_LABEL.into()),
+        );
+        assert!(slot_is_silent(&cfg, Slot::Monitor));
+        assert!(
+            !slot_is_silent(&cfg, Slot::Cable),
+            "an unconfigured slot is not a silent one"
+        );
+
+        let route = route_slot(&devices, Some("speakers"), Slot::Monitor, &cfg, None);
+        assert!(
+            route.device.is_none(),
+            "\"None (silent)\" must not be substituted: that is how the old device kept playing"
+        );
+        assert!(
+            route.substituted.is_none(),
+            "a choice is not a substitution"
+        );
+
+        // Startup resolution must keep the choice instead of guessing again.
+        let selection = resolve_outputs(&devices, Some("speakers"), &mut cfg);
+        assert!(selection.monitor.is_none());
+        assert_eq!(
+            cfg.monitor_name.as_deref(),
+            Some(SILENT_DEVICE_LABEL),
+            "the stored silence survives a restart"
+        );
+        assert!(cfg.monitor_device.is_none());
+        // The other slot is still resolved normally.
+        assert_eq!(
+            selection.cable.as_ref().map(|d| d.id.as_str()),
+            Some("cable-in")
+        );
+        assert_eq!(cfg.cable_device.as_deref(), Some("cable-in"));
     }
 
     /// The cable's substitute is a virtual device when one is attached, and never

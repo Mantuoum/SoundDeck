@@ -1,3 +1,20 @@
+//! Theme registry and the live palette.
+//!
+//! **Contract** (the one thing that keeps going wrong): a theme lives in
+//! `config/themes/<id>.md`; the **file stem is the id** — the key `settings.json`
+//! stores and every lookup matches — and the `# Heading` line is the display
+//! **name**. So renaming the file renames the theme: an id the settings still
+//! point at no longer exists, and [`set_theme`] falls back to Graphite **and
+//! says so** in its warnings instead of silently swapping the user's colours
+//! out. Because a rename is otherwise invisible in the UI, the dropdown label
+//! carries the id (`"<name> (<id>)"`) whenever the heading does not spell it.
+//!
+//! [`reload`] re-reads the folder and rebuilds the registry ([`reload_from`] is
+//! the same pass over an explicit folder, for tests); [`install`] is the only
+//! entry point that touches egui (fonts + style). The active palette is one
+//! `RwLock<Palette>` read through a generation-tagged thread-local snapshot, so
+//! a theme switch is visible to every `palette()` caller on the next frame.
+
 use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,7 +72,15 @@ pub struct ThemeEntry {
     pub palette: Palette,
 }
 
-static CURRENT: OnceLock<RwLock<Palette>> = OnceLock::new();
+/// The palette on screen and the id it was resolved from. Keeping the id next
+/// to the palette is what lets [`reload_from`] notice that the file behind the
+/// current colours is gone: the registry and the palette never disagree.
+struct Current {
+    id: Option<String>,
+    palette: Palette,
+}
+
+static CURRENT: OnceLock<RwLock<Current>> = OnceLock::new();
 static THEMES: OnceLock<RwLock<Vec<ThemeEntry>>> = OnceLock::new();
 
 /// Bumped after every `CURRENT` write so the per-thread snapshot below can be
@@ -70,8 +95,13 @@ thread_local! {
     static PALETTE_SNAPSHOT: Cell<Option<(u64, Palette)>> = const { Cell::new(None) };
 }
 
-fn current_lock() -> &'static RwLock<Palette> {
-    CURRENT.get_or_init(|| RwLock::new(theme_defaults::graphite()))
+fn current_lock() -> &'static RwLock<Current> {
+    CURRENT.get_or_init(|| {
+        RwLock::new(Current {
+            id: None,
+            palette: theme_defaults::graphite(),
+        })
+    })
 }
 
 fn themes_lock() -> &'static RwLock<Vec<ThemeEntry>> {
@@ -102,14 +132,29 @@ fn embedded_entries() -> Vec<ThemeEntry> {
         .collect()
 }
 
-/// Theme ids and display names for the settings dropdown, Graphite first.
+/// Theme ids and dropdown labels for the settings combo, Graphite first.
+///
+/// The label is the display name plus the id in parentheses when the name does
+/// not already spell it: the file name is the thing a user renames, so it has
+/// to be visible in the list — two files with the same heading would otherwise
+/// be indistinguishable. The dropdown draws the label as-is, so this is the one
+/// place the rule lives.
 pub fn available() -> Vec<(String, String)> {
     read_themes(|themes| {
         themes
             .iter()
-            .map(|theme| (theme.id.clone(), theme.name.clone()))
+            .map(|theme| (theme.id.clone(), choice_label(&theme.name, &theme.id)))
             .collect()
     })
+}
+
+/// `"<name> (<id>)"` when the heading cannot identify the file, else the name.
+fn choice_label(name: &str, id: &str) -> String {
+    if name.eq_ignore_ascii_case(id) {
+        name.to_string()
+    } else {
+        format!("{name} ({id})")
+    }
 }
 
 /// The active palette. Copy it once per paint function and read fields off the
@@ -123,27 +168,53 @@ pub fn palette() -> Palette {
                 return palette;
             }
         }
-        let palette = *read_lock(current_lock());
+        let palette = read_lock(current_lock()).palette;
         snapshot.set(Some((generation, palette)));
         palette
     })
 }
 
-/// Select a parsed theme. Unknown ids (or a deleted theme) fall back to Graphite.
-pub fn set_theme(id: &str) {
-    let palette = read_themes(|themes| {
-        themes
-            .iter()
-            .find(|theme| theme.id == id)
-            .map(|theme| theme.palette)
-    })
-    .unwrap_or_else(theme_defaults::graphite);
+/// Publish a resolved palette as the one the UI paints with. The generation
+/// bump happens after the write so snapshots taken before it read as stale.
+fn publish(id: &str, palette: Palette) {
     {
         let mut current = write_lock(current_lock());
-        *current = palette;
+        current.id = Some(id.to_string());
+        current.palette = palette;
     }
-    // Publish after the write so snapshots taken before it are seen as stale.
     CURRENT_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// The one fallback rule: the entry for `id`, or Graphite plus a warning that
+/// names the ids that do exist. Never silent — a silent swap is what makes a
+/// user's edits look like they did not apply.
+fn resolve(id: &str, themes: &[ThemeEntry]) -> (Palette, Vec<String>) {
+    match themes.iter().find(|theme| theme.id == id) {
+        Some(theme) => (theme.palette, Vec::new()),
+        None => (
+            theme_defaults::graphite(),
+            vec![format!(
+                "themes: theme \"{id}\" is not in config/themes (available: {}); using Graphite",
+                themes
+                    .iter()
+                    .map(|theme| theme.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )],
+        ),
+    }
+}
+
+/// Select a parsed theme and publish it to the UI.
+///
+/// A missing id — the file was renamed or deleted — falls back to Graphite and
+/// reports it in the returned warnings. Callers must log those: a silent
+/// fallback is what makes a user's edits "not apply" and their theme "vanish".
+#[must_use]
+pub fn set_theme(id: &str) -> Vec<String> {
+    let (palette, warnings) = read_themes(|themes| resolve(id, themes));
+    publish(id, palette);
+    warnings
 }
 
 /// Read the theme registry under the shared lock policy.
@@ -259,11 +330,16 @@ fn seed_defaults(dir: &Path, warnings: &mut Vec<String>) {
 
 /// Re-read `config/themes/*.md` and rebuild the in-memory registry.
 pub fn reload() -> Vec<String> {
-    let dir = themes_dir();
-    let mut warnings = Vec::new();
-    seed_defaults(&dir, &mut warnings);
+    reload_from(&themes_dir())
+}
 
-    let mut files: Vec<PathBuf> = fs::read_dir(&dir)
+/// Registry rebuild for one folder; `reload()` is the only caller that picks
+/// the real `config/themes` path (tests point it at a temp folder).
+pub(crate) fn reload_from(dir: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    seed_defaults(dir, &mut warnings);
+
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .map(|entries| {
             entries
                 .flatten()
@@ -324,13 +400,25 @@ pub fn reload() -> Vec<String> {
     });
 
     *write_lock(themes_lock()) = entries;
+    // The palette on screen must still resolve: a reload that drops the file
+    // behind it falls back to Graphite here, with the same warning `set_theme`
+    // would give, instead of leaving colours no file describes. (Bound first:
+    // an `if let` scrutinee's guard lives for the whole block, and `publish`
+    // needs the write lock.)
+    let current_id = read_lock(current_lock()).id.clone();
+    if let Some(id) = current_id {
+        let (palette, missing) = read_themes(|themes| resolve(&id, themes));
+        warnings.extend(missing);
+        publish(&id, palette);
+    }
     warnings
 }
 
-/// Load the theme folder, apply the requested theme and return any file warnings.
+/// Load the theme folder, apply the requested theme and return any warnings —
+/// file problems and a missing stored id both reach the activity log from here.
 pub fn install(ctx: &egui::Context, id: &str) -> Vec<String> {
-    let warnings = reload();
-    set_theme(id);
+    let mut warnings = reload();
+    warnings.extend(set_theme(id));
     install_fonts(ctx);
     apply_style(ctx);
     warnings
@@ -475,32 +563,6 @@ pub fn chain_icon(painter: &Painter, rect: Rect, color: Color32, linked: bool) {
     }
 }
 
-pub fn speaker_icon(painter: &Painter, rect: Rect, color: Color32) {
-    let c = rect.center();
-    let s = rect.height().min(rect.width()) * 0.5;
-    let x = c.x - s * 0.55;
-    let body = Rect::from_min_max(
-        Pos2::new(x, c.y - s * 0.22),
-        Pos2::new(x + s * 0.30, c.y + s * 0.22),
-    );
-    painter.rect_filled(body, CornerRadius::same(1), color);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            Pos2::new(x + s * 0.30, c.y - s * 0.22),
-            Pos2::new(c.x + s * 0.05, c.y - s * 0.48),
-            Pos2::new(c.x + s * 0.05, c.y + s * 0.48),
-            Pos2::new(x + s * 0.30, c.y + s * 0.22),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    painter.circle_stroke(
-        Pos2::new(c.x + s * 0.28, c.y),
-        s * 0.30,
-        Stroke::new(1.2_f32, color),
-    );
-}
-
 pub fn truncate(painter: &Painter, text: &str, font: FontId, max_width: f32) -> String {
     if max_width <= 4.0 {
         return String::new();
@@ -535,17 +597,271 @@ pub fn truncate(painter: &Painter, text: &str, font: FontId, max_width: f32) -> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+
+    /// The registry and the current palette are process-global, so every test
+    /// that rebuilds them takes this lock and restores the built-in list on the
+    /// way out — otherwise parallel tests read each other's temp folders.
+    static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RegistryGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for RegistryGuard {
+        fn drop(&mut self) {
+            *write_lock(themes_lock()) = embedded_entries();
+            let mut current = write_lock(current_lock());
+            current.id = None;
+            current.palette = theme_defaults::graphite();
+        }
+    }
+
+    fn registry_guard() -> RegistryGuard {
+        let lock = REGISTRY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        RegistryGuard { _lock: lock }
+    }
+
+    /// A throwaway theme folder under the system temp dir, removed on drop.
+    struct TempThemeDir(PathBuf);
+
+    impl TempThemeDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default();
+            let dir = std::env::temp_dir().join(format!(
+                "sounddeck-theme-test-{tag}-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("create temp theme dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempThemeDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_theme(path: &Path, heading: &str, rows: &[(&str, &str)]) {
+        let mut text = format!("# {heading}\n\n| token | value |\n| --- | --- |\n");
+        for (token, value) in rows {
+            text.push_str(&format!("| {token} | {value} |\n"));
+        }
+        fs::write(path, text).expect("write theme file");
+    }
+
+    fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|ext| ext.eq_ignore_ascii_case("md"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
+
+    /// Editing a colour value in an existing theme file and reloading must reach
+    /// the palette the UI paints with — the whole `file → registry → current
+    /// palette → `palette()` chain, not just the parse step.
+    #[test]
+    fn edited_colour_reaches_the_palette_after_reload() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("edit-colour");
+        let path = dir.path().join("custom.md");
+        write_theme(&path, "Custom", &[("bg", "#123456")]);
+        reload_from(dir.path());
+        let _ = set_theme("custom");
+        assert_eq!(palette().bg, Color32::from_rgb(0x12, 0x34, 0x56));
+
+        // Second edit, same id: Reload alone must repaint the new colour — no
+        // reselect in the dropdown, no restart.
+        write_theme(&path, "Custom", &[("bg", "#654321")]);
+        let warnings = reload_from(dir.path());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(palette().bg, Color32::from_rgb(0x65, 0x43, 0x21));
+        assert_eq!(set_theme("custom"), Vec::<String>::new());
+        assert_eq!(palette().bg, Color32::from_rgb(0x65, 0x43, 0x21));
+    }
+
+    /// The heading is the display name, so editing it must show up in the list
+    /// the Appearance dropdown draws.
+    #[test]
+    fn heading_change_updates_the_display_name() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("heading");
+        let path = dir.path().join("mine.md");
+        write_theme(&path, "First Name", &[("bg", "#101010")]);
+        reload_from(dir.path());
+        assert!(
+            available()
+                .iter()
+                .any(|(id, label)| id == "mine" && label == "First Name (mine)"),
+            "{:?}",
+            available()
+        );
+
+        write_theme(&path, "Second Name", &[("bg", "#101010")]);
+        reload_from(dir.path());
+        assert!(
+            available()
+                .iter()
+                .any(|(id, label)| id == "mine" && label == "Second Name (mine)"),
+            "{:?}",
+            available()
+        );
+    }
+
+    /// The file stem is the id: renaming the file renames the theme.
+    #[test]
+    fn renaming_a_theme_file_changes_its_id() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("rename");
+        let old = dir.path().join("old-id.md");
+        write_theme(&old, "Mine", &[("bg", "#101010")]);
+        reload_from(dir.path());
+        assert!(available().iter().any(|(id, _)| id == "old-id"));
+
+        fs::rename(&old, dir.path().join("new-id.md")).expect("rename theme file");
+        reload_from(dir.path());
+        let ids: Vec<String> = available().into_iter().map(|(id, _)| id).collect();
+        assert!(ids.iter().any(|id| id == "new-id"), "{ids:?}");
+        assert!(!ids.iter().any(|id| id == "old-id"), "{ids:?}");
+    }
+
+    /// The Reload button path: when the file behind the current theme is
+    /// renamed away, reload must say so and fall back — not keep painting
+    /// colours no file describes while the dropdown shows something else.
+    #[test]
+    fn reload_warns_when_the_current_theme_file_disappears() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("vanish");
+        let path = dir.path().join("mine.md");
+        write_theme(&path, "Mine", &[("bg", "#112233")]);
+        reload_from(dir.path());
+        assert_eq!(set_theme("mine"), Vec::<String>::new());
+        assert_eq!(palette().bg, Color32::from_rgb(0x11, 0x22, 0x33));
+
+        fs::rename(&path, dir.path().join("renamed.md")).expect("rename theme file");
+        let warnings = reload_from(dir.path());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("\"mine\"") && w.contains("using Graphite")),
+            "{warnings:?}"
+        );
+        assert_eq!(palette(), theme_defaults::graphite());
+    }
+
+    /// Seeding is a first-run convenience: a folder that already holds Markdown
+    /// belongs to the user and must never be overwritten or added to.
+    #[test]
+    fn reload_keeps_user_theme_files_when_the_folder_has_markdown() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("no-overwrite");
+        let path = dir.path().join("mine.md");
+        let original = "# Mine\n\n| token | value |\n| --- | --- |\n| bg | #010203 |\n";
+        fs::write(&path, original).expect("write theme file");
+
+        reload_from(dir.path());
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("read theme file"),
+            original
+        );
+        assert_eq!(
+            markdown_files(dir.path()),
+            vec![path.clone()],
+            "reload must not seed into a folder that already has themes"
+        );
+    }
+
+    /// A stored id whose file was renamed must fall back to Graphite *loudly*:
+    /// the warning names the missing id and the ids that are actually there.
+    #[test]
+    fn missing_theme_id_falls_back_to_graphite_with_a_warning() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("missing-id");
+        write_theme(&dir.path().join("kept.md"), "Kept", &[("bg", "#101010")]);
+        reload_from(dir.path());
+
+        let warnings = set_theme("renamed-away");
+        assert_eq!(palette(), theme_defaults::graphite());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("renamed-away") && w.contains("using Graphite")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("kept")),
+            "the warning should list the ids that do exist: {warnings:?}"
+        );
+
+        // A known id stays quiet.
+        assert!(set_theme("kept").is_empty());
+        assert_eq!(palette().bg, Color32::from_rgb(0x10, 0x10, 0x10));
+    }
+
+    /// The dropdown label has to identify the file, otherwise renaming a file
+    /// (or two files sharing a heading) is invisible in the list.
+    #[test]
+    fn dropdown_label_names_the_file_when_the_heading_differs() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("label");
+        write_theme(
+            &dir.path().join("mine.md"),
+            "My Theme",
+            &[("bg", "#101010")],
+        );
+        write_theme(&dir.path().join("same.md"), "same", &[("bg", "#101010")]);
+        reload_from(dir.path());
+
+        let choices = available();
+        assert!(
+            choices
+                .iter()
+                .any(|(id, label)| id == "mine" && label == "My Theme (mine)"),
+            "{choices:?}"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|(id, label)| id == "same" && label == "same"),
+            "a heading that already spells the id needs no suffix: {choices:?}"
+        );
+    }
 
     /// The snapshot cache must not hide a theme switch made on the same thread.
     #[test]
     fn palette_snapshot_follows_theme_changes() {
+        let _registry = registry_guard();
         let builtins = theme_defaults::all();
         let (id, _, expected) = &builtins[1];
-        set_theme(id);
+        let _ = set_theme(id);
         assert_eq!(palette(), *expected);
         assert_eq!(bg(), expected.bg);
-        set_theme("graphite");
+        let _ = set_theme("graphite");
         assert_eq!(palette(), theme_defaults::graphite());
         assert_eq!(bg(), theme_defaults::graphite().bg);
     }

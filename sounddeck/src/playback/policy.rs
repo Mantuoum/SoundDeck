@@ -9,6 +9,12 @@
 //! user-visible wording lives. There is no second function that re-derives the
 //! caps just to describe them.
 //!
+//! [`Refusal::evictable`] is the other half of the same decision: it says whether
+//! freeing cached buffers could still admit the sound. The eviction pass reads it
+//! so a file that can never fit (too big on its own, undecodable, over the
+//! process ceiling) cannot dump the cache that the rest of a preload batch has
+//! already filled.
+//!
 //! **Windows only.** Off Windows [`process_bytes`] returns `None`, which
 //! [`admit`] treats as "do not grow" ([`Refusal::ProcessUnreadable`]): the cache
 //! fails closed, so nothing is ever preloaded and every sound streams from disk.
@@ -86,33 +92,47 @@ pub enum Refusal {
 
 impl Refusal {
     /// The one human-readable reason for the activity log.
-    pub fn message(self) -> String {
+    ///
+    /// `name` is the sound's display name and the sentence is complete on its
+    /// own, so no caller prefixes or re-formats it. The three size-class refusals
+    /// read the same way on purpose: which of the caps refused a file is
+    /// diagnostics, and what the user needs to know is that it plays from disk.
+    pub fn message(self, name: &str) -> String {
         match self {
-            Refusal::PreloadOff => "preload is off for this sound".into(),
-            Refusal::UnknownDuration => "its duration could not be read".into(),
-            Refusal::TooLong => format!(
-                "it is longer than the {:.0}s preload limit",
-                RETAIN_SECONDS_CAP
-            ),
-            Refusal::TooLarge => format!(
-                "it is larger than the {} MB a {:.0}s sound may hold",
-                PER_SOUND_RETAIN_BYTES / MIB,
-                RETAIN_SECONDS_CAP
-            ),
-            Refusal::NoAudio => "the decoder produced no audio".into(),
-            Refusal::SoundCap => {
-                format!("the {} sound preload limit is reached", RETAINED_SOUND_CAP)
+            Refusal::PreloadOff => format!("\"{name}\" streams from disk (preload is off)"),
+            Refusal::UnknownDuration => {
+                format!("\"{name}\" streams from disk: its duration could not be read")
             }
-            Refusal::ByteCap => {
-                format!("the {} MB preload budget is full", RETAINED_BYTES_CAP / MIB)
-            }
-            Refusal::ProcessUnreadable => "the process memory usage could not be read".into(),
-            Refusal::ProcessCeiling => format!(
-                "keeping it would exceed the {} MB process limit",
-                PROCESS_CEILING / MIB
+            Refusal::TooLong => format!("\"{name}\" is too long; Streaming from disk"),
+            Refusal::TooLarge | Refusal::ByteCap | Refusal::ProcessCeiling => too_big(name),
+            Refusal::NoAudio => format!("\"{name}\" has no audio"),
+            Refusal::SoundCap => format!(
+                "\"{name}\" streams from disk: the {} sound preload limit is reached",
+                RETAINED_SOUND_CAP
             ),
+            Refusal::ProcessUnreadable => {
+                format!("\"{name}\" streams from disk: the process memory usage could not be read")
+            }
         }
     }
+
+    /// Whether freeing cached buffers can turn this refusal into an admission.
+    ///
+    /// Only the two cache caps can be paid for out of the cache. The rest are
+    /// properties of the sound (its size, its duration, a decoder that produced
+    /// nothing) or of the process (a ceiling measured once per pass, which our
+    /// own evictions cannot move) — evicting for them would empty the cache and
+    /// still refuse, which is how one unfittable file used to take a whole
+    /// preload batch down with it.
+    pub fn evictable(self) -> bool {
+        matches!(self, Refusal::SoundCap | Refusal::ByteCap)
+    }
+}
+
+/// The one wording for every "too big to keep in RAM" refusal (FR-5.3.11): the
+/// user is told the file plays from disk, not which cap produced the verdict.
+fn too_big(name: &str) -> String {
+    format!("\"{name}\" is too big; Streaming from disk")
 }
 
 /// What to do with a sound that is not already resident.
@@ -238,6 +258,9 @@ mod tests {
         message_contains: &'static str,
     }
 
+    /// The sound name every message in these tests is built with.
+    const SOUND: &str = "Kick";
+
     #[test]
     fn admission_and_its_explanation_agree_for_every_cap() {
         let cases = [
@@ -247,7 +270,7 @@ mod tests {
                 bytes: 0,
                 process: ROOMY_PROCESS,
                 expected: Refusal::NoAudio,
-                message_contains: "no audio",
+                message_contains: "has no audio",
             },
             Case {
                 name: "per-sound bytes cap",
@@ -255,7 +278,7 @@ mod tests {
                 bytes: PER_SOUND_RETAIN_BYTES + 1,
                 process: ROOMY_PROCESS,
                 expected: Refusal::TooLarge,
-                message_contains: "larger than",
+                message_contains: "is too big; Streaming from disk",
             },
             Case {
                 name: "sound count cap",
@@ -277,7 +300,7 @@ mod tests {
                 bytes: 100_000,
                 process: ROOMY_PROCESS,
                 expected: Refusal::ByteCap,
-                message_contains: "preload budget is full",
+                message_contains: "is too big; Streaming from disk",
             },
             Case {
                 name: "process ceiling",
@@ -285,7 +308,7 @@ mod tests {
                 bytes: 1_000_000,
                 process: Some(PROCESS_CEILING - PROCESS_HEADROOM - 1000),
                 expected: Refusal::ProcessCeiling,
-                message_contains: "process limit",
+                message_contains: "is too big; Streaming from disk",
             },
             Case {
                 name: "unreadable process size fails closed",
@@ -306,12 +329,42 @@ mod tests {
                 case.name
             );
             let refusal = decision.err().unwrap_or(Refusal::NoAudio);
-            let message = refusal.message();
+            let message = refusal.message(SOUND);
             assert!(
                 message.contains(case.message_contains),
                 "{}: message {message:?} should mention {:?}",
                 case.name,
                 case.message_contains
+            );
+        }
+    }
+
+    #[test]
+    fn every_size_class_refusal_says_too_big_and_names_the_sound() {
+        let expected = "\"Kick\" is too big; Streaming from disk";
+        for refusal in [Refusal::TooLarge, Refusal::ByteCap, Refusal::ProcessCeiling] {
+            assert_eq!(refusal.message(SOUND), expected, "{refusal:?}");
+        }
+        // The duration refusal keeps its own wording.
+        assert_eq!(
+            Refusal::TooLong.message(SOUND),
+            "\"Kick\" is too long; Streaming from disk"
+        );
+        // Every message carries the name it was asked about.
+        for refusal in [
+            Refusal::PreloadOff,
+            Refusal::UnknownDuration,
+            Refusal::TooLong,
+            Refusal::TooLarge,
+            Refusal::NoAudio,
+            Refusal::SoundCap,
+            Refusal::ByteCap,
+            Refusal::ProcessUnreadable,
+            Refusal::ProcessCeiling,
+        ] {
+            assert!(
+                refusal.message("Snare").contains("\"Snare\""),
+                "{refusal:?} must name the sound"
             );
         }
     }
@@ -378,11 +431,40 @@ mod tests {
             Refusal::ProcessUnreadable,
             Refusal::ProcessCeiling,
         ];
-        let mut messages: Vec<String> = all.iter().map(|r| r.message()).collect();
+        let mut messages: Vec<String> = all.iter().map(|r| r.message(SOUND)).collect();
         assert!(messages.iter().all(|m| !m.trim().is_empty()));
+        // The three size-class refusals deliberately share one sentence.
+        let size_class = Refusal::TooLarge.message(SOUND);
+        messages.retain(|message| *message != size_class);
+        assert_eq!(
+            messages.len(),
+            all.len() - 3,
+            "only the size trio may collide"
+        );
         messages.sort();
         messages.dedup();
-        assert_eq!(messages.len(), all.len(), "messages must not collide");
+        assert_eq!(messages.len(), all.len() - 3, "messages must not collide");
+    }
+
+    #[test]
+    fn only_the_cache_caps_are_worth_evicting_for() {
+        for refusal in [Refusal::SoundCap, Refusal::ByteCap] {
+            assert!(refusal.evictable(), "{refusal:?} is paid for by the cache");
+        }
+        for refusal in [
+            Refusal::PreloadOff,
+            Refusal::UnknownDuration,
+            Refusal::TooLong,
+            Refusal::TooLarge,
+            Refusal::NoAudio,
+            Refusal::ProcessUnreadable,
+            Refusal::ProcessCeiling,
+        ] {
+            assert!(
+                !refusal.evictable(),
+                "{refusal:?} cannot be fixed by dropping cached buffers"
+            );
+        }
     }
 
     #[test]

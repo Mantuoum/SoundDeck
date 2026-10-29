@@ -179,8 +179,10 @@ pub enum PlaybackEvent {
         message: String,
         missing: bool,
     },
-    /// The sound works, but it is not kept in memory. One per sound per session.
-    Refused { id: u64, message: String },
+    /// The sound works, but it is not kept in memory. One per sound per attempt:
+    /// the registry carries the decision, the UI owns the sound name and asks
+    /// [`Refusal::message`] for the wording.
+    Refused { id: u64, reason: Refusal },
     /// Background worker problem that is not tied to one sound.
     Warning(String),
 }
@@ -332,6 +334,11 @@ impl Playback {
     }
 
     /// Enable or disable keeping this sound in RAM.
+    ///
+    /// Re-enabling is a fresh attempt, so a previous refusal is dropped. A call
+    /// that does not change the flag (the tab-switch sync re-asserts it on every
+    /// switch) is a no-op: clearing the refusal there would decode the same
+    /// unfittable file again and log the same line again on every switch.
     pub fn set_retain(&self, id: u64, retain: bool) {
         let mut job = None;
         {
@@ -341,10 +348,13 @@ impl Playback {
             let Some(entry) = state.get_mut(&id) else {
                 return;
             };
+            let was_retained = entry.retain;
             entry.retain = retain;
             if retain {
-                entry.refused = None;
-                if entry.samples.is_none() && !entry.loading {
+                if !was_retained {
+                    entry.refused = None;
+                }
+                if entry.samples.is_none() && !entry.loading && entry.refused.is_none() {
                     entry.loading = true;
                     job = Some(Job {
                         id,
@@ -656,6 +666,12 @@ fn playback_snapshot(
 /// Picks the buffers to drop so `need` more bytes fit: LRU order (`candidates`
 /// is oldest first), never a playing sound.
 ///
+/// Eviction only happens when the cache is what is in the way
+/// ([`Refusal::evictable`]). A sound that is too big on its own, or a process
+/// already at its ceiling, is refused with **no** victims, so one unfittable
+/// file in a preload batch cannot dump everything the batch has already loaded
+/// (B1).
+///
 /// Running totals only, so the pass is O(candidates) instead of re-summing the
 /// whole cache per victim. Returns every non-playing candidate when even that is
 /// not enough; the caller then refuses on the fresh numbers.
@@ -666,8 +682,10 @@ fn plan_evictions(
     process: Option<usize>,
     is_playing: impl Fn(u64) -> bool,
 ) -> Vec<u64> {
-    if policy::admit(usage, need, process).is_ok() {
-        return Vec::new();
+    match policy::admit(usage, need, process) {
+        Ok(()) => return Vec::new(),
+        Err(reason) if !reason.evictable() => return Vec::new(),
+        Err(_) => {}
     }
     let mut bytes = usage.bytes;
     let mut sounds = usage.sounds;
@@ -696,6 +714,10 @@ fn verdict(result: Result<(), Refusal>) -> Admission {
 
 /// Frees cached buffers until `need` more bytes fit, then reports whether they
 /// now do.
+///
+/// How many buffers to drop — including "none, this cannot be fixed" — is
+/// [`plan_evictions`]'s decision; this function only collects the candidates,
+/// applies the victims and re-checks on fresh numbers.
 ///
 /// The engine is asked **outside** the state lock (§4.2 lock order): collect the
 /// candidates, ask which of them are playing, then apply the eviction under a
@@ -784,11 +806,11 @@ fn loader_loop(
 
         match route {
             Route::Stream(reason) => {
-                let message = reason.message();
                 // Preload being switched off is a choice, not a refusal; it must
                 // not clear the per-sound toggle or spam the log.
                 let intentional = reason == Refusal::PreloadOff;
                 let pending;
+                let report;
                 {
                     let Ok(mut state) = state.lock() else {
                         continue;
@@ -800,6 +822,10 @@ fn loader_loop(
                         continue;
                     }
                     entry.loading = false;
+                    // Skip and continue: this sound streams from disk and the
+                    // loader takes the next job. The line is reported once — a
+                    // repeated attempt with the same verdict stays quiet.
+                    report = !intentional && entry.refused != Some(reason);
                     if !intentional {
                         entry.refused = Some(reason);
                     }
@@ -808,11 +834,8 @@ fn loader_loop(
                     }
                     pending = std::mem::take(&mut entry.pending_play);
                 }
-                if !intentional {
-                    let _ = events.send(PlaybackEvent::Refused {
-                        id: job.id,
-                        message,
-                    });
+                if report {
+                    let _ = events.send(PlaybackEvent::Refused { id: job.id, reason });
                 }
                 if pending {
                     let Some((_, gain)) = playback_snapshot(&state, job.id) else {
@@ -866,7 +889,7 @@ fn loader_loop(
                         } else if let Some(refusal) = refusal {
                             let _ = events.send(PlaybackEvent::Refused {
                                 id: job.id,
-                                message: refusal.message(),
+                                reason: refusal,
                             });
                         }
                         if pending {
@@ -1390,11 +1413,12 @@ mod tests {
         };
         let pinned = Some(policy::PROCESS_CEILING);
 
+        // The ceiling is measured once per pass, so dropping our own buffers
+        // cannot move the verdict: the pass must not evict anything for it.
         let victims = plan_evictions(usage, &lru(&resident), MIB, pinned, |_| false);
-        assert_eq!(
-            victims,
-            vec![1, 2],
-            "every freeable buffer is dropped before refusing"
+        assert!(
+            victims.is_empty(),
+            "a process-ceiling refusal must not empty the cache"
         );
         assert_eq!(
             policy::admit(
@@ -1407,6 +1431,104 @@ mod tests {
             ),
             Err(Refusal::ProcessCeiling)
         );
+    }
+
+    /// B1: one file that can never fit must not take the cache — and with it the
+    /// rest of a preload batch — down with it.
+    #[test]
+    fn an_unfittable_sound_leaves_the_resident_cache_alone() {
+        let engine = Engine::new(1.0, 1.0, 0.0);
+        let frame = Arc::new(vec![0.0f32; 96_000]); // one second, stereo
+        let base = Instant::now();
+
+        let mut entries = HashMap::new();
+        for id in 0..3u64 {
+            let mut entry = Playable::new(PathBuf::from(format!("{id}.wav")), 1.0, 0.0);
+            entry.samples = Some(frame.clone());
+            entry.last_used = base - Duration::from_secs(100 - id);
+            entries.insert(id, entry);
+        }
+        let state = Mutex::new(entries);
+
+        // Larger than one sound may ever be, so no eviction can help.
+        let admission = evict_to_fit(&state, &engine, policy::PER_SOUND_RETAIN_BYTES + 1, 99);
+        assert_eq!(admission, Admission::Refused(Refusal::TooLarge));
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state
+                .values()
+                .filter(|entry| entry.samples.is_some())
+                .count(),
+            3,
+            "a refusal that eviction cannot fix must not drop a single buffer"
+        );
+    }
+
+    /// B1: the loader keeps going. A sound that cannot be kept is skipped (it
+    /// streams), the sounds after it still preload, and the skip is reported once.
+    #[test]
+    fn a_preload_batch_keeps_going_after_a_sound_that_cannot_fit() {
+        let dir = temp_dir("batch");
+        let first = dir.join("first.wav");
+        let too_long = dir.join("too-long.wav");
+        let last = dir.join("last.wav");
+        write_wav(&first, 1);
+        write_wav(&too_long, 40);
+        write_wav(&last, 1);
+
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine);
+        playback.register(41, first, 1.0, 0.0);
+        playback.register(42, too_long, 1.0, 0.0);
+        playback.register(43, last, 1.0, 0.0);
+
+        // What the RAM pill does: retain everything, then ask for it.
+        for id in [41, 42, 43] {
+            playback.set_retain(id, true);
+            playback.ensure_loaded(id);
+        }
+
+        let start = Instant::now();
+        let mut loaded = Vec::new();
+        let mut refused = Vec::new();
+        while start.elapsed() < Duration::from_secs(10) && (loaded.len() < 2 || refused.is_empty())
+        {
+            for event in playback.poll_events() {
+                match event {
+                    PlaybackEvent::Loaded { id, .. } => loaded.push(id),
+                    PlaybackEvent::Refused { id, .. } => refused.push(id),
+                    _ => {}
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        loaded.sort_unstable();
+        assert_eq!(
+            loaded,
+            vec![41, 43],
+            "the sounds around the skipped one must still preload"
+        );
+        assert_eq!(refused, vec![42], "only the unfittable sound is refused");
+        assert_eq!(playback.cache_usage().sounds, 2);
+        assert!(playback.info(42).refused);
+        assert!(!playback.info(42).loaded);
+
+        // Asking again with the same verdict must not report it twice.
+        playback.set_retain(42, true);
+        playback.ensure_loaded(42);
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !playback
+                .poll_events()
+                .iter()
+                .any(|event| matches!(event, PlaybackEvent::Refused { .. })),
+            "a skipped sound is logged once, not once per attempt"
+        );
+
+        drop(playback);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
