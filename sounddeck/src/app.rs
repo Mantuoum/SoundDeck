@@ -10,7 +10,7 @@ use eframe::egui::{
 };
 
 use crate::audio::engine::{
-    AudioEvent, DeviceRoute, Engine, Slot, SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB,
+    clamp_gain_db, AudioEvent, DeviceRoute, Engine, Slot, SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB,
 };
 use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
@@ -121,6 +121,12 @@ const MODAL_MARGIN_COMPACT: i8 = 12;
 /// enough for the action row and a target combobox without wrapping.
 const CONFIRM_MODAL_WIDTH: f32 = 460.0;
 
+/// Body width of the per-sound trim dialog: the slider plus its numeric field.
+const GAIN_MODAL_WIDTH: f32 = 380.0;
+/// The trim dialog's numeric field: wide enough for a signed value with its unit.
+const GAIN_FIELD_W: f32 = 96.0;
+const GAIN_FIELD_H: f32 = 30.0;
+
 /// Default file name an export offers.
 const DEFAULT_BUNDLE_NAME: &str = "sounddeck-config.json";
 
@@ -140,9 +146,12 @@ const MAX_STATUS_ENTRIES: usize = 200;
 /// Hotkey pill text for a sound that has no binding yet.
 const HOTKEY_UNBOUND_LABEL: &str = "Set hotkey";
 
-/// One click of the per-sound trim stepper (FR-5.3.17). The range itself lives
-/// with the audio engine, where the trim is turned into a gain.
-const GAIN_STEP_DB: f32 = 1.0;
+/// One step of the per-sound trim dialog (FR-5.3.17): the slider snaps to it and
+/// the numeric field rounds to it. The range itself lives with the audio engine,
+/// where the trim is turned into a gain.
+const GAIN_DIALOG_STEP_DB: f32 = 0.5;
+/// The dialog's slider range: the engine's own limits, never a copy of them.
+const GAIN_DIALOG_RANGE: std::ops::RangeInclusive<f32> = SOUND_GAIN_MIN_DB..=SOUND_GAIN_MAX_DB;
 
 const DEVELOPER_NAME: &str = "Mantum";
 
@@ -329,6 +338,48 @@ struct RenameState {
     focus: bool,
 }
 
+/// Open per-sound trim dialog. `db` is the pending value: the slider and the
+/// numeric field both write it, and nothing reaches the sound until OK
+/// (FR-5.3.17). `text` is the field's buffer, which may hold what the user is
+/// typing — including something that is not a number yet.
+struct GainState {
+    sound_id: u64,
+    db: f32,
+    text: String,
+    focus: bool,
+}
+
+impl GainState {
+    fn new(sound_id: u64, gain_db: f32) -> Self {
+        // Snapped on open, so the dialog shows exactly the value OK would
+        // commit: a hand-edited trim (off the step grid) is normalised on sight
+        // rather than changing silently when the user presses OK.
+        let db = snap_gain_db(gain_db);
+        Self {
+            sound_id,
+            db,
+            text: format_gain_db(db),
+            focus: true,
+        }
+    }
+
+    /// The slider and the field are one value: whatever the slider landed on is
+    /// what the field shows.
+    fn set_db(&mut self, db: f32) {
+        self.db = snap_gain_db(db);
+        self.text = format_gain_db(self.db);
+    }
+
+    /// The field was edited. A number is taken (clamped and snapped); anything
+    /// else leaves the pending value alone, so garbage never commits and never
+    /// panics.
+    fn edit_text(&mut self) {
+        if let Some(db) = parse_gain_db(&self.text) {
+            self.db = db;
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RenameTarget {
     Sound(u64),
@@ -408,8 +459,8 @@ enum Action {
     Locate(u64),
     ShowInExplorer(u64),
     Volume(u64, f32),
-    /// Per-sound trim in dB (FR-5.3.17).
-    Gain(u64, f32),
+    /// Opens the per-sound trim dialog (FR-5.3.17).
+    SetGain(u64),
     DragStart {
         id: u64,
         size: Vec2,
@@ -477,6 +528,8 @@ pub struct App {
     /// Global stop-all binding, parsed from settings.
     stop_all: Option<Hotkey>,
     renaming: Option<RenameState>,
+    /// Open per-sound trim dialog; its value is pending until OK.
+    gaining: Option<GainState>,
     deleting: Option<DeleteLibraryState>,
     /// A validated config bundle awaiting confirmation (A5).
     importing: Option<ImportState>,
@@ -679,6 +732,7 @@ impl App {
             capture: None,
             stop_all,
             renaming: None,
+            gaining: None,
             deleting: None,
             importing: None,
             confirm_reset: false,
@@ -1001,13 +1055,9 @@ impl App {
                         self.mark_dirty();
                     }
                 }
-                Action::Gain(id, gain_db) => {
-                    if let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) {
-                        sound.gain_db = gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB);
-                        // Same live path as a volume move: a sounding voice takes
-                        // the new product immediately.
-                        self.playback.set_gain(id, sound.gain_db);
-                        self.mark_dirty();
+                Action::SetGain(id) => {
+                    if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
+                        self.gaining = Some(GainState::new(id, sound.gain_db));
                     }
                 }
                 Action::DragStart { id, size } => {
@@ -1042,6 +1092,20 @@ impl App {
             }
         }
         ctx.request_repaint();
+    }
+
+    /// The one write path for a sound's trim: clamp, hand the new product to a
+    /// sounding voice, schedule the save. The dialog only supplies a dB value —
+    /// the conversion stays in `engine::effective_gain` (FR-5.3.17).
+    fn set_sound_gain(&mut self, id: u64, gain_db: f32) {
+        let Some(sound) = self.sounds.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        sound.gain_db = clamp_gain_db(gain_db);
+        // Same live path as a volume move: a sounding voice takes the new
+        // product immediately.
+        self.playback.set_gain(id, sound.gain_db);
+        self.mark_dirty();
     }
 
     fn play_sound(&mut self, id: u64) {
@@ -3751,6 +3815,7 @@ impl App {
     fn modals(&mut self, ctx: &egui::Context) {
         self.capture_modal(ctx);
         self.rename_modal(ctx);
+        self.gain_modal(ctx);
         self.delete_library_modal(ctx);
         self.import_modal(ctx);
         self.reset_modal(ctx);
@@ -4635,6 +4700,121 @@ impl App {
         }
     }
 
+    /// The per-sound trim dialog (FR-5.3.17). A value editor, not a live
+    /// control: the slider and the numeric field only edit `GainState::db`, and
+    /// OK is the one thing that reaches the sound — Cancel, Esc, the header X
+    /// and a backdrop click leave the trim untouched.
+    fn gain_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut gain) = self.gaining.take() else {
+            return;
+        };
+        // A sound can leave the board while the dialog is open (undo, import
+        // swap): there is nothing to trim then, so the dialog just closes.
+        let Some(name) = self
+            .sounds
+            .iter()
+            .find(|sound| sound.id == gain.sound_id)
+            .map(|sound| sound.name.as_str())
+        else {
+            return;
+        };
+
+        let mut close = false;
+        let mut commit = false;
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            close = true;
+        }
+
+        let content = self.content_rect;
+        modal_shell(
+            ctx,
+            content,
+            Id::new("gain_modal"),
+            GAIN_MODAL_WIDTH,
+            MODAL_MARGIN,
+            &mut close,
+            |ui, dismiss| {
+                modal_header(ui, "Set gain", Id::new("gain_close"), dismiss);
+                ui.add_space(6.0);
+                ui.add(
+                    egui::Label::new(RichText::new(name).size(13.0).color(theme::muted()))
+                        .truncate(),
+                );
+                ui.add_space(10.0);
+
+                // Slider and field are one value: whichever moves, `gain.db`
+                // follows. Nothing is applied while dragging.
+                let mut db = gain.db;
+                ui.spacing_mut().slider_width = ui.available_width() - 4.0;
+                let slider = ui.add(
+                    egui::Slider::new(&mut db, GAIN_DIALOG_RANGE)
+                        .step_by(GAIN_DIALOG_STEP_DB as f64)
+                        .fixed_decimals(1)
+                        .show_value(false),
+                );
+                if slider.changed() {
+                    gain.set_db(db);
+                }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Gain").size(12.5).color(theme::muted()));
+                    let field = ui.add_sized(
+                        [GAIN_FIELD_W, GAIN_FIELD_H],
+                        TextEdit::singleline(&mut gain.text).horizontal_align(Align::RIGHT),
+                    );
+                    if gain.focus {
+                        field.request_focus();
+                        gain.focus = false;
+                    }
+                    if field.changed() {
+                        gain.edit_text();
+                    }
+                    // Leaving the field rewrites it from the pending value, so
+                    // what stays on screen is always a value OK would commit.
+                    if field.lost_focus() {
+                        gain.text = format_gain_db(gain.db);
+                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            commit = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} to {}, {} dB steps",
+                        format_gain_db(SOUND_GAIN_MIN_DB),
+                        format_gain_db(SOUND_GAIN_MAX_DB),
+                        GAIN_DIALOG_STEP_DB
+                    ))
+                    .size(11.5)
+                    .color(theme::faint()),
+                );
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if accent_button(ui, "OK", Vec2::new(90.0, 32.0)).clicked() {
+                        commit = true;
+                    }
+                    if ghost_button(ui, "Cancel", Vec2::new(90.0, 32.0)).clicked() {
+                        *dismiss = true;
+                    }
+                });
+            },
+        );
+
+        if commit {
+            // A number in the field wins (the user may have typed and pressed OK
+            // without leaving it); otherwise the pending slider value stands.
+            let db = parse_gain_db(&gain.text).unwrap_or(gain.db);
+            self.set_sound_gain(gain.sound_id, db);
+            return;
+        }
+        if !close {
+            self.gaining = Some(gain);
+        }
+    }
+
     fn log_modal(&mut self, ctx: &egui::Context) {
         if !self.show_log {
             return;
@@ -4800,6 +4980,7 @@ impl App {
         // Modal state owns the keyboard; each modal handles its own keys.
         if self.capture.is_some()
             || self.renaming.is_some()
+            || self.gaining.is_some()
             || self.deleting.is_some()
             || self.importing.is_some()
             || self.confirm_reset
@@ -6512,35 +6693,6 @@ fn sound_item(
     rect
 }
 
-/// The per-sound trim row: −, the signed value, +, and a reset once it is not
-/// unity. Clicks step by [`GAIN_STEP_DB`] and keep the menu open, so trimming a
-/// loud file takes one visit. Cards and rows share it via `sound_context_menu`.
-fn gain_row(ui: &mut Ui, sound: &Sound, actions: &mut Vec<Action>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
-        if tiny_button_with_id(ui, Id::new(("gain-down", sound.id)), "\u{2212}").clicked() {
-            actions.push(Action::Gain(sound.id, sound.gain_db - GAIN_STEP_DB));
-        }
-        ui.label(
-            RichText::new(format_gain_db(sound.gain_db))
-                .size(11.5)
-                .color(theme::text())
-                .monospace(),
-        );
-        if tiny_button_with_id(ui, Id::new(("gain-up", sound.id)), "+").clicked() {
-            actions.push(Action::Gain(sound.id, sound.gain_db + GAIN_STEP_DB));
-        }
-        // The reset appears only when it would do something.
-        if sound.gain_db.abs() > 0.001
-            && tiny_button_with_id(ui, Id::new(("gain-reset", sound.id)), "reset")
-                .on_hover_text("Back to 0.0 dB")
-                .clicked()
-        {
-            actions.push(Action::Gain(sound.id, 0.0));
-        }
-    });
-}
-
 fn sound_context_menu(
     ui: &mut Ui,
     sound: &Sound,
@@ -6557,7 +6709,20 @@ fn sound_context_menu(
         ui.close_menu();
     }
     ui.separator();
-    gain_row(ui, sound, actions);
+    // One entry opens the trim dialog; the current value stays readable beside
+    // it, the way the old stepper row showed it (FR-5.3.17).
+    ui.horizontal(|ui| {
+        if ui.button("Set gain...").clicked() {
+            actions.push(Action::SetGain(sound.id));
+            ui.close_menu();
+        }
+        ui.label(
+            RichText::new(format_gain_db(sound.gain_db))
+                .size(11.5)
+                .color(theme::muted())
+                .monospace(),
+        );
+    });
     ui.separator();
     if ui.button("Rename...").clicked() {
         actions.push(Action::Rename(sound.id));
@@ -6786,15 +6951,15 @@ fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> 
 }
 
 fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
-    tiny_button_with_id(ui, Id::new(("tiny", text)), text)
-}
-
-/// [`tiny_button`] with an explicit id, for a row whose label is shared by more
-/// than one button in the frame (the per-sound gain stepper).
-fn tiny_button_with_id(ui: &mut Ui, id: Id, text: &str) -> egui::Response {
     let response =
         ui.add(Button::new(RichText::new(text).size(11.5).color(theme::muted())).frame(false));
-    pressable(ui, id, &response, theme::RADIUS_SM, 0.0);
+    pressable(
+        ui,
+        Id::new(("tiny", text)),
+        &response,
+        theme::RADIUS_SM,
+        0.0,
+    );
     response
 }
 
@@ -6978,6 +7143,28 @@ fn format_gain_db(db: f32) -> String {
     } else {
         // Signed on purpose: the sign carries the meaning (boost or trim).
         format!("{db:+.1} dB")
+    }
+}
+
+/// Snap a trim to the dialog's step and to the engine's range, so every value
+/// the dialog can produce is one the slider can also show (FR-5.3.17).
+fn snap_gain_db(db: f32) -> f32 {
+    let snapped = (db / GAIN_DIALOG_STEP_DB).round() * GAIN_DIALOG_STEP_DB;
+    // `-0.0 == 0.0`, so this also keeps the field from reading "-0.0".
+    clamp_gain_db(if snapped == 0.0 { 0.0 } else { snapped })
+}
+
+/// The trim dialog's numeric field, parsed: `None` for anything that is not a
+/// finite number (the dialog then keeps its pending value instead of committing
+/// garbage); a number is clamped into the range and snapped to a step. The unit
+/// is optional, so the field's own `"+3.0 dB"` text round-trips.
+fn parse_gain_db(text: &str) -> Option<f32> {
+    let number = text.trim().trim_end_matches(['d', 'D', 'b', 'B']).trim();
+    let db = number.parse::<f32>().ok()?;
+    if db.is_finite() {
+        Some(snap_gain_db(db))
+    } else {
+        None
     }
 }
 
@@ -8106,5 +8293,74 @@ mod tests {
         assert_eq!(format_gain_db(3.0), "+3.0 dB");
         assert_eq!(format_gain_db(-3.0), "-3.0 dB");
         assert_eq!(format_gain_db(0.01), "0.0 dB");
+    }
+
+    /// The dialog's math: a slider position lands on a 0.5 dB step inside the
+    /// engine's range, and every step survives a round trip (a drifting snap
+    /// would walk the handle away from the cursor).
+    #[test]
+    fn the_gain_dialog_snaps_to_half_db_steps() {
+        assert_eq!(snap_gain_db(0.24), 0.0);
+        assert_eq!(snap_gain_db(0.3), GAIN_DIALOG_STEP_DB);
+        assert_eq!(snap_gain_db(-0.3), -GAIN_DIALOG_STEP_DB);
+        assert_eq!(snap_gain_db(3.24), 3.0);
+        assert_eq!(snap_gain_db(3.26), 3.5);
+        assert_eq!(snap_gain_db(99.0), SOUND_GAIN_MAX_DB);
+        assert_eq!(snap_gain_db(-99.0), SOUND_GAIN_MIN_DB);
+        assert_eq!(snap_gain_db(f32::NAN), 0.0);
+        assert_eq!(snap_gain_db(f32::INFINITY), 0.0);
+
+        let mut db = SOUND_GAIN_MIN_DB;
+        while db <= SOUND_GAIN_MAX_DB {
+            assert_eq!(snap_gain_db(db), db, "a step must not drift: {db}");
+            db += GAIN_DIALOG_STEP_DB;
+        }
+    }
+
+    /// The numeric field: a number is taken (clamped and snapped), anything else
+    /// is refused, so garbage never commits and never panics.
+    #[test]
+    fn the_gain_field_parses_numbers_and_refuses_garbage() {
+        assert_eq!(parse_gain_db("3"), Some(3.0));
+        assert_eq!(parse_gain_db("+3.0 dB"), Some(3.0));
+        assert_eq!(parse_gain_db("  -2.5db "), Some(-2.5));
+        assert_eq!(parse_gain_db("-2.6"), Some(-2.5), "snapped, not truncated");
+        assert_eq!(parse_gain_db("40"), Some(SOUND_GAIN_MAX_DB));
+        assert_eq!(parse_gain_db("-40"), Some(SOUND_GAIN_MIN_DB));
+
+        for garbage in ["", " ", "abc", "-", "+", "3 dB dB", "1e999", "NaN"] {
+            assert_eq!(parse_gain_db(garbage), None, "{garbage:?}");
+        }
+
+        // Whatever the field shows is a value it accepts back.
+        for db in [SOUND_GAIN_MIN_DB, -0.5, 0.0, 0.5, SOUND_GAIN_MAX_DB] {
+            assert_eq!(parse_gain_db(&format_gain_db(db)), Some(db));
+        }
+    }
+
+    /// The dialog edits a copy: the slider and the field only move the pending
+    /// value, which is why Cancel can leave the sound untouched.
+    #[test]
+    fn the_gain_dialog_keeps_its_value_pending() {
+        let mut gain = GainState::new(7, -3.0);
+        assert_eq!(gain.text, "-3.0 dB", "the field opens on the current trim");
+
+        gain.set_db(1.7);
+        assert_eq!(gain.db, 1.5, "the slider snaps to a step");
+        assert_eq!(gain.text, "+1.5 dB", "the field follows the slider");
+
+        gain.text = "abc".to_string();
+        gain.edit_text();
+        assert_eq!(gain.db, 1.5, "garbage leaves the pending value alone");
+
+        gain.text = "40".to_string();
+        gain.edit_text();
+        assert_eq!(gain.db, SOUND_GAIN_MAX_DB, "a number is clamped");
+
+        // A trim stored off the step grid is normalised on open, so the dialog
+        // never commits a value it did not show.
+        let stored = GainState::new(9, -7.3);
+        assert_eq!(stored.db, -7.5);
+        assert_eq!(stored.text, "-7.5 dB");
     }
 }

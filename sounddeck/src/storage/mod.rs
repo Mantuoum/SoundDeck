@@ -13,7 +13,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::engine::{SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB};
+use crate::audio::engine::clamp_gain_db;
 use crate::model::Layout;
 
 pub const SETTINGS_VERSION: u32 = 2;
@@ -318,8 +318,9 @@ impl LibrariesFile {
                     next_sound = next_sound.max(sound.id.saturating_add(1));
                 }
                 sound.volume = finite_or(sound.volume, 1.0).clamp(0.0, 1.0);
-                sound.gain_db =
-                    finite_or(sound.gain_db, 0.0).clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB);
+                // The trim range lives with the engine (FR-5.3.17); a file
+                // written before the range shrank loads at the new floor.
+                sound.gain_db = clamp_gain_db(sound.gain_db);
                 if sound.name.trim().is_empty() {
                     sound.name = "Untitled sound".to_string();
                 }
@@ -741,12 +742,16 @@ mod tests {
                         ..sound(2, "quiet")
                     },
                     SoundConfig {
+                        gain_db: -20.0,
+                        ..sound(3, "old-floor")
+                    },
+                    SoundConfig {
                         gain_db: f32::NAN,
-                        ..sound(3, "nan")
+                        ..sound(4, "nan")
                     },
                     SoundConfig {
                         gain_db: -7.5,
-                        ..sound(4, "kept")
+                        ..sound(5, "kept")
                     },
                 ],
             }],
@@ -755,9 +760,13 @@ mod tests {
 
         let sounds = &file.libraries[0].sounds;
         assert_eq!(sounds[0].gain_db, 12.0);
-        assert_eq!(sounds[1].gain_db, -24.0);
-        assert_eq!(sounds[2].gain_db, 0.0, "a hand-edited NaN becomes unity");
-        assert_eq!(sounds[3].gain_db, -7.5, "an in-range trim survives");
+        assert_eq!(sounds[1].gain_db, -12.0, "the floor is -12 dB now");
+        assert_eq!(
+            sounds[2].gain_db, -12.0,
+            "a trim stored under the old -24 dB floor loads at the new one"
+        );
+        assert_eq!(sounds[3].gain_db, 0.0, "a hand-edited NaN becomes unity");
+        assert_eq!(sounds[4].gain_db, -7.5, "an in-range trim survives");
     }
 
     #[test]

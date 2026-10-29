@@ -18,8 +18,10 @@ const MIX_CHUNK_FRAMES: usize = 240; // 5 ms
 const FADE_IN_FRAMES: f32 = 120.0; // 2.5 ms
 const FADE_OUT_FRAMES: f32 = 240.0; // 5 ms
 /// Per-sound trim range: cut a loud file, or lift a quiet one. Loudness is
-/// managed here instead of by re-encoding the file (FR-5.3.17).
-pub const SOUND_GAIN_MIN_DB: f32 = -24.0;
+/// managed here instead of by re-encoding the file (FR-5.3.17). These two are
+/// the only range definition: storage clamps to them, the gain dialog's slider
+/// is built from them, and [`clamp_gain_db`] applies them.
+pub const SOUND_GAIN_MIN_DB: f32 = -12.0;
 pub const SOUND_GAIN_MAX_DB: f32 = 12.0;
 /// Attempts at starting the mixer thread before audio is declared dead. One
 /// immediate retry covers a transient OS refusal; beyond that the environment is
@@ -942,6 +944,20 @@ fn db_to_gain(db: f32) -> f32 {
     10.0f32.powf(db.clamp(-60.0, 12.0) / 20.0)
 }
 
+/// A stored trim clamped to [`SOUND_GAIN_MIN_DB`]..=[`SOUND_GAIN_MAX_DB`], with
+/// `NaN`/infinity becoming unity so a hand-edited file cannot poison a voice.
+///
+/// One definition for every consumer (storage load, the gain dialog, the live
+/// change path and [`effective_gain`]) — nothing else may clamp the trim itself
+/// (FR-5.3.17).
+pub fn clamp_gain_db(gain_db: f32) -> f32 {
+    if gain_db.is_finite() {
+        gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB)
+    } else {
+        0.0
+    }
+}
+
 /// The one conversion from a sound's stored level to the gain its voices carry:
 /// the linear volume (`0..=1`) times the per-sound dB trim.
 ///
@@ -954,12 +970,7 @@ pub fn effective_gain(volume: f32, gain_db: f32) -> f32 {
     } else {
         0.0
     };
-    let db = if gain_db.is_finite() {
-        gain_db.clamp(SOUND_GAIN_MIN_DB, SOUND_GAIN_MAX_DB)
-    } else {
-        0.0
-    };
-    volume * db_to_gain(db)
+    volume * db_to_gain(clamp_gain_db(gain_db))
 }
 
 /// A voice gain the mixer can multiply with: never negative, never NaN. Values
@@ -1541,6 +1552,28 @@ mod loop_tests {
         assert_eq!(effective_gain(f32::NAN, 6.0), 0.0);
         assert_eq!(effective_gain(1.5, 0.0), 1.0);
         assert!(effective_gain(1.0, f32::INFINITY).is_finite());
+    }
+
+    /// The conversion is pinned by value: changing the trim range (or adding a
+    /// second multiply anywhere) would move the level a stored sound plays at,
+    /// and this test is what refuses that (FR-5.3.17).
+    #[test]
+    fn effective_gain_keeps_its_pinned_value() {
+        // 0.8 volume at a -3 dB trim is 0.8 × 10^(-3/20).
+        assert!((effective_gain(0.8, -3.0) - 0.566_357).abs() < 1e-5);
+        // The floor is -12 dB, so an old -20 dB trim plays at the floor.
+        assert!((effective_gain(1.0, -20.0) - effective_gain(1.0, -12.0)).abs() < 1e-6);
+        assert!((effective_gain(1.0, -12.0) - 0.251_189).abs() < 1e-5);
+    }
+
+    #[test]
+    fn clamp_gain_db_is_the_one_range_clamp() {
+        assert_eq!(SOUND_GAIN_MIN_DB, -12.0);
+        assert_eq!(clamp_gain_db(-20.0), SOUND_GAIN_MIN_DB);
+        assert_eq!(clamp_gain_db(30.0), SOUND_GAIN_MAX_DB);
+        assert_eq!(clamp_gain_db(-7.5), -7.5);
+        assert_eq!(clamp_gain_db(f32::NAN), 0.0);
+        assert_eq!(clamp_gain_db(f32::INFINITY), 0.0);
     }
 
     #[test]
