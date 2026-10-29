@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Document | `SPEC.md` |
-| Describes | SoundDeck 0.4.0 |
+| Describes | SoundDeck 0.5.0 |
 | Status | Living document; update it with the code |
 | Keywords | **MUST**, **SHOULD**, **MAY** as defined in RFC 2119 |
 
@@ -111,13 +111,15 @@ specification:**
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
 | FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
-| FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. |
+| FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. A sound the cache cannot admit MUST NOT evict anything, MUST be skipped while the rest of the preload batch continues, and its refusal MUST be logged once per attempt. |
 | FR-5.3.12 | A sound that is not resident MUST stream from disk through a bounded channel. It MUST NOT be fully decoded into memory in order to be played once. |
 | FR-5.3.13 | The stream channel MUST default to 8 chunks of 1024 frames (~170 ms) and MUST be raised to 16 only if the `--stats` underrun counter or a listening test shows cracks. |
 | FR-5.3.14 | SoundDeck MUST NOT create, rename, move or delete audio files. Renaming a card or removing a sound changes the board only. |
 | FR-5.3.15 | Every configured file MUST be held open for reading with delete sharing denied, so Windows refuses rename and delete until the sound leaves the board or the app exits. Reads and writes by other processes stay allowed. |
 | FR-5.3.16 | If the volume disappears, a resident sound MUST play from memory; a non-resident sound MUST be reported as missing, with no panic and no loss of the other sounds. |
-| FR-5.3.17 | A sound MUST have a trim in dB, `-24..=+12` (default `0`), applied as a linear multiplier on top of its stored volume. The trim MUST apply when the sound starts and to a voice that is already sounding when it changes; a boost that would exceed full scale is clipped by the mix, never rejected. |
+| FR-5.3.17 | A sound MUST have a trim in dB, `-12..=+12` (default `0`), applied as a linear multiplier on top of its stored volume. The trim MUST apply when the sound starts and to a voice that is already sounding when it changes; a boost that would exceed full scale is clipped by the mix, never rejected. `engine::clamp_gain_db` is the only range clamp (used by `effective_gain`, storage normalisation and the dialog); a value stored under the old `-24` floor loads clamped at `-12`. |
+| FR-5.3.18 | The trim MUST be set from the sound's context menu (**Set gain…**, between Stop and Rename), which opens a dialog with a slider and an editable numeric field over `-12..=+12 dB` in 0.5 dB steps, plus OK and Cancel. Nothing is applied before OK: Cancel, `Esc`, the close button and a backdrop click MUST leave the trim untouched. Non-numeric input MUST be ignored (the pending value stands) and an out-of-range number MUST clamp. The sign MUST always be shown (`+3.0 dB`, `0.0 dB`). |
+| FR-5.3.19 | **Show in Explorer** MUST select the file through the shell namespace (`SHParseDisplayName` + `SHOpenFolderAndSelectItems`), not an `explorer.exe /select,` command line, so spaces, commas, unicode and long paths all land on the file. It MUST run off the UI thread and report failures in the activity log; when the file is gone it MUST open the containing folder. |
 
 ### 5.4 Playback
 
@@ -131,6 +133,7 @@ specification:**
 | FR-5.4.6 | Starting a sound MUST be independent of decoding: a disk-backed sound decodes off the UI thread. |
 | FR-5.4.7 | Active sounds MUST expose progress in `0..=1` for the card progress line once their total duration is known; while it is unknown (a streamed sound's first trigger) no progress line MUST be drawn. |
 | FR-5.4.8 | "Stop all" MUST fade out every voice and MUST be available from the tray menu. |
+| FR-5.4.9 | The sidebar stop-all widget MUST stop every voice when its body is clicked and log `Stopped all sounds`; its hotkey pill MUST keep capture-on-click and clear-on-right-click. The widget MUST only be shown while the stop-all hotkey is enabled. |
 
 ### 5.5 Outputs and routing
 
@@ -144,6 +147,8 @@ specification:**
 | FR-5.5.6 | Peak metering MUST be measured where the device consumes samples, so it reflects what is heard. |
 | FR-5.5.7 | A slot whose device disappears MUST stop consuming, MUST report the failure, and MUST be restartable without restarting the app. While the configured device is absent the slot MUST play on a substitute — the Windows default, else the first device (the Cable prefers a `cable`/`virtual` device, and never the Monitor's) — and MUST say so in the log; a substitution made while the app is running MUST keep the configured endpoint, so the device is used again when it is re-plugged and the devices are refreshed. |
 | FR-5.5.8 | Settings MUST show whether each output is ready, with the last error when it is not, and MUST name the device that is actually playing when it is a substitute for the configured one. |
+| FR-5.5.9 | Choosing **None (silent)** for a slot MUST close that slot's render thread, so it is silent at once and still silent after a relaunch; the choice MUST be stored (the label as the slot's device name, with an empty id) rather than re-resolved to a device. The substitute rule (FR-5.5.7) MUST only apply to a *configured* device that is gone, never to a slot the user silenced. |
+| FR-5.5.10 | Right-clicking the master gain slider MUST reset it to `0.0 dB` without starting a drag or changing the output levels in any other way. |
 
 ### 5.6 Looping track
 
@@ -164,13 +169,14 @@ specification:**
 | FR-5.7.1 | Hotkeys MUST be global and MUST work while the window is hidden or unfocused. |
 | FR-5.7.2 | A hotkey MUST NOT swallow the keystroke: the focused application still receives it. |
 | FR-5.7.3 | Key auto-repeat MUST trigger at most once per physical press. |
-| FR-5.7.4 | Hotkeys MUST be assignable through a capture dialog that reads the keyboard directly, with `Esc` to cancel. |
+| FR-5.7.4 | Hotkeys MUST be assignable through a capture dialog that reads the keyboard directly, with `Esc` to cancel. A chord the shell consumes before the window sees it (`Win+…`) MUST still bind: the dialog derives it from the physical keyboard with the same key tables the hook matches with. |
 | FR-5.7.5 | The capture dialog MUST refuse to bind a combination already used by another sound in the active library or by the stop-all hotkey, naming the current owner. A conflict introduced outside the dialog MUST resolve the same way every time — the stop-all hotkey outranks sounds and the first sound in tab order outranks later ones — with the losing sound's hotkey cleared exactly as if it had no hotkey (FR-5.3.5) and a log entry naming the sound. |
 | FR-5.7.6 | Hotkeys MUST be clearable without removing the sound. |
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
 | FR-5.7.9 | An optional global stop-all hotkey MUST be off by default, own a sidebar widget above the meters when enabled, pass the key through, and work while hidden. |
 | FR-5.7.10 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
+| FR-5.7.11 | A blocklist of chords MUST never be bindable: the Windows editing set (`Ctrl+C/V/X/A/Z/Y`), the board's own shortcuts (`Ctrl+O/F/L/,,/Q`, `Delete`, `Space`, `F2`) and `Alt+F4`. The capture dialog MUST refuse one with exactly `<chord> is a system shortcut and can't be used` and save nothing. A blocked chord that reaches the config by hand MUST be unbound at load (sound or stop-all) with the sound kept and a warning logged. |
 
 ### 5.8 Window and tray
 
@@ -206,13 +212,15 @@ specification:**
 
 | ID | Requirement |
 | --- | --- |
-| FR-5.10.1 | Themes MUST be Markdown files in `config/themes/<id>.md` containing a heading and a `\| token \| value \|` table. |
+| FR-5.10.1 | Themes MUST be Markdown files in `config/themes/<id>.md` containing a heading and a `\| token \| value \|` table. The five embedded palettes MUST be seeded only while the folder holds no Markdown file, and an existing file is never overwritten. |
 | FR-5.10.2 | The file stem is the theme id; the heading is the display name. |
 | FR-5.10.3 | A missing or invalid token MUST fall back to the Graphite value. |
 | FR-5.10.4 | Markdown, not JSON: users must be able to copy a theme and edit colours in a text editor. |
 | FR-5.10.5 | Palette colours MUST come from tokens. No hardcoded colours outside the theme module, except the documented `Color32::WHITE` on the active layout segment. |
 | FR-5.10.6 | Motion MUST honour both the user setting and the OS animation preference. |
 | FR-5.10.7 | Theme reload MUST NOT accumulate font atlases. |
+| FR-5.10.8 | Reload MUST re-resolve the active theme, so an edited colour repaints without reselecting it. A stored id whose file was renamed or deleted MUST fall back to Graphite with a warning naming the id and the available ids, and the stored id MUST be corrected to `graphite`. |
+| FR-5.10.9 | The theme list MUST label an entry `"<name> (<id>)"` when the heading does not spell the id, so two files with the same heading stay distinguishable. |
 
 ### 5.11 Persistence
 
@@ -222,7 +230,7 @@ specification:**
 | FR-5.11.2 | Both files are written atomically with one `.bak` each. |
 | FR-5.11.3 | A corrupt file MUST be preserved as `.corrupt` and replaced by defaults, with a warning in the log. |
 | FR-5.11.4 | Unknown fields MUST be ignored on read; missing fields MUST take defaults. |
-| FR-5.11.5 | All values MUST be normalised on load (volumes to `0..=1`, gain to `0..=12`). |
+| FR-5.11.5 | All values MUST be normalised on load (volumes to `0..=1`, gain to `0..=12`, per-sound trims to the FR-5.3.17 range). |
 | FR-5.11.6 | The legacy `sounddeck.json` MUST be imported once and kept as `sounddeck.v1.json.bak`. |
 | FR-5.11.7 | Serialization failures MUST be reported, never written as an empty file. |
 
@@ -247,7 +255,7 @@ specification:**
 | `theme` | string | `"graphite"` | Theme id |
 | `layout` | `grid` \| `list` | `grid` | Board layout |
 | `monitor_device` / `cable_device` | string? | null | WASAPI endpoint ids |
-| `monitor_name` / `cable_name` | string? | null | Friendly names, used to re-resolve |
+| `monitor_name` / `cable_name` | string? | null | Friendly names, used to re-resolve; `None (silent)` with an empty id is the stored silence choice (FR-5.5.9) |
 | `monitor_volume` / `cable_volume` | f32 | 1.0 | `0..=1` |
 | `master_gain_db` | f32 | 0.0 | `0..=12` |
 | `link_volumes` | bool | true | Sliders move together |
@@ -260,6 +268,7 @@ specification:**
 | `minimize_to_tray` | bool | false | false = taskbar |
 | `show_gain_slider` | bool | true | Sidebar gain |
 | `show_ram_state` | bool | false | Reveals RAM/disk chips, counts and the toolbar pill (FR-5.9.9) |
+| `cycle_tabs_ctrl_tab` | bool | false | Cycle libraries with `Ctrl+Tab` / `Ctrl+Shift+Tab` (off: the chords pass through untouched) |
 | `stop_all_hotkey_enabled` | bool | false | Enables the stop-all hotkey and its sidebar widget |
 | `stop_all_hotkey` | string? | null | Label form, e.g. `"Ctrl+Alt+S"` |
 | `window_size` | `[f32;2]`? | null | Parsed for old files, unused |
@@ -290,8 +299,10 @@ specification:**
 ```
 
 `ram: null` means "inherit `preload_hotkey_sounds`". `gain_db` is a trim in
-`-24..=+12` dB applied on top of `volume` (FR-5.3.17); a file that predates it is
-unity. Paths inside the app folder are stored relative; anything outside is absolute.
+`-12..=+12` dB applied on top of `volume` (FR-5.3.17), set from the **Set gain…**
+dialog (FR-5.3.18); a value written under the old `-24` floor loads clamped at `-12`,
+and a file that predates the field is unity. Paths inside the app folder are stored
+relative; anything outside is absolute.
 
 ### 6.3 `config/themes/<id>.md`
 
@@ -330,9 +341,9 @@ unity. Paths inside the app folder are stored relative; anything outside is abso
 
 | Screen | Contents |
 | --- | --- |
-| **Board** | Title bar (logo, library tabs, window buttons), toolbar (search, RAM pill), grid or list of sounds, sidebar (outputs, meters, loop card, Settings). |
+| **Board** | Title bar (logo, library tabs, window buttons), toolbar (search, RAM pill), grid or list of sounds, sidebar (scrollable: outputs + link, gain, stop-all, loop; pinned footer: credit, meter, Settings). |
 | **Settings** | Left rail (Back + four tabs), content column, same title/status bars. |
-| **Modals** | Hotkey capture, rename (sound or library), delete library, import confirmation, reset-all confirmation, activity log. |
+| **Modals** | Hotkey capture, rename (sound or library), delete library, set gain (trim), import confirmation, reset-all confirmation, activity log. |
 
 ### 7.2 Layout invariants
 
@@ -356,9 +367,10 @@ top-level layer, so it cannot draw over modals or popups.
 | UI-1 | Modals use `egui::Modal` with a transparent backdrop: the board stays visible, input behind is blocked, and nothing is dimmed. |
 | UI-2 | All close buttons are the same control: dark X, red fill and red X on hover. |
 | UI-3 | Cards and rows share the same chrome: name, hotkey pill, RAM chip, missing state, volume bar, progress line, context menu. |
-| UI-4 | Volume uses one logarithmic curve everywhere; the bar fill and percentage are derived from the same value. |
-| UI-5 | Drop target highlights only while a drag is over the window. |
+| UI-4 | Volume uses one logarithmic curve everywhere; the bar fill and percentage are derived from the same value. The bar has no icon, and it consumes the scroll wheel on every frame the pointer is over it, so the page never scrolls while a value is being adjusted. |
+| UI-5 | Drop target highlights only while a drag is over the window. Library tabs are drop targets too: the tab under the pointer tints, and dropping a card there moves the sound to that library (the same move as the context menu, and a drop on the sound's own library is a no-op) without changing the active library. |
 | UI-6 | Status messages are terse and never stack duplicates for the same event: a repeated message refreshes the newest entry instead of adding another, and the log keeps the last 200 entries. |
+| UI-7 | Modals centre on the content area currently shown (board or Settings), not on the window, so a modal opened from Settings is not offset toward the sidebar. |
 
 ### 7.4 Keyboard (application-local)
 
@@ -374,6 +386,12 @@ top-level layer, so it cannot draw over modals or popups.
 | `Delete` | Remove selected |
 | `Space` | Play selected |
 | `F2` | Rename selected |
+| `Ctrl+Tab` | Next library (opt-in: Settings → Window, `cycle_tabs_ctrl_tab`, default off) |
+| `Ctrl+Shift+Tab` | Previous library (same opt-in; both wrap around) |
+
+`Ctrl+Tab` and `Ctrl+Shift+Tab` are ignored while a text field has focus or a modal is
+open. While the setting is off the chords are never consumed, so they keep whatever
+meaning the focused application gives them.
 
 ## 8. Non-functional requirements
 
@@ -445,7 +463,7 @@ Rules that enforce them:
 | NFR-8.5.2 | `cargo test` MUST pass; pure logic (paths, normalisation, migration, volume curve, hotkey table, ring/wake behaviour) MUST be covered. |
 | NFR-8.5.3 | Every module carries a `//!` header stating its responsibility. |
 | NFR-8.5.4 | `ARCHITECTURE.md` MUST be updated with any change to threads, storage or the frame loop. |
-| NFR-8.5.5 | 181 tests as of 0.4.0. |
+| NFR-8.5.5 | 218 tests as of 0.5.0. |
 
 ### 8.6 Accessibility
 
@@ -470,6 +488,9 @@ Rules that enforce them:
 | Tray unavailable | `minimize_to_tray` disabled in Settings; minimize falls back to the taskbar. |
 | Keyboard hook blocked | Log entry; app remains usable with the board and tray menu. |
 | Hotkey conflict | The capture dialog refuses the combination and names its owner; a conflict found on load, tab switch or stop-all change unbinds the losing sound (hotkey cleared, RAM off) and logs it. |
+| Blocked chord | Capture refuses it with `<chord> is a system shortcut and can't be used` and saves nothing; one found in the config is unbound at load (sound or stop-all), the sound is kept, and a warning is logged (FR-5.7.11). |
+| RAM preload refused | The sound streams from disk and the log says so once per attempt: `"<name>" is too big; Streaming from disk` for the size caps (per-sound bytes, 32 MB, 125 MB ceiling), `"<name>" is too long; Streaming from disk` over 30 s, `"<name>" has no audio` for an empty decode. Nothing is evicted for a refusal the cache cannot pay for (FR-5.3.11). |
+| Theme id missing | Graphite is used, a warning names the missing id and the available ones, and the stored id is corrected to `graphite` (FR-5.10.8). |
 
 ## 10. Non-goals
 

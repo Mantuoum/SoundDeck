@@ -25,21 +25,28 @@ live in `config/` next to the executable.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
 - **Looping track** (opt-in): enable it in Settings → Playback to show a loop
-  player under the meters. One file, streamed from disk, repeating forever, with
+  player in the sidebar above the pinned meter. One file, streamed from disk, repeating forever, with
   its own volume independent of Monitor/Cable. The loop can be routed to Monitor,
   Cable, both, or neither. It plays underneath sound effects and keeps playing through
   `Stop all`, library switches, and tray minimize. No hotkey, no seeking, no progress
   bar.
 - Global hotkeys (`Alt+1`, `Ctrl+Shift+S`, `F8`, ...). The key **passes through** to
-  the focused app, so `Shift+T` also types `T` while playing the assigned sound.
+  the focused app, so `Shift+T` also types `T` while playing the assigned sound. Win
+  chords bind from the capture dialog like any other chord (`Win+X` included) — Windows
+  still acts on them, which is the point of pass-through.
+- **System chords are refused**: `Ctrl+C/V/X/A/Z/Y`, `Ctrl+O/F/L/,,/Q`, `Delete`, `Space`,
+  `F2` and `Alt+F4` come back as `Ctrl+C is a system shortcut and can't be used` and
+  nothing is saved. A blocked chord hand-edited into `libraries.json` is dropped at
+  startup with a warning — the sound stays, it just has no hotkey.
 - **One owner per combination**: the hotkey picker refuses a chord that is already used
   by another sound or by `Stop all`, and names the owner. If a duplicate appears another
   way (a hand-edited config, or a new stop-all key), the sound loses its hotkey with a
   warning in the log — it still plays on click, it just has no hotkey and no RAM preload
   any more.
 - **Stop-all hotkey** (off by default): enable it in Settings → Playback, then set a
-  key on the sidebar widget above the meters. Clicking the widget stops everything;
-  the key works while hidden and still reaches the focused app.
+  key on the sidebar widget above the meters. Clicking the **body** of that card stops
+  everything (the pill on its right captures on click, clears on right-click); the key
+  works while hidden and still reaches the focused app.
 - **Long sounds stream from disk**: anything over 30 s, or that does not fit the
   preload budget, streams with constant memory. No file is fully decoded just to be
   played once.
@@ -57,14 +64,17 @@ live in `config/` next to the executable.
   device is missing, that output plays on the Windows default (the cable prefers a
   device named "cable"/"virtual") and both the log and Settings → Output devices say
   which one is playing; the chosen device is remembered, so it comes back when it is
-  plugged in again.
+  plugged in again. **None (silent)** is a real choice, not a missing device: that slot
+  goes quiet immediately, stays quiet after a restart, and is never swapped for another
+  device behind your back.
 - **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
   outputs. Right-click the slider to reset it to `0.0 dB`. It can be hidden from the
   sidebar in Settings → Window.
-- **Per-sound trim** — right-click a sound → `Gain`: step it with `−`/`+` by 1 dB
-  (`-24` to `+12 dB`), `reset` back to `0.0 dB`. It multiplies the sound's own volume,
-  so a loud file can sit under everything else without touching its file or the output
-  volumes. Changing it while the sound plays is heard immediately; a boost past full
+- **Per-sound trim** — right-click a sound → **Set gain…**: a slider and a numeric field
+  from `-12` to `+12 dB` in 0.5 dB steps, applied when you press OK (Cancel, `Esc`, the X
+  or a click outside changes nothing). It multiplies the sound's own volume, so a loud
+  file can sit under everything else without touching its file or the output volumes.
+  Changing it while the sound plays is heard as soon as you press OK; a boost past full
   scale is clipped, not refused.
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one full-width
   bar per output, zone colours, and a peak-hold marker.
@@ -102,7 +112,8 @@ The rail on the left switches tabs; the status bar stays available.
 - **Playback** — enable the looping track, choose its file, route it to Monitor and/or
   Cable; load hotkey sounds into RAM; enable the stop-all hotkey.
 - **Appearance** — theme, reload themes, Animate UI.
-- **Window** — minimize-to-tray and whether the sidebar shows the master-gain slider.
+- **Window** — minimize-to-tray, whether the sidebar shows the master-gain slider, and
+  **Cycle tabs with Ctrl+Tab** (off by default).
 - **About** — version, config folder, developer details, and the **Data** group.
 
 Each of Playback, Appearance and Window ends with a **Defaults** card: **Reset** puts that
@@ -149,11 +160,13 @@ dropdown first. There is no Save button; changes apply immediately.
 | `Delete` | Remove selected |
 | `Space` | Play selected |
 | `F2` | Rename selected |
+| `Ctrl+Tab` | Next library — only when **Cycle tabs with Ctrl+Tab** is on (Settings → Window, off by default) |
+| `Ctrl+Shift+Tab` | Previous library — same switch, both wrap around |
 
 ## Looping track
 
-- Enable **Looping track** in Settings → Playback. The card appears under the peak
-  meter; until a file is chosen, Play is disabled.
+- Enable **Looping track** in Settings → Playback. The card appears in the sidebar's
+  scroll area (above the pinned meter); until a file is chosen, Play is disabled.
 - Controls are Play/Stop and the volume bar on the loop card; **Choose file** lives in
   Settings → Playback. Start and stop are instant.
 - It has its own volume bar, independent of Monitor/Cable. Master gain still applies
@@ -208,7 +221,9 @@ Global hotkeys use a low-level keyboard hook, so they do not need administrator
 rights. The hook **always passes the key through** to the focused app: `Shift+T`
 types `T` and plays the sound. Auto-repeat fires once per press.
 
-**Win chords can be bound, but Windows acts on them too.** Because nothing is swallowed,
+**Win chords can be bound, but Windows acts on them too.** They bind from the capture
+dialog like any other chord (the dialog reads the physical keyboard for them, because
+Windows claims the chord before the window ever sees it). Because nothing is swallowed,
 `Win+A` still opens Action Center and `Win+D` still shows the desktop while the sound
 plays. Use Ctrl/Alt/plain keys for anything you press live.
 

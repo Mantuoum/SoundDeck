@@ -16,7 +16,8 @@ Delete text that stopped being true instead of appending corrections; log entrie
 one line.
 
 Log: `2026-10-28 — created (codebase review); 0.4.0 iteration syncs` · `2026-10-29 — QA
-workflow (checklist + test material)`. Details live in git history.
+workflow (checklist + test material)` · `2026-10-29 — 0.5.0 round (shell worker, blocked
+chords, trim dialog, theme id/name)`. Details live in git history.
 
 ## 1. Repository layout
 
@@ -31,7 +32,7 @@ SoundBoard/
     ├── Cargo.toml, build.rs   assets/   ARCHITECTURE.md  ← deps, icon/fonts, dev guide
     └── src/
         ├── main.rs       boot: single instance, window, --diag/--stats
-        ├── app.rs        all UI state + actions (~5.5k lines)
+        ├── app.rs        all UI state + actions (~8.7k lines)
         ├── model.rs      paths, extensions, formatting
         ├── hotkeys.rs    keyboard hook, hidden window, tray
         ├── stats.rs      --stats counters
@@ -91,6 +92,7 @@ Files convert once at decode; devices convert once at output. SFX go to *both* o
 | `sounddeck-render-0/1` | `wasapi::spawn_render` | per active device | ring → device buffer |
 | `sounddeck-hotkeys` | `HotkeyService::start` | always | hidden window, keyboard hook, tray |
 | `sounddeck-devices` | `wasapi::list_devices` | one call | COM device enumeration |
+| `sounddeck-shell` | `App::spawn_shell_call` | one per Explorer call | resolves a shell item and opens/selects it, so a dead share cannot stall a frame |
 
 ### 2.3 Boot (`main.rs`)
 
@@ -105,26 +107,31 @@ Files convert once at decode; devices convert once at output. SFX go to *both* o
    size deliberately not persisted) → `App::new` → `eframe::run_native`.
 
 `App::new`: unpack config → install theme (seeds `config/themes/*.md` from embedded
-palettes on first run) → parse stop-all hotkey → build `sounds`/`libraries` + per-sound
-`search_key` → create `Engine` + `Playback`, register sounds → enumerate devices
-(Monitor = default output; Cable = first "cable"/"virtual"-named device) → start
-hotkey/tray service → record JSON fingerprints (so the first save rewrites nothing).
+palettes only while the folder holds no Markdown) → parse stop-all hotkey → build
+`sounds`/`libraries` + per-sound `search_key` → create `Engine` + `Playback`, register
+sounds → enumerate devices (Monitor = default output; Cable = first "cable"/"virtual"-named
+device) → start hotkey/tray service → record JSON fingerprints (so the first save rewrites
+nothing).
 
 ### 2.4 Storage (`storage/`)
 
 Two versioned JSON files in `config/`: `settings.json` (theme, layout, device ids +
-names, volumes, master gain dB, link flag, loop settings, toggles, stop-all hotkey) and
+names, volumes, master gain dB, link flag, loop settings, toggles, stop-all hotkey,
+`cycle_tabs_ctrl_tab`) and
 `libraries.json` (libraries = tabs; sounds nested with id, name, path, hotkey, volume,
 `gain_db`, `ram`). `ram: null` inherits the global preload switch. Paths inside the app folder are
 stored **relative** (portable); outside, absolute. Audio files are referenced, never
-copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files).
+copied (SPEC FR-5.3.14: the app never creates/renames/deletes audio files). A silenced
+slot stores the label `None (silent)` as its device **name** with an empty id, so a
+restart cannot re-resolve it to a device.
 
 - **Atomic write** (`io.rs`): write `.tmp` → rotate current → `.bak` → rename `.tmp`
   in (copy-retry when Windows holds a lock).
 - **Recovery order**: main → `.tmp` (promote) → `.bak` (copy back) → defaults. A
   corrupt main file is preserved as `.corrupt` (FR-5.11.3).
-- **Normalize** on every load: clamp volumes 0..1 / gain 0..12 dB, unique non-zero ids,
-  fill empty names, bump `version`.
+- **Normalize** on every load: clamp volumes 0..1, master gain 0..12 dB and every
+  per-sound trim through `engine::clamp_gain_db`, unique non-zero ids, fill empty names,
+  bump `version`.
 - **Migration** (`migrate.rs`): legacy `sounddeck.json` imported once; `settings.json`
   written last as the "migration finished" marker so a crash retries next launch;
   legacy renamed `sounddeck.v1.json.bak` (`.bak.2`, `.3`, … if taken — backups and
@@ -150,9 +157,11 @@ starts `None` for a streamed sound, so the card draws no progress line until a
 `sounddeck-probe` worker has read it (FR-5.4.7).
 
 A voice always carries **one linear gain**: `engine::effective_gain(volume, gain_db)` is
-the only place the stored volume and the dB trim are multiplied (FR-5.3.17). Trigger,
-deferred play, and both live changes (`set_volume`, `set_gain`) read it from the same
-snapshot; the engine itself only knows linear gain.
+the only place the stored volume and the dB trim are multiplied (FR-5.3.17), and
+`engine::clamp_gain_db` is the only range clamp (`-12..=+12`) — storage, the gain dialog
+and the live paths all call it. Trigger, deferred play, and both live changes
+(`set_volume`, `set_gain`) read it from the same snapshot; the engine itself only knows
+linear gain.
 
 **`play(id)` trigger algorithm** (UI *or* hotkey thread):
 1. Samples resident? → `engine.play` instantly.
@@ -165,12 +174,20 @@ snapshot; the engine itself only knows linear gain.
 **Loader thread** (serialized jobs): snapshot (abort if `generation` changed) →
 `policy::route()` → Stream (mark `refused` with reason) or Preload (decode unlocked →
 `evict_to_fit` LRU, never evicting a playing sound → admit or mark `BudgetFull`).
-Events `Loaded/Failed/Refused/Warning` are polled by the UI.
+**Skip-and-continue**: a refusal the cache cannot pay for (`Refusal::evictable()` is
+false — per-sound bytes, the process ceiling, a bad decode) evicts **nothing**, that
+sound streams, and the batch carries on; the line is reported once per verdict, and
+`set_retain` is a no-op when the flag did not change (the tab-switch sync re-asserts it
+every switch), so re-asserting the same retention cannot re-decode or re-log it. Events
+`Loaded/Failed/Refused/Warning` are polled by the UI; `Refused`
+carries `{ id, reason }` and the UI supplies the name.
 
 **Policy caps** (`policy.rs`): ≤ 30 s per sound, ≤ 32 MiB and ≤ 16 sounds resident,
 process commit ≤ 125 MiB (fail **closed** if the query fails). Admission decisions and
 their explanations come from one `policy::Refusal` type — extend it, never re-derive
-the rules. Only sounds with a
+the rules. `Refusal::message(name)` owns every user-visible sentence (the size caps all
+read `"<name>" is too big; Streaming from disk`), and `evictable()` owns what may be paid
+for out of the cache. Only sounds with a
 hotkey **and** in the active library are RAM-eligible (FR-5.3.5); `sync_active_library`
 re-derives this on every tab switch.
 
@@ -194,7 +211,8 @@ sharing denied — Windows refuses rename/delete while it is on the board (FR-5.
   (2.5 ms fade-in / 5 ms fade-out, FR-5.4.2) into Monitor → **copy Monitor → Cable**
   (this is how "same sound on both devices" works) → add loop track per routing flags
   (consumed even when both off, so position is kept) → master gain + clamp ±1.0 →
-  push into each `Ring` with per-output volume.
+  push into each `Ring` with per-output volume, and only into a ring that reports a
+  consumer (`has_consumers()`), so a closed slot is never fed.
 - **Exclusive playback** (FR-5.4.1, **settled decision**): `Engine::play` fades out
   every current voice before pushing the new one. Sounds never overlap. The loop track
   lives outside the voice list and is untouched by play/stop-all.
@@ -208,7 +226,10 @@ sharing denied — Windows refuses rename/delete while it is on the board (FR-5.
   it is gone, substitutes the Windows default (Cable: a `cable`/`virtual` name first,
   never the Monitor's) and reports it in the log + Settings (`device_note`, FR-5.5.8).
   The stored id/name survive; `refresh_devices`/`retune_slot` refresh a stale name and
-  save only when something changed.
+  save only when something changed. **`None (silent)` is a route of `None`**: that slot's
+  render thread is shut down and the ring cleared, so it is silent immediately and after a
+  relaunch, and `route_slot` returns no device for it instead of substituting one
+  (FR-5.5.9).
 
 ### 2.7 Hotkeys & tray (`hotkeys.rs`)
 
@@ -227,11 +248,16 @@ focused app receives every triggering keystroke. Never "fix" this.
 Hotkeys are strings (`"Ctrl+Shift+S"`, `"F8"`) parsed via `Hotkey::parse` against the
 single `KEYS` const table — parsing, display and egui mapping all read it (never add a
 second mapping). Win chords are bindable: egui has no Win modifier flag, so the capture
-path reads the physical Win key state, and pass-through means Windows also acts on the
-chord (README warns). Duplicate chords are **refused** at capture; conflicts introduced
-elsewhere are unbound deterministically (new binding wins; `chord_owner` /
-`duplicate_sounds` in `hotkeys.rs` own the rules, FR-5.7.5). Only the active library's
-hotkeys are bound; switching tabs rebinds. The hook is best-effort against elevated windows/AV (FR-5.7.8 — documented,
+path folds the physical Win key into the chord (`chord_from_egui`) and, when the shell
+swallowed the chord and egui saw no event, derives it from the physical keyboard
+(`held_chord`, same `KEYS`/`Mods::from_keys` tables the hook matches with); pass-through
+means Windows also acts on the chord (README warns). Duplicate chords are **refused** at
+capture; conflicts introduced elsewhere are unbound deterministically (new binding wins;
+`chord_owner` / `duplicate_sounds` in `hotkeys.rs` own the rules, FR-5.7.5). `BLOCKED_CHORDS`
++ `blocked_reason` own the never-bindable set, and `parse_bindable` is the config-facing
+parser — so a hand-edited blocked chord is unbound at load (sound or stop-all) with a
+warning, the sound kept (FR-5.7.11). Only the active library's hotkeys are bound;
+switching tabs rebinds. The hook is best-effort against elevated windows/AV (FR-5.7.8 — documented,
 not hidden). Tray: double-click show/hide, right-click menu (Show/Hide, Stop all,
 Quit), tooltip updated every 3 s.
 
@@ -244,8 +270,9 @@ functions **collect `Action` values** (play/remove/rename/move/drag…) which
 checker stays happy. Singleton chrome (sidebar, settings) mutates directly by design.
 
 **Frame lifecycle** (`update`): detect Settings transition → debounce search
-(`search` → `filter_needle`, 120 ms) → `poll_events` (playback/engine/hotkey channels)
-→ close/minimize handling → `global_shortcuts` (typing-guarded) → edge-resize
+(`search` → `filter_needle`, 120 ms) → `poll_events` (playback/engine/hotkey channels plus
+the `explorer_tx` shell-log channel) → close/minimize handling → `global_shortcuts`
+(typing-guarded) → edge-resize
 hit-testing → `tick` (loop state, save debounce, meters, frame pacing) → paint title
 bar + (board | settings) → chrome, drop overlay, drag ghost, modals. When hidden
 (tray): `hidden_tick` only, zero painting — the window is *minimized*, never
@@ -254,11 +281,15 @@ bar + (board | settings) → chrome, drop overlay, drag ghost, modals. When hidd
 Frame pacing: 33 ms moving, 100 ms settings+audio, 1 s idle (the idle-CPU guarantee,
 NFR-8.1.x).
 
-**Board**: sidebar (Monitor/Cable device + volume sliders + link, optional master gain
-0..+12 dB right-click-reset, peak meter, stop-all card, loop card, Settings button),
-toolbar (search, RAM pill), grid/list of the active library, cards/rows (name, hotkey
+**Board**: sidebar (scrollable: Monitor/Cable device + volume sliders + link → optional
+master gain 0..+12 dB right-click-reset → stop-all card → loop card; pinned footer: credit
+→ peak meter → Settings button), toolbar (search, RAM pill), grid/list of the active
+library, cards/rows (name, hotkey
 pill, RAM chip, missing state, log-curve volume bar, progress line — drawn only once the
-total duration is known — context menu). Delete removes with one-slot undo (`Ctrl+Z`).
+total duration is known — context menu with **Set gain…** between Stop and Rename). The
+toolbar and the grid both size from `board_content_width(ui)` (available width minus the
+floating scroll-bar gutter), so the RAM pill and the last column share a right edge at any
+window width. Delete removes with one-slot undo (`Ctrl+Z`).
 Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
 remove them from the board (files untouched); cancel leaves everything alone.
 
@@ -270,25 +301,40 @@ always fresh while the allocations are not. Stable per-sound strings are cached 
 after any name/path/hotkey change, never re-derive them while painting.
 
 **Modals** (transparent backdrop, `modal_header` + red-hover close): hotkey capture
-(reads raw keyboard events, Esc cancels), rename, delete library, import confirmation,
+(reads raw keyboard events, Esc cancels), rename, set gain (slider + numeric field,
+`-12..=+12` in 0.5 dB steps, applied on OK only), delete library, import confirmation,
 reset-all confirmation, activity log (last 200 entries, a repeated message refreshes the
-newest instead of stacking). While any of them is open, `global_shortcuts` stands down.
+newest instead of stacking). They all anchor on `App::content_rect` — the rect the body
+was painted into — so one opened from Settings is centred on the settings content, not
+offset toward the sidebar. While any of them is open, `global_shortcuts` stands down (OS
+hotkeys still fire: pass-through).
 Outside modals, a focused text field suppresses every board shortcut (quit and Settings
-stay live).
+stay live). Tab drop targets live beside them: a card dragged over a library tab tints
+that tab, and the drop is a move with the context menu's semantics, without switching the
+active library.
 
 **Settings** (immediate save, no Apply): Playback (loop enable/file/level/routing,
 hotkey RAM, Show RAM state, stop-all hotkey), Appearance (theme + motion), Window
-(minimize-to-tray, gain slider visibility), About (version, config folder, links, Data:
+(minimize-to-tray, gain slider visibility, `Ctrl+Tab` cycling — `cycle_tabs_ctrl_tab`,
+default off), About (version, config folder, links, Data:
 export/import/reset all). The three field pages end with a Reset card
 (`Settings::reset_group`); About's Reset all is confirmed.
 
-**Themes** (`ui/theme*`): Markdown `config/themes/<id>.md`, `| token | hex |` table;
-invalid/missing token falls back to Graphite; 5 embedded palettes seed first run;
-runtime `RwLock<Palette>` → egui style. Radii constants `SM/MD/LG/XL`. Fonts: bundled
-Satoshi via `theme::ui_font`/`medium`; `theme::truncate` for ellipsis.
+**Themes** (`ui/theme*`): Markdown `config/themes/<id>.md`, `| token | hex |` table. The
+**file stem is the id** (what `settings.json` stores); the `# Heading` is the display
+**name**, and the dropdown labels an entry `"<name> (<id>)"` when the heading does not
+spell the id. Invalid/missing token falls back to Graphite; 5 embedded palettes seed the
+folder only while it holds no Markdown. `reload_from(dir)` is the test seam; reload
+re-resolves the active id (an edited colour repaints without reselecting) and a vanished id
+falls back to Graphite with a warning naming the id and the available ones, then the stored
+id is corrected to `graphite`. Runtime `RwLock<Palette>` → egui style. Radii constants
+`SM/MD/LG/XL`. Fonts: bundled Satoshi via `theme::ui_font`/`medium` (the sidebar credit
+uses `medium` at 12.5 px); `theme::truncate` for ellipsis.
 
 **Volume** (`ui/volume.rs`): stored linear 0..1, slider position logarithmic over
-−60…0 dBFS (one curve everywhere, UI-4 — never add a second). **Animation**
+−60…0 dBFS (one curve everywhere, UI-4 — never add a second). The bar has no icon and
+consumes the wheel on every frame the pointer is over it, so the page never scrolls while
+a value is being dragged or wheeled. **Animation**
 (`ui/anim.rs`): 60–90 ms tweens, gated on the user setting AND the OS animation flag.
 
 ---
@@ -306,12 +352,15 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 
 - **Downward only.** `audio/*` never references ui/storage/app; `ui/*` never touches
   engine/playback/storage state; `app.rs` is the wiring layer — behaviour goes to the
-  domain module, widgets to `ui/`. One deliberate exception: `storage` reads the
-  per-sound trim range (`SOUND_GAIN_MIN_DB`/`MAX_DB`) from `audio::engine`, because the
+  domain module, widgets to `ui/`. One deliberate exception: `storage` calls
+  `audio::engine::clamp_gain_db` (and reads `SOUND_GAIN_MIN_DB`/`MAX_DB`), because the
   clamp and the conversion must come from one definition (FR-5.3.17).
-- **One decision, one place**: RAM-vs-disk = `policy.rs`; missing-file = `Playback::info`;
+- **One decision, one place**: RAM-vs-disk = `policy.rs` (`route`/`Refusal::message`/
+  `evictable`); missing-file = `Playback::info`;
   volume curve = `ui/volume.rs`; per-sound level = `engine::effective_gain` (volume ×
-  dB trim). Cross-thread talk = channels drained on the UI thread.
+  dB trim) with `engine::clamp_gain_db` as the only range clamp; never-bindable chords =
+  `hotkeys::BLOCKED_CHORDS`; theme id = the file stem, theme name = the heading.
+  Cross-thread talk = channels drained on the UI thread.
 - Modules keep truthful `//!` headers. Parallel work only on disjoint modules;
   `app.rs`/`hotkeys.rs` always serially.
 
@@ -329,7 +378,9 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
   `ui.id().with((tag, id))` (no `enum as i32`); function names state side effects.
 - **UI**: cards/rows collect `Action`s (painting doesn't mutate; singleton chrome
   excepted). Reuse `sound_item`, `modal_shell`, `settings_*`, `hotkey_pill`,
-  `volume::bar`, `theme::truncate`, `press_overlay`. Colors = theme tokens only. Radii
+  `volume::bar`, `theme::truncate`, `press_overlay`. Board widths come from
+  `board_content_width(ui)` — never a bare `available_width()` — so the toolbar and the
+  grid stay aligned. Colors = theme tokens only. Radii
   SM/MD/LG/XL. Volumes/percentages only via `ui/volume.rs`. Fetch `theme::palette()`
   once per paint; theme locks go through `theme::read_lock`/`write_lock`.
 - **Storage**: settings field = struct + `Default` + `normalize()` clamp +
@@ -362,8 +413,9 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 | A file format | Symphonia feature → `model::SUPPORTED_EXTENSIONS` → dialog filter → test file |
 | Audio routing | `Engine` = devices/routes, `Mixer` = voices/loop/gains, `Ring` = producer→device boundary; nothing blocking on the mixer thread |
 | Hotkey behaviour | `hotkeys.rs`: `KEYS` table + `chord_owner`/`duplicate_sounds` (extend, never copy) → shared capture path in `app.rs` → SPEC §5.7 |
-| A modal | `modal_shell` + `modal_header` + `close_button`; no one-off backdrops |
+| A modal | `modal_shell(ctx, content_rect, …)` + `modal_header` + `close_button`; anchor on `App::content_rect`, no one-off backdrops |
 | A tray/menu item | `handle_menu_command` in `hotkeys.rs` |
+| A shell/Explorer call | `App::spawn_shell_call(label, job)` — the job returns `Result<(), String>` and runs on a `sounddeck-shell` worker; failures reach the activity log, the frame never waits. Never build an `explorer.exe` command line for a path |
 | A settings reset | field → the owning arm of `Settings::reset_group` (coverage test names any orphan) → side effect in `App::apply_config`; the page's Reset row follows `SettingsTab::group` |
 | Export/import data | `storage/bundle.rs` (stamps + `normalize()` + one `BundleError`) → UI only calls it; the board swap belongs to `App::apply_import` |
 
@@ -393,7 +445,7 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | Decision | Where |
 | --- | --- |
 | **Pass-through hotkeys**: the keystroke also reaches the focused app. Intentional. | SPEC FR-5.7.2 |
-| Win chords are bindable; because of pass-through, Windows also acts on them (README warns) | SPEC FR-5.7.2/5.7.10 |
+| Win chords are bindable; because of pass-through, Windows also acts on them (README warns) | SPEC FR-5.7.2/5.7.4/5.7.10 |
 | **Exclusive playback**: a trigger fades out all current voices. Intentional. | SPEC FR-5.4.1 |
 | SFX go to both outputs equally (per-sound routing = future item) | SPEC FR-5.5.5 |
 | Volumes stored linear, shown log (−60…0 dBFS); one curve | SPEC UI-4 |
@@ -407,8 +459,11 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | Missing sound: trigger logs an error; relink via context menu only | SPEC FR-5.3.6 |
 | Per-sound trim multiplies the stored volume via one helper (`engine::effective_gain`); voices stay linear, boosts clip at master | SPEC FR-5.3.17 |
 | A gone output device keeps its stored endpoint; the slot plays on a reported substitute | SPEC FR-5.5.7 |
+| **None (silent) is a closed slot**, not an unconfigured one: the render thread is shut down, the choice is stored, and no substitute is resolved for it | SPEC FR-5.5.9 |
+| Blocked chords (`BLOCKED_CHORDS`) are never bindable — refused at capture, unbound at load; the sound survives | SPEC FR-5.7.11 |
+| Theme **file stem = id** (what settings stores), `# Heading` = display name; a vanished id falls back to Graphite with a warning and the id is corrected | SPEC FR-5.10.2/5.10.8 |
 | No progress bar until duration is known | decided 2026-10-28 |
-| User `Graphite.md` shows alongside the built-in theme | decided 2026-10-28 |
+| A user `Graphite.md` **is** the built-in seed file (Windows names are case-insensitive; the stem is the id) — there is no "alongside" case | decided 2026-10-29 |
 
 Scope exclusions: SPEC §10 Non-goals. `plan.md` is the work list — implement items in
 order; parallel work only on disjoint file sets (`app.rs`/`hotkeys.rs` serial); mark

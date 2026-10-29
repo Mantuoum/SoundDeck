@@ -6,7 +6,6 @@ but not this application.
 
 - **User manual:** `README.md`
 - **Roadmap / decisions:** `../plan.md`
-- **Session handoff:** `../context.md`
 
 SoundDeck is a portable Windows soundboard: Rust, `eframe`/`egui` for the UI, WASAPI for
 output, Symphonia for decoding. There is no installer, database, webview, or background
@@ -49,6 +48,7 @@ service. Everything lives beside the executable.
 | WASAPI render | `spawn_render`, once per output | While the device is open | Pull the ring, convert to the device format, write WASAPI |
 | Hotkey/tray window | `HotkeyService::start` | App lifetime | Message-only window: hotkeys, tray, focus |
 | Device enumeration | `wasapi::list_devices` | One call | COM enumeration on a short-lived thread |
+| Shell call | `App::spawn_shell_call` | One per Explorer action | `SHParseDisplayName` + `SHOpenFolderAndSelectItems` off the frame; failures come back on the log channel (`explorer_tx`) |
 
 ### Preload cache and memory limits (`playback/policy.rs`, `playback/mod.rs`)
 
@@ -57,6 +57,17 @@ service. Everything lives beside the executable.
   streams from disk; the log says why.
 - Admission is LRU: the not-currently-playing buffer with the oldest `last_used`
   is dropped to make room. The playing sound is never evicted.
+- **Eviction only pays for cache caps.** `Refusal::evictable()` is true for
+  `SoundCap`/`ByteCap` only; a sound that is too big on its own, a process at its
+  ceiling, or a decoder that produced nothing is refused with **no victims**, so one
+  unfittable file cannot dump a preload batch that has already loaded (skip-and-continue).
+  The refusal is reported once per verdict and `set_retain` is a no-op when the flag did
+  not change (the tab-switch sync re-asserts it on every switch), so re-asserting the same
+  retention neither re-decodes nor re-logs it.
+- The refusal wording is `Refusal::message(name)` — the size caps read
+  `"<name>" is too big; Streaming from disk`, the 30 s cap `"<name>" is too long;
+  Streaming from disk`, an empty decode `"<name>" has no audio`. `PlaybackEvent::Refused`
+  carries `{ id, reason }`; the UI supplies the name.
 - A process commit ceiling (125 MB) is the last-resort valve; if the query fails,
   the cache fails closed and refuses to grow.
 - Everything that is not resident streams: one bounded channel (8 × 1024 frames,
@@ -165,6 +176,7 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `show_gain_slider` | Show the master-gain slider in the board sidebar |
 | `show_ram_state` | Reveal RAM/disk chips, counts and the toolbar pill (default off) |
 | `stop_all_hotkey_enabled` / `stop_all_hotkey` | Stop-all hotkey switch and its label form |
+| `cycle_tabs_ctrl_tab` | `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle libraries (default off; the chords pass through untouched) |
 
 `Settings::normalize()` clamps volumes, gain, trims/empties the loop path, and fills
 missing fields through `#[serde(default)]`. `LibrariesFile::normalize()` clamps each
@@ -186,8 +198,9 @@ sound's `volume` and `gain_db` and fixes ids and empty names.
 
 - Tabs are the array order. Sounds are nested; `library_id` is not stored.
 - `ram: null` means “inherit the global preload setting”.
-- `gain_db` is the per-sound trim (`clamped -24..=+12` on load); a file from before
-  the field is `0.0` through `#[serde(default)]`.
+- `gain_db` is the per-sound trim (clamped `-12..=+12` on load through
+  `audio::engine::clamp_gain_db`); a file from before the field is `0.0` through
+  `#[serde(default)]`, and a value written under the old `-24` floor loads at `-12`.
 - IDs are persisted sound IDs. `next_id` is derived from `max(id)+1`.
 
 ### Writes, backups, recovery (`storage/io.rs`)
@@ -238,7 +251,7 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 | `loading`, `pending_play` | Preload in flight / play when it finishes |
 | `error`, `missing` | Last decode/link error; existence checked at startup and on playback when not resident |
 | `lock` | Open read handle that denies delete/rename while the sound is on the board |
-| `refused` | Why the cache declined; cleared by Reload or toggling preload |
+| `refused` | Why the cache declined; cleared by Reload or toggling preload. A refusal the cache cannot pay for (`evictable()` false) evicts nothing and is reported once |
 | `duration` | Container duration for stream progress |
 | `probe_pending` | A probe worker is reading that duration right now (one per sound) |
 | `generation` | Invalidates stale loader results |
@@ -255,7 +268,8 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 - **Lock:** every configured file holds a read handle whose share mode omits
   delete. Windows therefore refuses rename/delete until the sound is removed from
   the board or the app exits. Decoders can still open the file.
-- The loader is a single thread reading a channel, so preload jobs are serialized.
+- The loader is a single thread reading a channel, so preload jobs are serialized, and
+  it moves on to the next job when one sound cannot be admitted (skip-and-continue).
 - `PlaybackEvent::{Loaded, Failed, Refused, Warning}` is polled by the UI.
 - Hotkeys call `Playback::play` from the hotkey thread; state is behind a `Mutex`.
 
@@ -339,7 +353,10 @@ full one), `Some(0..=1)` once the probe has reported the duration.
   perceived loudness. All callers use the same curve and percentage formatter.
 - Master gain is separate, `0..+12 dB`, applied to the whole mix; right-click resets.
 - The slim `volume::bar` supports click/drag and wheel; it consumes the scroll while
-  hovered.
+  hovered and carries no icon.
+- `audio::engine::clamp_gain_db` is the single range clamp (`-12..=+12`, NaN/inf → `0`):
+  `effective_gain`, `Settings`/`LibrariesFile::normalize` and the gain dialog all use it.
+  The dialog snaps to 0.5 dB steps and applies nothing before OK.
 
 ---
 
@@ -371,9 +388,17 @@ full one), `Some(0..=1)` once the probe has reported the duration.
   hide to the tray when enabled, otherwise the window stays in the taskbar. Showing
   from the tray restores, focuses and clears stale meter peaks.
 - Only the active library's hotkeys are bound. Win-key chords are bindable: egui carries
-  no Win modifier flag, so the capture path reads the physical Win key state. Mouse
-  buttons are unsupported; no administrator rights are needed. Because the hook passes
-  the key through, a Win chord also fires the Windows shortcut (the README says so).
+  no Win modifier flag, so the capture path folds the physical Win state into the chord
+  (`chord_from_egui`); when the shell swallowed the chord entirely and egui saw no event,
+  it derives the chord from the physical keyboard (`held_chord`) with the same
+  `KEYS`/`Mods::from_keys` tables the hook matches with. Mouse buttons are unsupported; no
+  administrator rights are needed. Because the hook passes the key through, a Win chord
+  also fires the Windows shortcut (the README says so).
+- `BLOCKED_CHORDS` (Windows editing set + the board's own shortcuts + `Alt+F4`) is never
+  bindable: `blocked_reason` gives the one message (`"<chord> is a system shortcut and
+  can't be used"`) that capture shows, and `parse_bindable` is the config-facing parser, so
+  a hand-edited blocked chord is unbound at load (sound or stop-all) through the normal
+  invalid-hotkey path, with the sound kept and a warning logged.
 
 ---
 
@@ -384,7 +409,7 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 `App::update` runs every frame:
 
 1. Detect Settings opening/closing; set fade timestamps and clear text focus.
-2. Poll playback/engine/hotkey events.
+2. Poll playback/engine/hotkey events and the shell-failure log channel.
 3. Handle close requests, global shortcuts, window-edge resize, `tick`.
 4. Draw the title bar and status bar.
 5. If Settings is open: left settings rail + content panel.
@@ -417,21 +442,27 @@ above-normal so audio still meets its deadlines.
 ### Board
 
 - **Title bar:** logo, library tabs, window buttons; draggable except over tabs.
-- **Sidebar:** Load sounds, layout switch, Monitor/Cable devices + volumes + link,
-  master gain (optional), peak meter, loop card (when enabled), Settings button.
-  Compact layout (<620 px sidebar height) hides labels, dB scale and credit.
+- **Sidebar:** scrollable part is Load sounds, layout switch, Monitor/Cable devices +
+  volumes + link, master gain (optional), stop-all card (when its hotkey is enabled),
+  loop card (when enabled); the footer below it is **pinned** (credit → peak meter →
+  Settings button) and never scrolls. Compact layout (<620 px sidebar height) hides
+  labels, dB scale and credit.
 - **Main page:** search toolbar + RAM pill, grid/list of the active library, empty/no
-  results states, drop handling.
+  results states, drop handling. The toolbar and the grid both size from
+  `board_content_width(ui)` (available width less the floating scroll-bar gutter), which
+  is what keeps the pill and the last column on one right edge.
 - **Cards/rows:** name, hotkey pill, RAM chip, missing state, volume bar, progress
-  line (only once the total duration is known), context menu (play, locate, reveal,
-  move, rename, remove).
+  line (only once the total duration is known), context menu (play, stop, **set gain…**,
+  locate, reveal, move, rename, remove).
 - **Actions:** cards/rows and the library bar push `Action` values; `handle_actions`
   drains one buffer per frame. Singleton chrome (sidebar, title bar, status bar,
   Settings, tray) mutates directly - wrapping a single `ComboBox` in an event gains
   nothing.
 - **Selection/search/drag:** search filters name/path; drag reorders or moves between
   libraries (the drop target is resolved by sound id, so a list that shifted mid-drag
-  cannot move the wrong sound); Delete/undo uses a one-slot `UndoDelete`.
+  cannot move the wrong sound); a library **tab** is a drop target too — it tints while a
+  drag is over it, the drop moves the sound with the context menu's semantics, and the
+  active tab is unchanged; Delete/undo uses a one-slot `UndoDelete`.
 
 ### Settings screen
 
@@ -442,7 +473,8 @@ above-normal so audio still meets its deadlines.
 - Layout metrics live in the `SETTINGS_*` consts (SPEC FR-5.9.8 / §7.2); rows stack
   below `SETTINGS_ROW_STACK_W`.
 - Playback owns loop enable/file, loop output routing and hotkey RAM; Appearance owns
-  theme/motion; Window owns minimize-to-tray and sidebar gain visibility; About owns
+  theme/motion; Window owns minimize-to-tray, sidebar gain visibility and `Ctrl+Tab`
+  cycling (`cycle_tabs_ctrl_tab`, default off); About owns
   version/config/dev plus the **Data** group (export, import, reset all settings).
 - Every page that owns fields ends with a **Defaults** card whose Reset restores that
   page's fields (`Settings::reset_group`, one field list per group in `storage/mod.rs`);
@@ -463,11 +495,13 @@ above-normal so audio still meets its deadlines.
 
 ### Modals
 
-Capture hotkey, rename, delete library, import confirmation, reset-all confirmation and
-activity log use `egui::Modal` with a **transparent** backdrop, so the board stays
-visible without a dim layer and input
-cannot leak through. They share `modal_header` + `close_button` (red hover), are centred
-over the board area, and take keyboard input directly where needed (hotkey capture).
+Capture hotkey, rename, set gain, delete library, import confirmation, reset-all
+confirmation and activity log use `egui::Modal` with a **transparent** backdrop, so the
+board stays visible without a dim layer and input cannot leak through. They share
+`modal_header` + `close_button` (red hover), are anchored on `App::content_rect` — the
+rect the body (board or Settings content) was painted into — so a dialog opened from
+Settings centres on the settings content instead of the window, and take keyboard input
+directly where needed (hotkey capture, the gain field).
 The delete-library dialog states the sound count and offers move-to-a-library,
 delete-the-sounds, or cancel; nothing is applied until a button is pressed. The import
 dialog states the incoming sound/library counts, and `Replace` is the only path into
@@ -480,10 +514,17 @@ top-level layer, so it can never draw over modals or popups.
 - `config/themes/<id>.md`: heading + `| token | value |` table.
 - Tokens: bg, panel, panel_deep, card, card_hover, field, border, border_soft, text,
   muted, faint, accent, purple, amber, red (optional `accent_soft`).
-- Missing/invalid token → Graphite's value. Filename stem = theme id; heading = display
-  name. `accent_soft` is derived when absent.
-- Startup installs the five embedded themes without overwriting existing files.
-- Reload is manual; an unknown active theme falls back to Graphite.
+- Missing/invalid token → Graphite's value. **The file stem is the id** (that is what
+  `settings.json` stores and every lookup matches); the `# Heading` is the display name.
+  `theme::available()` labels an entry `"<name> (<id>)"` when the heading does not spell
+  the id, so two files sharing a heading stay distinguishable. `accent_soft` is derived
+  when absent.
+- Seeding writes the five embedded palettes only while the folder holds **no** Markdown,
+  and never overwrites an existing file.
+- Reload is manual; `reload_from(dir)` is the test seam behind `reload()`. A reload
+  re-resolves the active id (an edited colour repaints without reselecting) and an
+  unknown id falls back to Graphite with a warning naming the id and the available ones;
+  the UI then corrects the stored id to `graphite`.
 - The runtime registry is a global `RwLock` palette; `apply_style` maps it to egui.
 - Radii: `SM=5`, `MD=8`, `LG=12`, `XL=14`; use these instead of literals.
 - Fonts: Satoshi regular/medium; `theme::ui_font` / `medium`; `truncate` for ellipsis.
@@ -534,11 +575,13 @@ curve. `set_slot_volume` applies the link rule. Master gain is dB-only and globa
 the sidebar row can be hidden in Settings → Window.
 All values are persisted immediately (debounced).
 
-A sound also carries a `gain_db` trim (`-24..=+12`, default `0`, in the context menu).
-`audio::engine::effective_gain(volume, gain_db)` is the only place the two are
-multiplied; `Playback::play` / `set_volume` / `set_gain` hand the engine that one
-linear gain, so a live trim step and a live slider move share one path. A boosted
-sound may exceed unity inside the mixer — the master stage clamps the mix.
+A sound also carries a `gain_db` trim (`-12..=+12`, default `0`), set from the context
+menu's **Set gain…** dialog (slider + numeric field, 0.5 dB steps, nothing applied before
+OK). `audio::engine::effective_gain(volume, gain_db)` is the only place the two are
+multiplied and `engine::clamp_gain_db` the only range clamp; `Playback::play` /
+`set_volume` / `set_gain` hand the engine that one linear gain, so a live trim change and a
+live slider move share one path. A boosted sound may exceed unity inside the mixer — the
+master stage clamps the mix.
 
 ### Loop
 
@@ -575,7 +618,8 @@ never touched by either action.
 - **Lock order:** UI → `Playback.state` → `Engine.mixer`; avoid the reverse. The
   encoder/decoder never calls back into the UI.
 - **Channels:** loader jobs, playback events, audio events, loop chunks, hotkey/tray
-  events. Channels are drained on the UI thread.
+  events, and the shell-failure log channel (`App::explorer_tx`, filled by
+  `sounddeck-shell` workers). Channels are drained on the UI thread.
 - **Generations:** loader results are ignored if the sound's generation changed while
   decoding (path change/reload).
 - **Exclusive voices:** only `mixer.voices`; the loop lives outside that list.
@@ -620,10 +664,10 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 181 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
+- 218 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
   validation, resampling (chunk invariance), loop streaming (wrap, stop, file release,
-  errors), mixer loop gain/wrap/routing, `effective_gain`, volume curve/clamps, hotkey
-  matching, and theme-file parsing.
+  errors), mixer loop gain/wrap/routing, `effective_gain`/`clamp_gain_db`, volume
+  curve/clamps, hotkey matching and the blocked-chord table, and theme-file parsing.
 - Tests use temporary directories named with the process/time; no user data.
 - `--diag` enumerates devices, opens Monitor/Cable, decodes a file, plays it, and
   prints WASAPI events.

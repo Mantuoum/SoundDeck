@@ -4,26 +4,44 @@ A small, portable Windows soundboard: two independent outputs, global hotkeys
 that still reach the focused app, and a streamed loop track. No installer, no
 services, no telemetry.
 
-## Download
+## How to Install
 
 Grab `SoundDeck-<version>-win64.zip` from
-[Releases](https://github.com/Mantuoum/SoundDeck/releases), extract it anywhere,
-and run `SoundDeck.exe`.
+[Releases](https://github.com/Mantuoum/SoundDeck/releases), Make a folder anywhere on your PC— name it whatever you want, extract the zip there using either [7zip](https://www.7-zip.org/) or Winrar and run `SoundDeck.exe`.
 
-## What it does
+## How to use
+
+Bro wot r u, A geezer or smth? u know how to use a soundboard ryt.
+
+- Step 1 - Launch exe
+- Step 2 - Import your sounds by dragging them into the window
+- Step 3 - Select sound devices (Usually Automatic)
+- Step 4 - Click to play sound ;P
+- Step 5 - Set hotkey cuz duhh
+
+## Features
 
 - **Two outputs** — Monitor and Cable, each with its own device and volume, plus a
   global dB master gain. Sound effects go to both; only the loop track is routed per
   output.
 - **Global hotkeys** — low-level keyboard hook that passes the key through, so
-  the game or app you are in still receives it. Bare keys (F1, `, NumPad5) are
-  allowed. A combination belongs to one sound only; Win chords work, but Windows acts
-  on them as well.
-- **Loop track** — streamed from disk, so a one-hour file costs no RAM.
+  the game or app you are in still receives it. Bare keys (F1, `,`, NumPad5) are
+  allowed. A combination belongs to one sound only. Win chords work, but Windows acts
+  on them as well — `Win+A` still opens Action Center while your sound plays.
+- **System chords are refused** — `Ctrl+C`, `Ctrl+V`, `Ctrl+Z`, `Space`, `Delete` and
+  friends come back as "Ctrl+C is a system shortcut and can't be used" instead of
+  quietly stealing your copy-paste.
+- **Loop track** — A background noise long track streamed from disk, so a one-hour file costs no RAM.
 - **Libraries** — grid or list, drag to reorder, search, per-sound volume and a
-  per-sound dB trim (`-24` to `+12 dB`) for files that are too loud or too quiet next
-  to the rest. Deleting a library asks whether its sounds move to another library or
+  per-sound dB trim (`-12` to `+12 dB`, set from right-click → **Set gain…**) for files
+  that are too loud or too quiet next to the rest. Drag a card onto another library tab
+  to move it there. Deleting a library asks whether its sounds move to another library or
   leave the board.
+- **Tab cycling** — `Ctrl+Tab` / `Ctrl+Shift+Tab` hops between libraries if you switch it
+  on in Settings → Window (off by default, because those chords mean something in your
+  browser too).
+- **Show in Explorer** — right-click → Show in Explorer lands on the file even when the
+  name is full of spaces, commas, emoji or is just stupidly long.
 - **Tray** — minimise to tray; sounds keep working while hidden.
 - **Backup** — export settings and libraries to one JSON file, and import it on
   another PC. Audio files stay where they are.
@@ -33,10 +51,9 @@ and run `SoundDeck.exe`.
 ## Requirements
 
 - Windows 10 or 11, 64-bit.
-- Any WASAPI output device. For routing into voice chat, install a virtual cable
-  and pick it as the Cable output. If a chosen device is unplugged, that output falls
-  back to the Windows default and names the substitute in the activity log; plug it
-  back in and use **Refresh devices** to return to it.
+- Any WASAPI output device. For routing into voice chat, install [VB Cable](https://vb-audio.com/Cable/) or [VAC](https://vac.muzychenko.net/en/) and pick it as the Cable output.
+- I'm not responsible for what audio sink software you use, I just gave you options.
+- If a chosen device is unplugged, that output falls back to the Windows default and names the substitute in the activity log; plug it back in and use **Refresh devices** to return to it.
 
 ## Build from source
 
@@ -76,5 +93,5 @@ The bundled Satoshi typeface is licensed under the SIL Open Font License; see
 
 ## Credits
 
-Built by [Mantum](https://github.com/Mantuoum). Inspired by
+Built by [Mantum](https://github.com/Mantuoum)— [Youtube](https://www.youtube.com/@Mantu_um). Inspired by
 [Soundux](https://github.com/Soundux/Soundux).
