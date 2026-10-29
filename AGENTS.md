@@ -5,6 +5,7 @@
 | `SPEC.md` | Behaviour contract (MUST/SHOULD). Settled decisions live here — never re-litigate. |
 | `sounddeck/ARCHITECTURE.md` | Implementation map — update on thread/storage/frame-loop changes. |
 | `plan.md` | Current work list (local, gitignored). No scope beyond it without asking. |
+| `QA-CHECKLIST.md` | Manual QA worksheet: ordered pass, expected behaviour per item, known-nuances table. Run before a release; record failures inline — findings become the next `plan.md`. |
 
 ## 0. Maintaining this file
 
@@ -20,15 +21,18 @@ groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` · `2026-10-28 — X
 per-sound `gain_db` (§2.5), device substitution + name refresh (§2.6)` (detail in git
 history) · `2026-10-28 — step 9b: measure.ps1 (NFR-8.1/8.2), README accessibility,
 sound-id hardening` · `2026-10-28 — docs pass: SPEC 0.4.0 + FR-5.4.7/FR-5.7.10/UI-6,
-probe thread (§2.2/§2.5), Win chords (§2.7/§7), modals + Settings content (§2.8)`.
+probe thread (§2.2/§2.5), Win chords (§2.7/§7), modals + Settings content (§2.8)` ·
+`2026-10-29 — QA workflow documented (checklist + test material, §7 tail)`.
 
 ## 1. Repository layout
 
 ```
 SoundBoard/
-├── SPEC.md, plan.md, AGENTS.md, README.md, context.md   ← docs (root)
-├── scripts/package.ps1                                   ← release packaging
-├── scripts/measure.ps1                                   ← NFR-8.1/8.2 measurement pass
+├── SPEC.md, plan.md, AGENTS.md, README.md,     ← docs (root)
+├── QA-CHECKLIST.md                             ← manual QA worksheet
+├── scripts/package.ps1                         ← release packaging
+├── scripts/measure.ps1                         ← NFR-8.1/8.2 measurement pass
+├── scripts/make-test-material.ps1              ← QA audio/theme/fixture generator
 └── sounddeck/
     ├── Cargo.toml, build.rs   assets/   ARCHITECTURE.md  ← deps, icon/fonts, dev guide
     └── src/
@@ -52,20 +56,6 @@ It plays each triggered sound to **two audio outputs simultaneously** ("Monitor"
 local speakers/headphones, "Cable" = a virtual cable feeding stream/voice chat) and
 triggers via **global hotkeys that work while the app is minimized**.
 
-### 2.0 Rust concepts encountered (short primer)
-
-| Rust | Rough equivalent | Note |
-| --- | --- | --- |
-| `Arc<T>` | shared ref-counted pointer | `clone` bumps a counter; freed when last clone drops. Cross-thread sharing. |
-| `Mutex<T>` | `threading.Lock` tied to the value | `.lock()` returns a guard; auto-releases on drop. Panics **poison** it (later locks return `Err`). |
-| `RwLock<T>` | readers-writer lock | many readers or one writer. |
-| `AtomicBool/AtomicU32` | lock-free scalars | flags/counters with memory orderings. |
-| `Result<T,E>` / `?` | try/except | `?` = early-return the error. |
-| `Option<T>` | `T \| None` | no nulls. |
-| `serde` | dataclasses + `json` | struct ↔ JSON via derive. |
-| `unsafe { }` | ctypes / C extension | only at Win32/WASAPI boundaries. |
-| channel (`Sender`/`Receiver`) | `queue.Queue` | crossbeam FIFOs between threads. |
-
 ### 2.1 Big picture
 
 ```
@@ -73,7 +63,7 @@ GLOBAL KEYBOARD (hook thread) ──┐
 CLICK in UI (app.rs) ─► Action ─┤
                                 ▼
                      Playback::play(sound id)
-                      │                    │
+                      │                     │
             samples in RAM?              no │
                  yes ▼                     ▼
           Engine::play (instant)   policy: preload? ─yes→ loader thread → RAM → play
@@ -363,7 +353,7 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
   `Margin` is `i8`; PowerShell `Set-Content -Encoding utf8` writes a BOM — use
   `[System.IO.File]::WriteAllText($p,$t,(New-Object System.Text.UTF8Encoding($false)))`;
   quote paths with spaces.
-- **Storage budget**: repo ≤ ~5 GB (`target` ≈ 3.3 GB). Parallel worktrees share
+- **Storage budget**: repo ≤ ~5 GB (`target` ≈ 2 GB). Parallel worktrees share
   `CARGO_TARGET_DIR` or run sequentially; `cargo clean` stale caches.
 
 ## 5. Feature playbooks
@@ -429,3 +419,9 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 Scope exclusions: SPEC §10 Non-goals. `plan.md` is the work list — implement items in
 order; parallel work only on disjoint file sets (`app.rs`/`hotkeys.rs` serial); mark
 items done as they land; the plan is wiped and rewritten when the iteration ends.
+
+**QA loop.** Before a release, walk `QA-CHECKLIST.md` (expected behaviour per item;
+back up `review\config\` before the destructive sections), record failures inline, then
+fold the annotations into a fresh `plan.md` iteration. Test material:
+`scripts\make-test-material.ps1` → gitignored `test-material/` (deterministic audio,
+themes, fixtures — regenerate any time; never commit the generated files).
