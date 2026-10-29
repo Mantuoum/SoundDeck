@@ -12,6 +12,9 @@ shot*.png
 crop*.png
 *.tmp
 
+# Generated QA audio/theme material (scripts/make-test-material.ps1)
+test-material/
+
 # Reference screenshots
 References/
 
