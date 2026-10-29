@@ -19,14 +19,17 @@ Log: `2026-10-28 — created (codebase review); 0.4.0 iteration syncs` · `2026-
 workflow (checklist + test material)` · `2026-10-29 — 0.5.0 round (shell worker, blocked
 chords, trim dialog, theme id/name)` · `2026-10-29 — themes are JSON (<id>.json, a 0.5.0 .md
 auto-migrated to .md.migrated)` · `2026-10-29 — review deltas G1–G4 (one hover surface,
-unselectable chrome text, Ctrl+Tab focus block, theme labels without the id)`. Details live
-in git history.
+unselectable chrome text, Ctrl+Tab focus block, theme labels without the id)` · `2026-10-29 —
+G5 (gain menu row is the label only) + doc stragglers (UI-9 and Ctrl+Tab trap in
+ARCHITECTURE)`. Details live in git history.
 
 ## 1. Repository layout
 
 ```
 SoundBoard/
 ├── SPEC.md, plan.md, AGENTS.md, README.md,     ← docs (root)
+├── context.md                                  ← session handoff (gitignored, rewritten per round)
+├── plan-0.2.0.md … plan-0.5.0.md               ← plan archives (gitignored)
 ├── QA-CHECKLIST.md                             ← manual QA worksheet
 ├── scripts/package.ps1                         ← release packaging
 ├── scripts/measure.ps1                         ← NFR-8.1/8.2 measurement pass
@@ -288,15 +291,15 @@ bar + (board | settings) → chrome, drop overlay, drag ghost, modals. When hidd
 Frame pacing: 33 ms moving, 100 ms settings+audio, 1 s idle (the idle-CPU guarantee,
 NFR-8.1.x).
 
-**Board**: sidebar (scrollable: Monitor/Cable device + volume sliders + link → optional
-master gain 0..+12 dB right-click-reset → stop-all card → loop card; pinned footer: credit
-→ peak meter → Settings button), toolbar (search, RAM pill), grid/list of the active
-library, cards/rows (name, hotkey
-pill, RAM chip, missing state, log-curve volume bar, progress line — drawn only once the
-total duration is known — context menu with **Set gain…** between Stop and Rename). The
-toolbar and the grid both size from `board_content_width(ui)` (available width minus the
-floating scroll-bar gutter), so the RAM pill and the last column share a right edge at any
-window width. Delete removes with one-slot undo (`Ctrl+Z`).
+**Board**: sidebar (scrollable: Load sounds + layout switch → Monitor/Cable device +
+volume sliders + link → optional master gain 0..+12 dB right-click-reset → stop-all card
+→ loop card; pinned footer: credit → peak meter → Settings button), toolbar (search, RAM
+pill), grid/list of the active library, cards/rows (name, hotkey pill, RAM chip, missing
+state, log-curve volume bar, progress line — drawn only once the total duration is known —
+context menu with **Set gain…** between Stop and Rename, label only: the dialog carries
+the value). The toolbar and the grid both size from `board_content_width(ui)` (available
+width minus the floating scroll-bar gutter), so the RAM pill and the last column share a
+right edge at any window width. Delete removes with one-slot undo (`Ctrl+Z`).
 Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
 remove them from the board (files untouched); cancel leaves everything alone.
 

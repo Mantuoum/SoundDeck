@@ -6988,20 +6988,12 @@ fn sound_context_menu(
         ui.close_menu();
     }
     ui.separator();
-    // One entry opens the trim dialog; the current value stays readable beside
-    // it, the way the old stepper row showed it (FR-5.3.17).
-    ui.horizontal(|ui| {
-        if ui.button("Set gain...").clicked() {
-            actions.push(Action::SetGain(sound.id));
-            ui.close_menu();
-        }
-        ui.label(
-            RichText::new(format_gain_db(sound.gain_db))
-                .size(11.5)
-                .color(theme::muted())
-                .monospace(),
-        );
-    });
+    // One entry opens the trim dialog; the dialog is the only place the value
+    // is shown (FR-5.3.17).
+    if ui.button("Set gain...").clicked() {
+        actions.push(Action::SetGain(sound.id));
+        ui.close_menu();
+    }
     ui.separator();
     if ui.button("Rename...").clicked() {
         actions.push(Action::Rename(sound.id));

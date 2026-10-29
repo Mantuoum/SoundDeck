@@ -118,7 +118,7 @@ specification:**
 | FR-5.3.15 | Every configured file MUST be held open for reading with delete sharing denied, so Windows refuses rename and delete until the sound leaves the board or the app exits. Reads and writes by other processes stay allowed. |
 | FR-5.3.16 | If the volume disappears, a resident sound MUST play from memory; a non-resident sound MUST be reported as missing, with no panic and no loss of the other sounds. |
 | FR-5.3.17 | A sound MUST have a trim in dB, `-12..=+12` (default `0`), applied as a linear multiplier on top of its stored volume. The trim MUST apply when the sound starts and to a voice that is already sounding when it changes; a boost that would exceed full scale is clipped by the mix, never rejected. `engine::clamp_gain_db` is the only range clamp (used by `effective_gain`, storage normalisation and the dialog); a value stored under the old `-24` floor loads clamped at `-12`. |
-| FR-5.3.18 | The trim MUST be set from the sound's context menu (**Set gain…**, between Stop and Rename), which opens a dialog with a slider and an editable numeric field over `-12..=+12 dB` in 0.5 dB steps, plus OK and Cancel. Nothing is applied before OK: Cancel, `Esc`, the close button and a backdrop click MUST leave the trim untouched. Non-numeric input MUST be ignored (the pending value stands) and an out-of-range number MUST clamp. The sign MUST always be shown (`+3.0 dB`, `0.0 dB`). |
+| FR-5.3.18 | The trim MUST be set from the sound's context menu (**Set gain…**, between Stop and Rename), which opens a dialog with a slider and an editable numeric field over `-12..=+12 dB` in 0.5 dB steps, plus OK and Cancel. Nothing is applied before OK: Cancel, `Esc`, the close button and a backdrop click MUST leave the trim untouched. Non-numeric input MUST be ignored (the pending value stands) and an out-of-range number MUST clamp. The sign MUST always be shown (`+3.0 dB`, `0.0 dB`). The menu row carries the label only; the dialog is the only place the value is shown. |
 | FR-5.3.19 | **Show in Explorer** MUST select the file through the shell namespace (`SHParseDisplayName` + `SHOpenFolderAndSelectItems`), not an `explorer.exe /select,` command line, so spaces, commas, unicode and long paths all land on the file. It MUST run off the UI thread and report failures in the activity log; when the file is gone it MUST open the containing folder. |
 
 ### 5.4 Playback
@@ -467,7 +467,7 @@ Rules that enforce them:
 | NFR-8.5.2 | `cargo test` MUST pass; pure logic (paths, normalisation, migration, volume curve, hotkey table, ring/wake behaviour) MUST be covered. |
 | NFR-8.5.3 | Every module carries a `//!` header stating its responsibility. |
 | NFR-8.5.4 | `ARCHITECTURE.md` MUST be updated with any change to threads, storage or the frame loop. |
-| NFR-8.5.5 | 218 tests as of 0.5.0. |
+| NFR-8.5.5 | 230 tests as of 0.5.0. |
 
 ### 8.6 Accessibility
 

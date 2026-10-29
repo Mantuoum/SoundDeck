@@ -412,7 +412,10 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 
 1. Detect Settings opening/closing; set fade timestamps and clear text focus.
 2. Poll playback/engine/hotkey events and the shell-failure log channel.
-3. Handle close requests, global shortcuts, window-edge resize, `tick`.
+3. Handle close requests, global shortcuts, window-edge resize, `tick`. egui reads Tab
+   for focus navigation *before* `update` runs, so a `Ctrl+Tab` switch parks the focus on
+   `TAB_FOCUS_BLOCK` to cancel the grant (cleared after painting) — without it the chord
+   dies until the window is clicked.
 4. Draw the title bar and status bar.
 5. If Settings is open: left settings rail + content panel.
    Otherwise: board sidebar (right) + main page.
@@ -533,7 +536,9 @@ top-level layer, so it can never draw over modals or popups.
   re-resolves the active id (an edited colour repaints without reselecting) and an
   unknown id falls back to Graphite with a warning naming the id and the available ones;
   the UI then corrects the stored id to `graphite`.
-- The runtime registry is a global `RwLock` palette; `apply_style` maps it to egui.
+- The runtime registry is a global `RwLock` palette; `apply_style` maps it to egui and
+  sets `interaction.selectable_labels = false`, so static chrome never paints a
+  selection while every `TextEdit` keeps normal selection and editing (SPEC UI-9).
 - Radii: `SM=5`, `MD=8`, `LG=12`, `XL=14`; use these instead of literals.
 - Fonts: Satoshi regular/medium; `theme::ui_font` / `medium`; `truncate` for ellipsis.
 
@@ -675,7 +680,7 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 218 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
+- 230 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
   validation, resampling (chunk invariance), loop streaming (wrap, stop, file release,
   errors), mixer loop gain/wrap/routing, `effective_gain`/`clamp_gain_db`, volume
   curve/clamps, hotkey matching and the blocked-chord table, and theme-file parsing.

@@ -190,55 +190,71 @@ if ($ffmpeg) {
 }
 
 Write-Host '==> Theme files'
-$graphite = @'
-# Broken Hex
-
-| token | value |
-| --- | --- |
-| bg | #101014 |
-| panel | #17171d |
-| text | #e8e8ee |
-| accent | banana |
-| border | nope |
+# Themes are JSON: `config/themes/<id>.json`, one key per COLOUR_TOKENS row.
+$broken = @'
+{
+  "name": "Broken Hex",
+  "light": false,
+  "bg": "#101014",
+  "panel": "#17171d",
+  "text": "#e8e8ee",
+  "accent": "banana",
+  "border": "nope"
+}
 '@
-[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\broken-hex.md'), $graphite, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\broken-hex.json'), $broken, (New-Object System.Text.UTF8Encoding($false)))
 
 $missing = @'
-# Missing Tokens
-
-| token | value |
-| --- | --- |
-| bg | #101014 |
-| text | #e8e8ee |
+{
+  "name": "Missing Tokens",
+  "bg": "#101014",
+  "text": "#e8e8ee"
+}
 '@
-[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\missing-tokens.md'), $missing, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\missing-tokens.json'), $missing, (New-Object System.Text.UTF8Encoding($false)))
 
+# Same stem as the seeded built-in: this file *is* `Graphite.json` (Windows names
+# are case-insensitive), so editing it recolours the built-in theme - there is no
+# "alongside" case.
 $mine = @'
-# Graphite (mine)
-
-| token | value |
-| --- | --- |
-| bg | #141210 |
-| panel | #1d1a16 |
-| panel_deep | #17140f |
-| card | #221e19 |
-| card_hover | #2a251e |
-| field | #1b1813 |
-| border | #3a332a |
-| border_soft | #2a251e |
-| text | #f0e9dd |
-| muted | #a89c8a |
-| faint | #6f6659 |
-| accent | #ff9d3c |
-| purple | #b98bff |
-| amber | #ffc857 |
-| red | #ff6b6b |
-| light | false
+{
+  "name": "Graphite (mine)",
+  "light": false,
+  "bg": "#141210",
+  "panel": "#1d1a16",
+  "panel_deep": "#17140f",
+  "card": "#221e19",
+  "card_hover": "#2a251e",
+  "field": "#1b1813",
+  "border": "#3a332a",
+  "border_soft": "#2a251e",
+  "text": "#f0e9dd",
+  "muted": "#a89c8a",
+  "faint": "#6f6659",
+  "accent": "#ff9d3c",
+  "purple": "#b98bff",
+  "amber": "#ffc857",
+  "red": "#ff6b6b"
+}
 '@
-[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\Graphite.md'), $mine, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\Graphite.json'), $mine, (New-Object System.Text.UTF8Encoding($false)))
 
 $longTheme = @'
-# A Theme With A Very Long Name To Stress The Dropdown Width
+{
+  "name": "A Theme With A Very Long Name To Stress The Dropdown Width",
+  "light": false,
+  "bg": "#0d1b12",
+  "panel": "#14251a",
+  "text": "#e6f5ea",
+  "accent": "#43d17c"
+}
+'@
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\long-theme-name-that-keeps-going-and-going-past-the-dropdown-width.json'), $longTheme, (New-Object System.Text.UTF8Encoding($false)))
+
+# One pre-0.6 Markdown theme, kept only to test the one-time migration:
+# `<id>.json` is written from it and the original becomes `<id>.md.migrated`.
+$legacy = @'
+# Legacy Markdown Theme
 
 | token | value |
 | --- | --- |
@@ -247,7 +263,7 @@ $longTheme = @'
 | text | #e6f5ea |
 | accent | #43d17c |
 '@
-[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\long-theme-name-that-keeps-going-and-going-past-the-dropdown-width.md'), $longTheme, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $OutDir 'themes\legacy-markdown.md'), $legacy, (New-Object System.Text.UTF8Encoding($false)))
 
 Write-Host '==> Config / bundle fixtures'
 [System.IO.File]::WriteAllText((Join-Path $OutDir 'fixtures\settings-corrupt.json'), 'this is not json {{{', (New-Object System.Text.UTF8Encoding($false)))
@@ -280,14 +296,16 @@ All audio is synthetic 16-bit PCM WAV unless noted.
 | `emoji-tone.wav` | non-ASCII filename handling |
 | `long-name-<150 a>.wav` | truncation in cards + "Show in Explorer" long-name bug (B3) |
 | `formats\tone.{mp3,flac,ogg,m4a}` | format coverage (ffmpeg required to regenerate) |
-| `themes\broken-hex.md` | invalid hex fallback + warning |
-| `themes\missing-tokens.md` | missing-token fallback + warning |
-| `themes\Graphite.md` | user theme named like the built-in: shows alongside (settled) |
-| `themes\long-theme-name-...md` | dropdown width stress |
+| `themes\broken-hex.json` | invalid hex fallback + warning |
+| `themes\missing-tokens.json` | missing-token fallback + warning |
+| `themes\Graphite.json` | same stem as the built-in: your file **is** the seed file (edit it to recolour Graphite) |
+| `themes\long-theme-name-...json` | dropdown width stress |
+| `themes\legacy-markdown.md` | pre-0.6 Markdown theme: one-time `.md` → `.json` migration |
 | `fixtures\settings-corrupt.json` | corrupt-config recovery (.corrupt snapshot, defaults, warning) |
 | `fixtures\bundle-newer.json` | import rejection: newer bundle version |
 
-Copy the `themes\*.md` files into `<app>\config\themes\` to test; copy a fixture over
+Copy the `themes\` files into `<app>\config\themes\` to test (never into `review\config\`
+unless it was backed up first); copy a fixture over
 `config\settings.json` (with the app closed) to test recovery. Audio files can be added
 from anywhere - the app references them, never copies them.
 '@

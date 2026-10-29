@@ -168,7 +168,7 @@ already parked and waiting.
 - [ ] Invalid hex (`"accent": "banana"`) → fallback + warning; app stays healthy.
 - [ ] Corrupt JSON (`"bg": `) → that theme is skipped with a `not valid JSON` warning; every other theme still loads.
 - [ ] A file named `Graphite.json` **is** the built-in seed file (same id on a case-insensitive filesystem) — it must be edited in place, not appear twice.
-- [ ] A 0.5.0 `<id>.md` theme (drop one in beside the JSON files) → launch: converted to `<id>.json` with the same colours and name, the old file kept as `<id>.md.migrated`, one `converted` line in the log, no duplicate entry in the dropdown.
+- [ ] A 0.5.0 `<id>.md` theme (drop one in beside the JSON files — `test-material\themes\legacy-markdown.md`) → launch: converted to `<id>.json` with the same colours and name, the old file kept as `<id>.md.migrated`, one `converted` line in the log, no duplicate entry in the dropdown.
 - [ ] Very long theme names in the dropdown look fine.
 
 ## 14. RAM / preload behaviour
