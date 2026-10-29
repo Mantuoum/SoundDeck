@@ -35,6 +35,33 @@ const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
 
+// Board metrics (B4). The toolbar and the grid both size themselves from
+// `board_content_width`, so the RAM pill and the last column end on the same
+// pixel at any window width instead of each guessing its own right margin.
+/// Gap between grid columns, and between grid rows.
+const GRID_GAP: f32 = 10.0;
+/// Column pitch: the width one card plus one gap wants before the grid adds a
+/// column.
+const GRID_COLUMN_PITCH: f32 = 238.0;
+/// Hard floor for a card, so a narrow board still shows something.
+const GRID_MIN_CARD_W: f32 = 170.0;
+const GRID_MAX_COLUMNS: usize = 6;
+/// Board content never gets narrower than this, whatever the window does.
+const BOARD_CONTENT_MIN_W: f32 = 180.0;
+/// The search field keeps at least this much of the toolbar.
+const SEARCH_MIN_W: f32 = 160.0;
+
+// Sidebar stop-all widget (B7): one hit rect for the body, one for the pill.
+const STOP_ALL_PILL_W: f32 = 96.0;
+const STOP_ALL_PILL_H: f32 = 24.0;
+/// Gap between the body's hit rect and the pill's, so they never overlap.
+const STOP_ALL_BODY_GAP: f32 = 8.0;
+/// Master gain slider range. `Settings::normalize` clamps to the same bounds;
+/// the UI only ever hands it a value from inside this range.
+const MASTER_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=12.0;
+/// Right-clicking the gain slider returns it here: 0 dB, i.e. unity.
+const MASTER_GAIN_NEUTRAL_DB: f32 = 0.0;
+
 // Settings layout metrics (SPEC FR-5.9.8 spacing, §7.2 widths). Every number the
 // settings screen uses comes from here so the four pages keep one rhythm.
 const SETTINGS_CONTENT_MAX_W: f32 = 780.0;
@@ -442,6 +469,10 @@ pub struct App {
     statuses: VecDeque<StatusEntry>,
     show_log: bool,
     show_settings: bool,
+    /// The rect the board (or the settings body) was painted into this frame.
+    /// Modals centre on it, so one opened from Settings is not pulled left by
+    /// the rail that is not on screen (B13).
+    content_rect: Rect,
     capture: Option<CaptureState>,
     /// Global stop-all binding, parsed from settings.
     stop_all: Option<Hotkey>,
@@ -644,6 +675,7 @@ impl App {
             statuses,
             show_log: false,
             show_settings: open_settings,
+            content_rect: Rect::ZERO,
             capture: None,
             stop_all,
             renaming: None,
@@ -1727,8 +1759,10 @@ impl App {
         let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
         let mut replace = false;
 
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("import_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
@@ -1840,8 +1874,10 @@ impl App {
         let mut close = ctx.input(|input| input.key_pressed(Key::Escape));
         let mut confirm = false;
 
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("reset_settings_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
@@ -2213,32 +2249,17 @@ impl App {
 
     fn side_panel(&mut self, ui: &mut Ui) {
         // The window starts at 960x540, so the sidebar needs a tighter rhythm
-        // on short windows or the meters end up below the fold.
+        // on short windows or the pinned footer ends up below the fold.
         let compact = ui.available_height() < 620.0;
         let gap = if compact { 0.35 } else { 1.0 };
-        // On the 960x540 default size there is no room for the device captions
-        // once the loop player is pinned above Settings. They reappear when the
-        // window is taller or the loop player is disabled.
-        let hide_device_labels = compact && self.cfg.loop_enabled;
-        let loop_reserve = if self.cfg.loop_enabled {
-            if compact {
-                50.0
-            } else {
-                90.0
-            }
-        } else {
-            0.0
-        };
-        // Meters and the stop-all widget are pinned: they must stay visible when
-        // the device column scrolls on a short window.
+        // On the 960x540 default size the device captions would eat the room the
+        // pinned footer needs; they reappear when the window is taller.
+        let hide_device_labels = compact;
+        // Pinned footer: the Settings button, the peak meter and the credit.
+        // Devices, gain, stop-all and loop all live in the scroll area above it,
+        // so a short window scrolls instead of hiding a widget.
         let meter_reserve = if compact { 36.0 } else { 49.0 };
-        let stop_all_reserve = if self.cfg.stop_all_hotkey_enabled {
-            38.0
-        } else {
-            0.0
-        };
-        let reserve =
-            (if compact { 44.0 } else { 84.0 }) + loop_reserve + meter_reserve + stop_all_reserve;
+        let reserve = (if compact { 44.0 } else { 84.0 }) + meter_reserve;
         let content_height = (ui.available_height() - reserve).max(120.0);
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), content_height),
@@ -2302,34 +2323,51 @@ impl App {
                             let mut gain_db = self.cfg.master_gain_db;
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Gain").size(11.5).color(theme::muted()));
-                                ui.spacing_mut().slider_width =
-                                    (ui.available_width() - 70.0).max(70.0);
-                                let response = ui.add(
-                                    egui::Slider::new(&mut gain_db, 0.0..=12.0)
-                                        .step_by(0.5)
-                                        .show_value(false)
-                                        .trailing_fill(true),
-                                );
-                                let reset = response.secondary_clicked();
-                                let changed = response.changed();
-                                response.on_hover_text(
-                                    "Master gain - both outputs. Right-click to reset.",
-                                );
-                                ui.label(
-                                    RichText::new(format_gain_db(gain_db))
-                                        .size(10.5)
-                                        .color(theme::muted())
-                                        .monospace(),
-                                );
-                                if reset {
-                                    gain_db = 0.0;
-                                }
-                                if changed || reset {
-                                    self.cfg.master_gain_db = gain_db;
-                                    self.engine.set_master_gain_db(gain_db);
-                                    self.mark_dirty();
-                                }
+                                // Readout on the right, slider filling what is left
+                                // (same rule as the volume rows).
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format_gain_db(gain_db))
+                                            .size(10.5)
+                                            .color(theme::muted())
+                                            .monospace(),
+                                    );
+                                    ui.spacing_mut().slider_width = ui.available_width();
+                                    let response = ui.add(
+                                        egui::Slider::new(&mut gain_db, MASTER_GAIN_RANGE)
+                                            .step_by(0.5)
+                                            .show_value(false)
+                                            .trailing_fill(true),
+                                    );
+                                    // A slider only senses drags, so its response never
+                                    // reports a secondary click; the hit test is "pointer
+                                    // over the slider" plus the raw click event (B9).
+                                    let reset = response.hovered()
+                                        && ui.input(|i| i.pointer.secondary_clicked());
+                                    if reset {
+                                        gain_db = MASTER_GAIN_NEUTRAL_DB;
+                                        ui.ctx().request_repaint();
+                                    }
+                                    let changed = response.changed();
+                                    response.on_hover_text(
+                                        "Master gain - both outputs. Right-click to reset.",
+                                    );
+                                    if changed || reset {
+                                        self.cfg.master_gain_db = gain_db;
+                                        self.engine.set_master_gain_db(gain_db);
+                                        self.mark_dirty();
+                                    }
+                                });
                             });
+                        }
+
+                        if self.cfg.stop_all_hotkey_enabled {
+                            ui.add_space(6.0 * gap);
+                            self.stop_all_card(ui);
+                        }
+                        if self.cfg.loop_enabled {
+                            ui.add_space(6.0 * gap);
+                            self.loop_card(ui, compact);
                         }
 
                         ui.add_space(6.0 * gap);
@@ -2337,7 +2375,7 @@ impl App {
             },
         );
 
-        // Developer + Settings pinned to the bottom of the sidebar.
+        // Meter, Settings and the credit stay pinned below the scroll area.
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), reserve),
             Layout::bottom_up(Align::Min),
@@ -2351,19 +2389,11 @@ impl App {
                 }
                 ui.add_space(6.0);
                 self.level_meter(ui, compact);
-                if self.cfg.stop_all_hotkey_enabled {
-                    ui.add_space(6.0);
-                    self.stop_all_card(ui);
-                }
-                if self.cfg.loop_enabled {
-                    ui.add_space(6.0);
-                    self.loop_card(ui, compact);
-                }
                 if !compact {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(format!("Developed by {DEVELOPER_NAME}"))
-                            .size(10.5)
+                            .font(theme::medium(12.5))
                             .color(theme::faint()),
                     );
                     ui.add_space(2.0);
@@ -2373,69 +2403,104 @@ impl App {
     }
 
     /// Sidebar widget: stop everything now, and own the stop-all hotkey.
+    ///
+    /// The card is drawn by hand rather than with a `Label`, because the whole
+    /// body has to be one click target: a label only senses its own text, which
+    /// left most of the card dead (B7).
     fn stop_all_card(&mut self, ui: &mut Ui) {
+        let mut stopped = false;
+        let mut capture = false;
+        let mut clear = false;
         Frame::NONE
             .fill(theme::card())
             .stroke(Stroke::new(1.0_f32, theme::border_soft()))
             .corner_radius(theme::RADIUS_MD)
             .inner_margin(Margin::symmetric(10, 4))
             .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    let body = ui.add(
-                        egui::Label::new(RichText::new("Stop all").size(12.0).color(theme::text()))
-                            .sense(Sense::click()),
+                let (row, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width(), STOP_ALL_PILL_H),
+                    Sense::hover(),
+                );
+                let painter = ui.painter().clone();
+                // The pill owns the right end of the row; the body is everything
+                // left of it. The two hit rects never overlap, so a body click
+                // cannot also fire the capture pill.
+                let pill_rect = Rect::from_min_max(
+                    Pos2::new(
+                        row.right() - STOP_ALL_PILL_W,
+                        row.center().y - STOP_ALL_PILL_H * 0.5,
+                    ),
+                    row.right_bottom(),
+                );
+                let body_rect = Rect::from_min_max(
+                    row.min,
+                    Pos2::new(pill_rect.left() - STOP_ALL_BODY_GAP, row.max.y),
+                );
+
+                let body = ui.interact(body_rect, Id::new("stop_all_body"), Sense::click());
+                if body.hovered() {
+                    painter.rect_filled(
+                        body_rect,
+                        CornerRadius::same(theme::RADIUS_SM),
+                        theme::alpha(theme::text(), 8),
                     );
-                    let stopped = body.clicked();
-                    body.on_hover_text("Stop every playing sound now");
+                }
+                painter.text(
+                    body_rect.left_center(),
+                    Align2::LEFT_CENTER,
+                    "Stop all",
+                    theme::ui_font(12.0),
+                    theme::text(),
+                );
+                stopped = body.clicked();
+                body.on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Stop every playing sound now");
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let unset = self.stop_all.is_none();
-                        let label = self
-                            .stop_all
-                            .map(|hotkey| hotkey.label())
-                            .unwrap_or_else(|| "Set hotkey".to_string());
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(96.0, 24.0), Sense::click());
-                        let painter = ui.painter();
-                        // Same surface as the hotkey pill on a sound card.
-                        painter.rect(
-                            rect,
-                            CornerRadius::same(theme::RADIUS_MD),
-                            theme::field(),
-                            Stroke::new(1.0_f32, theme::border_soft()),
-                            StrokeKind::Inside,
-                        );
-                        painter.text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            label,
-                            theme::ui_font(11.0),
-                            if unset {
-                                theme::faint()
-                            } else {
-                                theme::muted()
-                            },
-                        );
-                        if response.clicked() {
-                            self.capture = Some(CaptureState {
-                                target: CaptureTarget::StopAll,
-                                current: self.stop_all,
-                            });
-                        }
-                        if response.secondary_clicked() && self.stop_all.is_some() {
-                            self.stop_all = None;
-                            self.sync_active_library();
-                            self.mark_dirty();
-                        }
-                        response.on_hover_text("Click to set, right-click to clear");
-                    });
-
-                    if stopped {
-                        self.engine.stop_all();
-                        self.log(StatusKind::Info, "Stopped all sounds");
-                    }
-                });
+                let unset = self.stop_all.is_none();
+                let label = self
+                    .stop_all
+                    .map(|hotkey| hotkey.label())
+                    .unwrap_or_else(|| "Set hotkey".to_string());
+                // Same surface as the hotkey pill on a sound card.
+                painter.rect(
+                    pill_rect,
+                    CornerRadius::same(theme::RADIUS_MD),
+                    theme::field(),
+                    Stroke::new(1.0_f32, theme::border_soft()),
+                    StrokeKind::Inside,
+                );
+                painter.text(
+                    pill_rect.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    theme::ui_font(11.0),
+                    if unset {
+                        theme::faint()
+                    } else {
+                        theme::muted()
+                    },
+                );
+                let pill = ui.interact(pill_rect, Id::new("stop_all_hotkey"), Sense::click());
+                capture = pill.clicked();
+                clear = pill.secondary_clicked() && !unset;
+                pill.on_hover_text("Click to set, right-click to clear");
             });
+
+        if stopped {
+            self.engine.stop_all();
+            self.log(StatusKind::Info, "Stopped all sounds");
+        }
+        if clear {
+            self.stop_all = None;
+            self.sync_active_library();
+            self.mark_dirty();
+        }
+        if capture {
+            self.capture = Some(CaptureState {
+                target: CaptureTarget::StopAll,
+                current: self.stop_all,
+            });
+        }
     }
 
     /// Pill-shaped Box/List segmented control.
@@ -2591,24 +2656,29 @@ impl App {
     fn device_volume(&mut self, ui: &mut Ui, slot: Slot) {
         let mut position = volume::to_position(self.slot_volume(slot));
         ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = (ui.available_width() - 22.0).max(60.0);
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut position, 0.0..=1.0)
-                        .show_value(false)
-                        .trailing_fill(true),
-                )
-                .changed();
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new(volume::percent_text(position))
-                    .size(11.0)
-                    .color(theme::muted())
-                    .monospace(),
-            );
-            if changed {
-                self.set_slot_volume(slot, volume::from_position(position));
-            }
+            // The readout claims its natural width on the right and the slider
+            // fills the rest. Sizing the slider from a guessed reserve left the
+            // row wider than the panel, which pushed every later card in the
+            // scroll area past the right margin (B4).
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(volume::percent_text(position))
+                        .size(11.0)
+                        .color(theme::muted())
+                        .monospace(),
+                );
+                ui.spacing_mut().slider_width = ui.available_width();
+                let changed = ui
+                    .add(
+                        egui::Slider::new(&mut position, 0.0..=1.0)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    )
+                    .changed();
+                if changed {
+                    self.set_slot_volume(slot, volume::from_position(position));
+                }
+            });
         });
     }
 
@@ -3407,8 +3477,10 @@ impl App {
 
         let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
         let mut outcome = None;
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("delete_library_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
@@ -3504,8 +3576,11 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
+        // One content width for the whole board, so the RAM pill ends exactly
+        // where the grid's last column does (B4).
+        let content_width = board_content_width(ui);
         ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), 34.0),
+            Vec2::new(content_width, 34.0),
             Layout::left_to_right(Align::Center),
             |ui| {
                 // Zero item spacing so the widths add up exactly and the pill
@@ -3516,7 +3591,7 @@ impl App {
                 let show_pill = self.cfg.show_ram_state;
                 let pill_width = if show_pill { 164.0 } else { 0.0 };
                 let gap = if show_pill { 10.0 } else { 0.0 };
-                let search_width = (ui.available_width() - pill_width - gap).max(160.0);
+                let search_width = search_field_width(content_width, pill_width, gap);
                 let response = ui
                     .scope(|ui| {
                         // Match the RAM pill: fields and pills share one radius.
@@ -4319,8 +4394,10 @@ impl App {
         // one message, and the load path unbinds one a hand-edited config let in.
         let blocked = capture.current.and_then(blocked_reason);
 
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("capture_modal"),
             400.0,
             MODAL_MARGIN,
@@ -4477,8 +4554,10 @@ impl App {
             close = true;
         }
 
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("rename_modal"),
             380.0,
             MODAL_MARGIN,
@@ -4564,8 +4643,10 @@ impl App {
         // Paint straight from the log: copying every entry into a fresh list each
         // frame was the whole cost of this dialog.
         let statuses = &self.statuses;
+        let content = self.content_rect;
         modal_shell(
             ctx,
+            content,
             Id::new("log_modal"),
             520.0,
             MODAL_MARGIN_COMPACT,
@@ -5091,7 +5172,7 @@ impl eframe::App for App {
             side.response.rect.left()
         };
 
-        if self.show_settings {
+        let content_rect = if self.show_settings {
             egui::CentralPanel::default()
                 .frame(Frame::NONE.fill(theme::bg()).inner_margin(Margin {
                     left: 28,
@@ -5106,7 +5187,9 @@ impl eframe::App for App {
                         Stroke::new(1.0_f32, theme::border()),
                     );
                     self.settings_content(ctx, ui);
-                });
+                })
+                .response
+                .rect
         } else {
             egui::CentralPanel::default()
                 .frame(
@@ -5121,8 +5204,12 @@ impl eframe::App for App {
                         Stroke::new(1.0_f32, theme::border()),
                     );
                     self.main_page(ui);
-                });
-        }
+                })
+                .response
+                .rect
+        };
+        // Modals centre on this rect rather than on the window (B13).
+        self.content_rect = content_rect;
 
         // Window chrome: keep it below modals/drop overlays so popups are never
         // crossed by the title/status separators.
@@ -5622,6 +5709,37 @@ fn paint_settings_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, co
     }
 }
 
+/// Width the board's content may use: everything the panel gives us, minus the
+/// strip a floating scroll bar draws over. The toolbar and the grid both size
+/// themselves from this one number, which is what makes the RAM pill and the
+/// last column share a right edge (B4).
+fn board_content_width(ui: &Ui) -> f32 {
+    let scroll = ui.spacing().scroll;
+    // A solid bar already shrinks `available_width`; a floating one does not.
+    let gutter = if scroll.floating {
+        scroll.bar_width + scroll.bar_outer_margin
+    } else {
+        0.0
+    };
+    (ui.available_width() - gutter).max(BOARD_CONTENT_MIN_W)
+}
+
+/// Column count and card width for one content width. The cards plus the gaps
+/// add back up to exactly `width`, so the last column ends on the content's
+/// right edge.
+fn grid_geometry(width: f32) -> (usize, f32) {
+    let columns =
+        (((width + GRID_GAP) / GRID_COLUMN_PITCH).floor() as usize).clamp(1, GRID_MAX_COLUMNS);
+    let card = ((width - GRID_GAP * columns.saturating_sub(1) as f32) / columns as f32)
+        .max(GRID_MIN_CARD_W);
+    (columns, card)
+}
+
+/// Search field width: one content width, less the pill and the gap before it.
+fn search_field_width(content: f32, pill: f32, gap: f32) -> f32 {
+    (content - pill - gap).max(SEARCH_MIN_W)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_grid(
     ui: &mut Ui,
@@ -5637,13 +5755,9 @@ fn draw_grid(
     rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
 ) {
-    let spacing = 10.0;
-    // Leave room for the floating scrollbar so the last column never touches
-    // (or hides behind) the sidebar.
-    let width = (ui.available_width() - 9.0).max(180.0);
-    let columns = (((width + spacing) / 238.0).floor() as usize).clamp(1, 6);
-    let card_width =
-        ((width - spacing * (columns.saturating_sub(1)) as f32) / columns as f32).max(170.0);
+    let spacing = GRID_GAP;
+    let width = board_content_width(ui);
+    let (columns, card_width) = grid_geometry(width);
     // One stand-in for sounds the registry has no entry for, so neither the map
     // lookup nor its error strings are cloned per item.
     let no_info = SoundInfo::default();
@@ -5700,8 +5814,9 @@ fn draw_list(
     // One stand-in for sounds the registry has no entry for (see `draw_grid`).
     let no_info = SoundInfo::default();
     ui.horizontal_top(|ui| {
-        let content_width = ui.available_width().min(1100.0);
-        let pad = ((ui.available_width() - content_width) * 0.5).max(0.0);
+        let available = board_content_width(ui);
+        let content_width = available.min(1100.0);
+        let pad = ((available - content_width) * 0.5).max(0.0);
         ui.add_space(pad);
         ui.vertical(|ui| {
             ui.set_width(content_width);
@@ -5732,16 +5847,36 @@ fn draw_list(
     });
 }
 
-fn centered_modal_area(id: Id) -> egui::Area {
-    egui::Modal::default_area(id)
-        .anchor(Align2::CENTER_CENTER, Vec2::new(-SIDEBAR_WIDTH * 0.5, 0.0))
+/// How far a window-centred modal must move so it lands on `content`'s centre.
+/// Anchoring is relative to the window, so this is the correction, not a
+/// hardcoded offset: half the sidebar left for the board, half the rail right
+/// for Settings (B13).
+fn content_centre_offset(content: Rect, screen: Rect) -> Vec2 {
+    if content.is_positive() {
+        content.center() - screen.center()
+    } else {
+        Vec2::ZERO
+    }
 }
 
-/// Shared modal chrome: centred over the board (offset for the sidebar),
-/// transparent backdrop, panel frame, fixed body width, and backdrop-click
-/// close. `body` gets the modal's `close` flag so a header X can cancel it.
+/// Centre modals over the content area (the board, or the settings body) rather
+/// than over the window: an area anchored to the window is pulled left by the
+/// 300 px sidebar, which is what put Settings-opened dialogs off-centre (B13).
+/// `content` comes from the panel the body was painted into; an unset rect
+/// (first frame) falls back to the window centre.
+fn centered_modal_area(id: Id, content: Rect, screen: Rect) -> egui::Area {
+    egui::Modal::default_area(id).anchor(
+        Align2::CENTER_CENTER,
+        content_centre_offset(content, screen),
+    )
+}
+
+/// Shared modal chrome: centred over the content area, transparent backdrop,
+/// panel frame, fixed body width, and backdrop-click close. `body` gets the
+/// modal's `close` flag so a header X can cancel it.
 fn modal_shell(
     ctx: &egui::Context,
+    content: Rect,
     id: Id,
     width: f32,
     margin: i8,
@@ -5749,7 +5884,7 @@ fn modal_shell(
     body: impl FnOnce(&mut Ui, &mut bool),
 ) {
     let modal = egui::Modal::new(id)
-        .area(centered_modal_area(id))
+        .area(centered_modal_area(id, content, ctx.screen_rect()))
         .backdrop_color(Color32::TRANSPARENT)
         .frame(
             Frame::NONE
@@ -7691,6 +7826,92 @@ mod tests {
                 "a {control} px control leaves no room for the label at the breakpoint"
             );
         }
+    }
+
+    /// The board's one right edge (B4): cards plus gaps fill the content width
+    /// exactly, and the toolbar's search field plus gap plus pill do too — so
+    /// the last column and the RAM pill end on the same pixel at any width.
+    #[test]
+    fn the_grid_and_the_toolbar_share_one_content_right_edge() {
+        // Board widths for the 960 px default and a 1200 px window: the window
+        // less the sidebar and the central panel's 14 px side margins.
+        let board_width = |window: f32| window - SIDEBAR_WIDTH - 2.0 * 14.0;
+        for window in [960.0_f32, 1200.0] {
+            let content = board_width(window);
+            assert!(content >= BOARD_CONTENT_MIN_W);
+
+            let (columns, card) = grid_geometry(content);
+            assert!((1..=GRID_MAX_COLUMNS).contains(&columns));
+            let filled = card * columns as f32 + GRID_GAP * (columns - 1) as f32;
+            assert!(
+                (filled - content).abs() < 0.01,
+                "the grid fills {content} px, not {filled} px, at {window} px"
+            );
+
+            let search = search_field_width(content, 164.0, 10.0);
+            assert!((search + 10.0 + 164.0 - content).abs() < 0.01);
+            // With RAM state hidden the field takes the whole row.
+            assert!((search_field_width(content, 0.0, 0.0) - content).abs() < 0.01);
+        }
+    }
+
+    /// No column count or rounding leaves a gap at the right edge.
+    #[test]
+    fn the_grid_geometry_never_undershoots_its_width() {
+        for width in (BOARD_CONTENT_MIN_W as u32..=1400).step_by(7) {
+            let width = width as f32;
+            let (columns, card) = grid_geometry(width);
+            let filled = card * columns as f32 + GRID_GAP * (columns - 1) as f32;
+            assert!(
+                (filled - width).abs() < 0.01,
+                "{width} px of content left {filled} px of cards"
+            );
+        }
+    }
+
+    /// Right-click on the master gain returns it to unity, which is a value the
+    /// slider itself can produce.
+    #[test]
+    fn the_master_gain_reset_lands_on_unity_inside_the_slider_range() {
+        assert_eq!(MASTER_GAIN_NEUTRAL_DB, 0.0, "0 dB is unity gain");
+        assert!(MASTER_GAIN_RANGE.contains(&MASTER_GAIN_NEUTRAL_DB));
+        assert!(MASTER_GAIN_RANGE.contains(&3.5), "3.5 dB is a legal value");
+    }
+
+    /// Modals centre on the body they belong to (B13). The board's content is
+    /// left of the window centre (sidebar on the right); the settings body is
+    /// right of it (rail on the left) — never the other way round.
+    #[test]
+    fn a_modal_centres_on_the_content_rect_not_the_window() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 540.0));
+
+        let board = Rect::from_min_max(
+            Pos2::new(0.0, 38.0),
+            Pos2::new(screen.right() - SIDEBAR_WIDTH, screen.bottom() - 34.0),
+        );
+        let offset = content_centre_offset(board, screen);
+        assert!(
+            (offset.x + SIDEBAR_WIDTH * 0.5).abs() < 0.01,
+            "a board modal sits half a sidebar left of the window centre"
+        );
+        assert!(
+            (screen.center() + offset - board.center()).length() < 0.01,
+            "the anchored centre lands on the board's centre"
+        );
+
+        let settings = Rect::from_min_max(
+            Pos2::new(200.0, 38.0),
+            Pos2::new(screen.right(), screen.bottom() - 34.0),
+        );
+        let offset = content_centre_offset(settings, screen);
+        assert!(
+            offset.x > 0.0,
+            "a settings modal moves right, never left of centre"
+        );
+        assert!((screen.center() + offset - settings.center()).length() < 0.01);
+
+        // Nothing painted yet: no correction rather than a NaN anchor.
+        assert_eq!(content_centre_offset(Rect::ZERO, screen), Vec2::ZERO);
     }
 
     fn device(id: &str, name: &str) -> DeviceInfo {
