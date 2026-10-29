@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align, Align2, Button, Color32, ComboBox, CornerRadius, FontId, Frame, Id, Key, LayerId,
-    Layout, Margin, Order, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
-    ViewportCommand,
+    Layout, Margin, Modifiers, Order, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit,
+    Ui, Vec2, ViewportCommand,
 };
+
+use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::audio::engine::{
     clamp_gain_db, AudioEvent, DeviceRoute, Engine, Slot, SOUND_GAIN_MAX_DB, SOUND_GAIN_MIN_DB,
@@ -139,6 +141,10 @@ const METER_PEAK_HOLD: Duration = Duration::from_millis(900);
 
 /// Hard cap on rendered search results; protects a pathological library.
 const MAX_SEARCH_RESULTS: usize = 500;
+
+/// `ShellExecuteW`'s return value is a legacy error code, not a handle: any
+/// value above this means the shell accepted the request.
+const SHELL_EXECUTE_MIN_SUCCESS: usize = 32;
 
 /// Hard cap on the activity log's memory; the oldest entry is dropped.
 const MAX_STATUS_ENTRIES: usize = 200;
@@ -538,6 +544,12 @@ pub struct App {
     drag: Option<DragState>,
     card_rects: Vec<(u64, Rect)>,
     row_rects: Vec<(u64, Rect)>,
+    /// Library tabs painted this frame, for the drag-to-tab hit test (B11).
+    tab_rects: Vec<(u64, Rect)>,
+    /// Background shell calls (Show in Explorer) report a failure here, so the
+    /// frame never waits on a dead network share.
+    explorer_tx: Sender<String>,
+    explorer_rx: Receiver<String>,
     undo: Option<UndoDelete>,
     last_dir: Option<PathBuf>,
     next_id: u64,
@@ -700,6 +712,7 @@ impl App {
             cc.egui_ctx.clone(),
         );
 
+        let (explorer_tx, explorer_rx) = unbounded();
         let mut app = Self {
             cfg,
             sounds,
@@ -739,6 +752,9 @@ impl App {
             drag: None,
             card_rects: Vec::new(),
             row_rects: Vec::new(),
+            tab_rects: Vec::new(),
+            explorer_tx,
+            explorer_rx,
             undo: None,
             last_dir: None,
             next_id: 1,
@@ -896,6 +912,13 @@ impl App {
                 }
             }
         }
+
+        // A background shell call (Show in Explorer) that failed: the frame
+        // never waited for it, so this is where it gets its log line.
+        while let Ok(message) = self.explorer_rx.try_recv() {
+            self.log(StatusKind::Warning, message);
+            ctx.request_repaint();
+        }
     }
 
     fn handle_tray(&mut self, command: TrayCommand, ctx: &egui::Context) {
@@ -1039,13 +1062,7 @@ impl App {
                 Action::Locate(id) => self.locate_sound(id),
                 Action::ShowInExplorer(id) => {
                     if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
-                        let mut cmd = std::process::Command::new("explorer");
-                        if sound.path.exists() {
-                            cmd.arg(format!("/select,{}", sound.path.display()));
-                        } else if let Some(parent) = sound.path.parent() {
-                            cmd.arg(parent);
-                        }
-                        let _ = cmd.spawn();
+                        self.show_in_explorer(sound.name.clone(), sound.path.clone());
                     }
                 }
                 Action::Volume(id, volume) => {
@@ -1078,13 +1095,20 @@ impl App {
                         if let Some(pointer) = pointer {
                             // Rects carry ids, so a list that shifted since the
                             // drag started still resolves to the right sound.
-                            let target = drop_target(&self.card_rects, pointer)
-                                .or_else(|| drop_target(&self.row_rects, pointer));
-                            if let Some(target) = target {
-                                if move_sound_to_id(&mut self.sounds, drag.sound_id, target) {
-                                    self.selected = Some(drag.sound_id);
-                                    self.mark_dirty();
+                            match drop_landing(
+                                &self.tab_rects,
+                                &self.card_rects,
+                                &self.row_rects,
+                                pointer,
+                            ) {
+                                // A tab is the context menu's "Move to" (B11).
+                                Some(DropLanding::Library(library_id)) => {
+                                    self.move_sound_to_library(drag.sound_id, library_id);
                                 }
+                                Some(DropLanding::Sound(target)) => {
+                                    self.reorder_sound(drag.sound_id, target);
+                                }
+                                None => {}
                             }
                         }
                     }
@@ -1106,6 +1130,43 @@ impl App {
         // product immediately.
         self.playback.set_gain(id, sound.gain_db);
         self.mark_dirty();
+    }
+
+    /// Hands one sound to Explorer, on a worker: resolving the shell item can
+    /// stall on a dead network share and the frame never waits for it (B3).
+    fn show_in_explorer(&self, name: String, path: PathBuf) {
+        self.spawn_shell_call(format!("Show \"{name}\" in Explorer"), move || {
+            shell_show_in_explorer(&path)
+        });
+    }
+
+    /// Opens a folder in Explorer on a worker, for the same reason.
+    fn open_folder_in_explorer(&self, path: PathBuf) {
+        let label = format!("Open {}", path.display());
+        self.spawn_shell_call(label, move || shell_open_folder(&path));
+    }
+
+    /// Runs one shell call off the UI thread. A failure comes back through the
+    /// log channel; nothing is reported from the worker itself.
+    fn spawn_shell_call(
+        &self,
+        label: String,
+        job: impl FnOnce() -> Result<(), String> + Send + 'static,
+    ) {
+        let tx = self.explorer_tx.clone();
+        let fail_tx = self.explorer_tx.clone();
+        let fail_label = label.clone();
+        let spawned = std::thread::Builder::new()
+            .name("sounddeck-shell".to_string())
+            .spawn(move || {
+                if let Err(message) = job() {
+                    // Only fails once the app is gone: nobody left to tell.
+                    let _ = tx.send(format!("{label}: {message}"));
+                }
+            });
+        if let Err(err) = spawned {
+            let _ = fail_tx.send(format!("{fail_label}: {err}"));
+        }
     }
 
     fn play_sound(&mut self, id: u64) {
@@ -3240,6 +3301,22 @@ impl App {
         let mut delete = None;
         let mut add = false;
 
+        // A card drag highlights the tab it would move the sound into (UI-5).
+        // The source library is looked up once, not per tab.
+        let drag_source = self.drag.as_ref().and_then(|drag| {
+            self.sounds
+                .iter()
+                .find(|sound| sound.id == drag.sound_id)
+                .map(|sound| sound.library_id)
+        });
+        let drag_pointer = match drag_source {
+            Some(_) => ui.ctx().input(|input| input.pointer.interact_pos()),
+            None => None,
+        };
+        // Reuse the buffer: tabs are repainted every frame.
+        let mut tabs = std::mem::take(&mut self.tab_rects);
+        tabs.clear();
+
         let tabs_width = (width - 32.0).max(60.0);
         ui.horizontal(|ui| {
             ui.allocate_ui_with_layout(
@@ -3260,17 +3337,24 @@ impl App {
                                         Vec2::new(width, 28.0),
                                         Sense::click(),
                                     );
+                                    tabs.push((library.id, rect));
                                     let hover = anim::hover(
                                         ui,
                                         Id::new(("tab_hover", library.id)),
                                         response.hovered(),
                                     );
+                                    // Its own tab is a no-op drop, so it never lights up.
+                                    let drop_hover = drag_source
+                                        .is_some_and(|source| source != library.id)
+                                        && drag_pointer
+                                            .is_some_and(|pointer| rect.contains(pointer));
                                     paint_library_tab(
                                         ui.painter(),
                                         rect,
                                         &library.name,
                                         active,
                                         hover,
+                                        drop_hover,
                                     );
                                     if response.clicked() {
                                         switch_to = Some(library.id);
@@ -3302,6 +3386,8 @@ impl App {
                 add = true;
             }
         });
+
+        self.tab_rects = tabs;
 
         if let Some(id) = switch_to {
             self.switch_library(id);
@@ -3612,6 +3698,16 @@ impl App {
         if !close {
             self.deleting = Some(state);
         }
+    }
+
+    /// Drops a dragged sound onto another one: reorder inside the library,
+    /// select it, schedule the save. A stale source or target is a no-op.
+    fn reorder_sound(&mut self, id: u64, target: u64) {
+        if !move_sound_to_id(&mut self.sounds, id, target) {
+            return;
+        }
+        self.selected = Some(id);
+        self.mark_dirty();
     }
 
     fn move_sound_to_library(&mut self, sound_id: u64, library_id: u64) {
@@ -4201,6 +4297,26 @@ impl App {
                 self.mark_dirty();
             }
         });
+
+        settings_group(ui, "Tabs", |ui| {
+            let mut cycle = self.cfg.cycle_tabs_ctrl_tab;
+            if settings_toggle(
+                ui,
+                Id::new("settings_cycle_tabs"),
+                "Cycle tabs with Ctrl+Tab",
+                &mut cycle,
+                false,
+                true,
+            ) {
+                self.cfg.cycle_tabs_ctrl_tab = cycle;
+                self.mark_dirty();
+            }
+            settings_detail(
+                ui,
+                "Ctrl+Tab goes to the next library, Ctrl+Shift+Tab to the previous one. \
+                 Off by default, so the chords stay free for other apps.",
+            );
+        });
     }
 
     fn settings_page_about(&mut self, ui: &mut Ui) {
@@ -4242,9 +4358,7 @@ impl App {
                 settings_divider(ui);
                 settings_value(ui, "Config folder", SETTINGS_BUTTON_SIZE.x, |ui| {
                     if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
-                        let _ = std::process::Command::new("explorer")
-                            .arg(model::config_dir())
-                            .spawn();
+                        self.open_folder_in_explorer(model::config_dir());
                     }
                 });
                 settings_divider(ui);
@@ -5035,6 +5149,32 @@ impl App {
             return;
         }
 
+        // Ctrl+Tab / Ctrl+Shift+Tab cycle the library tabs (F2). Off by
+        // default: while it is off the chords are never consumed, so they keep
+        // whatever meaning the focused app or egui gives them.
+        if self.cfg.cycle_tabs_ctrl_tab {
+            // Most specific first: `consume_key` ignores extra Shift, so
+            // Ctrl+Shift+Tab would otherwise be eaten by the Ctrl+Tab match.
+            let (previous, next) = ctx.input_mut(|input| {
+                (
+                    input.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab),
+                    input.consume_key(Modifiers::CTRL, Key::Tab),
+                )
+            });
+            let step = match (next, previous) {
+                (true, _) => 1,
+                (_, true) => -1,
+                _ => 0,
+            };
+            if step != 0 {
+                if let Some(id) = cycle_library(&self.libraries, self.active_library, step) {
+                    // The tab-click path, not a copy of it.
+                    self.switch_library(id);
+                }
+                return;
+            }
+        }
+
         let (open, find, toggle_layout, undo, delete, space, f2) = ctx.input(|i| {
             (
                 i.modifiers.ctrl && i.key_pressed(Key::O),
@@ -5530,6 +5670,42 @@ fn drop_target(rects: &[(u64, Rect)], pointer: Pos2) -> Option<u64> {
         .map(|(id, _)| *id)
 }
 
+/// What a released card drag lands on: a library tab moves the sound to that
+/// library, a card/row reorders it inside the current one (B11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropLanding {
+    Library(u64),
+    Sound(u64),
+}
+
+/// Tabs win over the board: they sit outside it, so there is no overlap to
+/// resolve — and the more specific target is the one the user aimed at.
+fn drop_landing(
+    tabs: &[(u64, Rect)],
+    cards: &[(u64, Rect)],
+    rows: &[(u64, Rect)],
+    pointer: Pos2,
+) -> Option<DropLanding> {
+    if let Some(id) = drop_target(tabs, pointer) {
+        return Some(DropLanding::Library(id));
+    }
+    drop_target(cards, pointer)
+        .or_else(|| drop_target(rows, pointer))
+        .map(DropLanding::Sound)
+}
+
+/// The library `step` tabs away from `active`, wrapping at both ends. `None`
+/// when there is nothing to cycle to (one library, or an unknown active id).
+fn cycle_library(libraries: &[Library], active: u64, step: isize) -> Option<u64> {
+    let count = libraries.len();
+    if count < 2 {
+        return None;
+    }
+    let index = libraries.iter().position(|library| library.id == active)?;
+    let next = (index as isize + step).rem_euclid(count as isize) as usize;
+    libraries.get(next).map(|library| library.id)
+}
+
 /// Move `id` to `target`'s position, keeping every other sound in order. Returns
 /// whether anything moved; a source or target that left the board is skipped.
 fn move_sound_to_id(sounds: &mut Vec<Sound>, id: u64, target: u64) -> bool {
@@ -5721,6 +5897,90 @@ fn open_url(url: &str) {
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
+    }
+}
+
+/// NUL-terminated UTF-16 for a Win32 path argument. One conversion, so no
+/// caller has to remember the terminator.
+fn wide_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// Selects `path` in Explorer through the shell namespace.
+///
+/// `explorer.exe /select,<path>` is a command line, and Explorer's switch
+/// parser needs the path quoted *on its own* (`/select,"<path>"`); `Command`
+/// quotes the whole token instead, so anything with a space, comma or long name
+/// fell through to Explorer's default folder (B3). The shell API takes a path,
+/// not a command line, so no quoting rule can be wrong.
+///
+/// Runs on a worker thread: `SHParseDisplayName` can stall on a dead share.
+/// Callers must have COM initialised on their thread, which this does itself.
+fn shell_show_in_explorer(path: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
+
+    let target = model::explorer_target(path, path.exists());
+    let file = match target {
+        model::ExplorerTarget::File(file) => file,
+        // The file is gone: show the folder that should hold it.
+        model::ExplorerTarget::Folder(folder) => return shell_open_folder(&folder),
+        model::ExplorerTarget::Nothing => {
+            return Err("the file is missing and the path names no folder".to_string())
+        }
+    };
+
+    // An apartment is all this needs; RPC_E_CHANGED_MODE (already initialised
+    // differently) is not a failure here.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+
+    let name = wide_path(&file);
+    let mut pidl = std::ptr::null_mut();
+    let parsed = unsafe { SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut pidl, 0, None) };
+    if parsed.is_err() || pidl.is_null() {
+        return Err(format!(
+            "the shell could not resolve {}",
+            file.file_name()
+                .unwrap_or(file.as_os_str())
+                .to_string_lossy()
+        ));
+    }
+
+    // cidl = 0 with a fully specified PIDL means "open the parent folder and
+    // select this item", which is exactly the ask.
+    let opened = unsafe { SHOpenFolderAndSelectItems(pidl, None, 0) };
+    unsafe { CoTaskMemFree(Some(pidl as *const core::ffi::c_void)) };
+    opened.map_err(|err| format!("could not open the folder ({err})"))
+}
+
+/// Opens `folder` in Explorer. A folder path handed to the shell is an argument
+/// to no parser, so spaces, commas, unicode and long names are safe.
+fn shell_open_folder(folder: &Path) -> Result<(), String> {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = wide_path(folder);
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW's HINSTANCE is a legacy error code: > 32 means success.
+    if result.0 as usize > SHELL_EXECUTE_MIN_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("could not open {}", folder.display()))
     }
 }
 
@@ -6799,8 +7059,29 @@ fn library_tab_width(ui: &Ui, name: &str, active: bool) -> f32 {
     (galley.size().x + 24.0).clamp(58.0, 168.0)
 }
 
-fn paint_library_tab(painter: &egui::Painter, rect: Rect, name: &str, active: bool, hover: f32) {
-    if active {
+fn paint_library_tab(
+    painter: &egui::Painter,
+    rect: Rect,
+    name: &str,
+    active: bool,
+    hover: f32,
+    drop_hover: bool,
+) {
+    if drop_hover {
+        // The drop target of an in-flight card drag (UI-5): accent tint plus a
+        // ring, so it reads as "release here" and not as a hover.
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::alpha(theme::accent(), 30),
+        );
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            Stroke::new(1.0_f32, theme::alpha(theme::accent(), 150)),
+            StrokeKind::Inside,
+        );
+    } else if active {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
@@ -6818,7 +7099,7 @@ fn paint_library_tab(painter: &egui::Painter, rect: Rect, name: &str, active: bo
     } else {
         theme::ui_font(13.0)
     };
-    let color = if active {
+    let color = if drop_hover || active {
         theme::text()
     } else {
         theme::mix(theme::muted(), theme::text(), hover * 0.4)
@@ -7735,6 +8016,70 @@ mod tests {
         assert_eq!(drop_target(&rects, Pos2::new(5.0, 5.0)), Some(7));
         assert_eq!(drop_target(&rects, Pos2::new(50.0, 5.0)), None);
         assert_eq!(drop_target(&[], Pos2::ZERO), None);
+    }
+
+    /// A tab is a move-to-library, a card is a reorder; tabs are outside the
+    /// board so the two can never fight over one point (B11).
+    #[test]
+    fn a_drop_on_a_library_tab_resolves_that_library() {
+        let tabs = vec![(4u64, Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)))];
+        let cards = vec![(
+            9u64,
+            Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::splat(10.0)),
+        )];
+        let rows = vec![(
+            9u64,
+            Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::splat(10.0)),
+        )];
+
+        assert_eq!(
+            drop_landing(&tabs, &cards, &rows, Pos2::new(5.0, 5.0)),
+            Some(DropLanding::Library(4))
+        );
+        assert_eq!(
+            drop_landing(&tabs, &cards, &rows, Pos2::new(25.0, 25.0)),
+            Some(DropLanding::Sound(9))
+        );
+        assert_eq!(
+            drop_landing(&tabs, &cards, &rows, Pos2::new(45.0, 45.0)),
+            Some(DropLanding::Sound(9)),
+            "a list row is the same reorder target a card is"
+        );
+        assert_eq!(
+            drop_landing(&tabs, &cards, &rows, Pos2::new(300.0, 300.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn cycling_libraries_wraps_in_both_directions() {
+        let libraries: Vec<Library> = [3u64, 5, 8]
+            .iter()
+            .map(|id| Library {
+                id: *id,
+                name: format!("Library {id}"),
+            })
+            .collect();
+
+        assert_eq!(cycle_library(&libraries, 3, 1), Some(5));
+        assert_eq!(cycle_library(&libraries, 5, 1), Some(8));
+        assert_eq!(cycle_library(&libraries, 8, 1), Some(3), "next wraps");
+        assert_eq!(cycle_library(&libraries, 3, -1), Some(8), "previous wraps");
+        assert_eq!(cycle_library(&libraries, 5, -1), Some(3));
+    }
+
+    #[test]
+    fn cycling_libraries_is_a_no_op_with_a_single_library() {
+        let one = vec![Library {
+            id: 1,
+            name: "Main".into(),
+        }];
+        assert_eq!(cycle_library(&one, 1, 1), None);
+        assert_eq!(cycle_library(&one, 1, -1), None);
+        assert_eq!(cycle_library(&[], 1, 1), None);
+        // An active id that is not on the board cycles nowhere rather than
+        // guessing a starting point.
+        assert_eq!(cycle_library(&one, 99, 1), None);
     }
 
     #[test]

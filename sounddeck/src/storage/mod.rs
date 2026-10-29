@@ -50,6 +50,9 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     /// Show the master-gain slider in the board sidebar.
     pub show_gain_slider: bool,
+    /// Ctrl+Tab / Ctrl+Shift+Tab cycle the library tabs. Off by default; while
+    /// off the chords are not consumed (F2).
+    pub cycle_tabs_ctrl_tab: bool,
     /// Show RAM/disk state (card chips, counts, toolbar pill). Off by default.
     pub show_ram_state: bool,
     /// Enables the global stop-all hotkey and its sidebar widget.
@@ -82,6 +85,7 @@ impl Default for Settings {
             animate_ui: true,
             minimize_to_tray: false,
             show_gain_slider: true,
+            cycle_tabs_ctrl_tab: false,
             show_ram_state: false,
             stop_all_hotkey_enabled: false,
             stop_all_hotkey: None,
@@ -143,6 +147,7 @@ impl Settings {
             SettingsGroup::Window => {
                 self.minimize_to_tray = defaults.minimize_to_tray;
                 self.show_gain_slider = defaults.show_gain_slider;
+                self.cycle_tabs_ctrl_tab = defaults.cycle_tabs_ctrl_tab;
             }
         }
         self.normalize();
@@ -535,6 +540,10 @@ mod tests {
         assert!(settings.loop_on_cable);
         assert!(!settings.minimize_to_tray);
         assert!(settings.show_gain_slider);
+        assert!(
+            !settings.cycle_tabs_ctrl_tab,
+            "Ctrl+Tab stays opt-in for old files"
+        );
     }
 
     #[test]
@@ -921,6 +930,7 @@ mod tests {
             animate_ui: false,
             minimize_to_tray: true,
             show_gain_slider: false,
+            cycle_tabs_ctrl_tab: true,
             show_ram_state: true,
             stop_all_hotkey_enabled: true,
             stop_all_hotkey: Some("Ctrl+Alt+S".into()),
@@ -979,6 +989,7 @@ mod tests {
         assert!(!settings.animate_ui);
         assert!(settings.minimize_to_tray);
         assert!(!settings.show_gain_slider);
+        assert!(settings.cycle_tabs_ctrl_tab);
 
         // So is everything that belongs to the board.
         assert_eq!(settings.active_library, 7);

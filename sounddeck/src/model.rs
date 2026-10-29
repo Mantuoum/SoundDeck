@@ -68,6 +68,32 @@ pub fn display_name(path: &Path) -> String {
         .unwrap_or_else(|| "Untitled sound".to_string())
 }
 
+/// What "Show in Explorer" hands the shell for one sound path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExplorerTarget {
+    /// Select this file in its folder.
+    File(PathBuf),
+    /// The file is gone: open the folder that should hold it.
+    Folder(PathBuf),
+    /// Nothing to show: the file is gone and the path names no folder.
+    Nothing,
+}
+
+/// The file when it is there, otherwise its folder (B3). The shell call takes
+/// this as a *path*, never as part of a command line, so spaces, commas,
+/// unicode and names past `MAX_PATH` need no quoting rules.
+pub fn explorer_target(path: &Path, exists: bool) -> ExplorerTarget {
+    if exists {
+        return ExplorerTarget::File(path.to_path_buf());
+    }
+    match path.parent() {
+        Some(folder) if !folder.as_os_str().is_empty() => {
+            ExplorerTarget::Folder(folder.to_path_buf())
+        }
+        _ => ExplorerTarget::Nothing,
+    }
+}
+
 pub fn format_duration(seconds: f32) -> String {
     if !seconds.is_finite() || seconds <= 0.0 {
         return "0:00".to_string();
@@ -96,5 +122,39 @@ mod tests {
         assert_eq!(format_duration(0.0), "0:00");
         assert_eq!(format_duration(3.2), "0:03");
         assert_eq!(format_duration(75.0), "1:15");
+    }
+
+    /// The path reaches the shell verbatim: nothing about it is ever
+    /// re-quoted or re-parsed, so an awkward name is not an awkward argument.
+    #[test]
+    fn explorer_target_should_keep_an_awkward_file_name_verbatim() {
+        let names = [
+            // Long name: 70-character stem, the case the /select, form broke on.
+            format!("C:\\Music\\{}.wav", "a".repeat(70)),
+            "C:\\Music\\my sound, take 2.wav".to_string(),
+            "C:\\Music\\klang \u{1f514} \u{fc}n\u{ef}code.wav".to_string(),
+        ];
+        for path in names {
+            let target = explorer_target(Path::new(&path), true);
+            assert_eq!(
+                target,
+                ExplorerTarget::File(PathBuf::from(&path)),
+                "{path} must reach the shell unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_target_should_open_the_folder_when_the_file_is_gone() {
+        assert_eq!(
+            explorer_target(Path::new("C:\\Music\\gone sound.wav"), false),
+            ExplorerTarget::Folder(PathBuf::from("C:\\Music"))
+        );
+        // A bare file name has no folder to open: say so instead of opening
+        // the current directory.
+        assert_eq!(
+            explorer_target(Path::new("gone.wav"), false),
+            ExplorerTarget::Nothing
+        );
     }
 }
