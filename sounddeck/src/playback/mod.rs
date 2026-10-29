@@ -1284,7 +1284,10 @@ mod tests {
         let playback = Playback::new(engine.clone());
         playback.register(31, PathBuf::from("Z:\\nope.wav"), 0.5, 0.0);
         // A stand-in voice: no decode, just something for the live path to reach.
-        engine.play(31, Arc::new(vec![0.0; 480]), 0.5);
+        // The buffer is deliberately long (5 s): a real mixer thread consumes the
+        // voice as soon as it plays, and a 5 ms stand-in can vanish before the
+        // assertions below run, which made this test flaky.
+        engine.play(31, Arc::new(vec![0.0; 48_000 * 5 * 2]), 0.5);
 
         // A gain step keeps the volume and re-applies the product.
         playback.set_gain(31, 6.0);
