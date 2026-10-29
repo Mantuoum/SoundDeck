@@ -15,14 +15,8 @@ where-to-change-what → §5; a rule §6 should have caught → §6; behaviour �
 Delete text that stopped being true instead of appending corrections; log entries stay
 one line.
 
-Log: `2026-10-28 — created (codebase review); batch-1 + step-6 syncs` · `2026-10-28 —
-slimmed: non-§2 sections compressed` · `2026-10-28 — A5/A6: config bundle + reset
-groups; storage §2.4, playbooks §5, SPEC 5.9/6.4, README` · `2026-10-28 — X1/D13:
-per-sound `gain_db` (§2.5), device substitution + name refresh (§2.6)` (detail in git
-history) · `2026-10-28 — step 9b: measure.ps1 (NFR-8.1/8.2), README accessibility,
-sound-id hardening` · `2026-10-28 — docs pass: SPEC 0.4.0 + FR-5.4.7/FR-5.7.10/UI-6,
-probe thread (§2.2/§2.5), Win chords (§2.7/§7), modals + Settings content (§2.8)` ·
-`2026-10-29 — QA workflow documented (checklist + test material, §7 tail)`.
+Log: `2026-10-28 — created (codebase review); 0.4.0 iteration syncs` · `2026-10-29 — QA
+workflow (checklist + test material)`. Details live in git history.
 
 ## 1. Repository layout
 
