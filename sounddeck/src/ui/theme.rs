@@ -6,9 +6,9 @@
 //! the display **name**. So renaming the file renames the theme: an id the
 //! settings still point at no longer exists, and [`set_theme`] falls back to
 //! Graphite **and says so** in its warnings instead of silently swapping the
-//! user's colours out. Because a rename is otherwise invisible in the UI, the
-//! dropdown label carries the id (`"<name> (<id>)"`) whenever the name does not
-//! spell it.
+//! user's colours out. A rename is still visible where it matters: the dropdown
+//! lists the theme by its display name (`"name"`, or the id when that is empty),
+//! and a vanished id is reported in the warnings.
 //!
 //! [`reload`] re-reads the folder and rebuilds the registry ([`reload_from`] is
 //! the same pass over an explicit folder, for tests); a pre-0.6 `<id>.md` is
@@ -136,27 +136,17 @@ fn embedded_entries() -> Vec<ThemeEntry> {
 
 /// Theme ids and dropdown labels for the settings combo, Graphite first.
 ///
-/// The label is the display name plus the id in parentheses when the name does
-/// not already spell it: the file name is the thing a user renames, so it has
-/// to be visible in the list — two files with the same name would otherwise be
-/// indistinguishable. The dropdown draws the label as-is, so this is the one
-/// place the rule lives.
+/// The label is the display name (`name`, which the parser already falls back
+/// to the id for) and nothing else: the dropdown shows the theme, not the file
+/// it lives in. The dropdown draws the label as-is, so this is the one place
+/// the rule lives.
 pub fn available() -> Vec<(String, String)> {
     read_themes(|themes| {
         themes
             .iter()
-            .map(|theme| (theme.id.clone(), choice_label(&theme.name, &theme.id)))
+            .map(|theme| (theme.id.clone(), theme.name.clone()))
             .collect()
     })
-}
-
-/// `"<name> (<id>)"` when the name cannot identify the file, else the name.
-fn choice_label(name: &str, id: &str) -> String {
-    if name.eq_ignore_ascii_case(id) {
-        name.to_string()
-    } else {
-        format!("{name} ({id})")
-    }
 }
 
 /// The active palette. Copy it once per paint function and read fields off the
@@ -600,6 +590,11 @@ pub fn apply_style(ctx: &egui::Context) {
     style.spacing.scroll.bar_inner_margin = 4.0;
     style.spacing.menu_margin = egui::Margin::symmetric(6, 6);
     style.spacing.window_margin = egui::Margin::same(0);
+    // Chrome text is not the user's text: the title bar, the credit, captions,
+    // About rows, activity-log rows and card names must never paint a selection
+    // (G2). Typed fields (search, rename, gain) are `TextEdit`s and keep their
+    // own selection — this switch only reaches `Label`.
+    style.interaction.selectable_labels = false;
     style.text_styles.insert(
         egui::TextStyle::Body,
         FontId::new(14.5, FontFamily::Proportional),
@@ -824,7 +819,7 @@ mod tests {
         assert!(
             available()
                 .iter()
-                .any(|(id, label)| id == "mine" && label == "First Name (mine)"),
+                .any(|(id, label)| id == "mine" && label == "First Name"),
             "{:?}",
             available()
         );
@@ -834,7 +829,7 @@ mod tests {
         assert!(
             available()
                 .iter()
-                .any(|(id, label)| id == "mine" && label == "Second Name (mine)"),
+                .any(|(id, label)| id == "mine" && label == "Second Name"),
             "{:?}",
             available()
         );
@@ -1041,10 +1036,10 @@ mod tests {
         assert_eq!(palette().bg, Color32::from_rgb(0x10, 0x10, 0x10));
     }
 
-    /// The dropdown label has to identify the file, otherwise renaming a file
-    /// (or two files sharing a name) is invisible in the list.
+    /// The dropdown shows the display name and nothing else: no file name, no
+    /// id suffix. A name that is missing or empty is the id (G4).
     #[test]
-    fn dropdown_label_names_the_file_when_the_name_differs() {
+    fn dropdown_label_is_the_display_name() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("label");
         write_theme(
@@ -1053,21 +1048,47 @@ mod tests {
             &[("bg", "#101010")],
         );
         write_theme(&dir.path().join("same.json"), "same", &[("bg", "#101010")]);
+        write_theme(&dir.path().join("unnamed.json"), "", &[("bg", "#101010")]);
         reload_from(dir.path());
 
         let choices = available();
         assert!(
             choices
                 .iter()
-                .any(|(id, label)| id == "mine" && label == "My Theme (mine)"),
-            "{choices:?}"
+                .any(|(id, label)| id == "mine" && label == "My Theme"),
+            "the label is the name, with no id suffix: {choices:?}"
         );
         assert!(
             choices
                 .iter()
                 .any(|(id, label)| id == "same" && label == "same"),
-            "a name that already spells the id needs no suffix: {choices:?}"
+            "a name that already spells the id reads the same: {choices:?}"
         );
+        assert!(
+            choices
+                .iter()
+                .any(|(id, label)| id == "unnamed" && label == "unnamed"),
+            "an empty name falls back to the id: {choices:?}"
+        );
+        assert!(
+            !choices.iter().any(|(_, label)| label.contains('(')),
+            "no label may carry a parenthesised id: {choices:?}"
+        );
+    }
+
+    /// G2: chrome text the user did not type must not be selectable. The switch
+    /// lives on the app's own style, so every `Label` picks it up; `TextEdit`
+    /// (search, rename, gain) is a separate widget and keeps its selection.
+    #[test]
+    fn static_labels_are_not_selectable() {
+        let _registry = registry_guard();
+        let ctx = eframe::egui::Context::default();
+        assert!(
+            ctx.style().interaction.selectable_labels,
+            "egui's default is selectable, so this test can only pass through apply_style"
+        );
+        apply_style(&ctx);
+        assert!(!ctx.style().interaction.selectable_labels);
     }
 
     /// The snapshot cache must not hide a theme switch made on the same thread.

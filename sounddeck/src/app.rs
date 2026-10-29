@@ -58,11 +58,20 @@ const STOP_ALL_PILL_W: f32 = 96.0;
 const STOP_ALL_PILL_H: f32 = 24.0;
 /// Gap between the body's hit rect and the pill's, so they never overlap.
 const STOP_ALL_BODY_GAP: f32 = 8.0;
+/// Inner padding of the hand-painted stop-all card.
+const STOP_ALL_PAD_X: f32 = 10.0;
+const STOP_ALL_PAD_Y: f32 = 4.0;
 /// Master gain slider range. `Settings::normalize` clamps to the same bounds;
 /// the UI only ever hands it a value from inside this range.
 const MASTER_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=12.0;
 /// Right-clicking the gain slider returns it here: 0 dB, i.e. unity.
 const MASTER_GAIN_NEUTRAL_DB: f32 = 0.0;
+
+// Keyboard focus. egui turns a Tab press into focus navigation before `update`
+// runs, so the Ctrl+Tab chord has to cancel that move itself.
+/// Focus holder used to cancel a Tab-granted focus move. No widget owns this
+/// id, so nothing paints it (see `global_shortcuts`).
+const TAB_FOCUS_BLOCK: &str = "tab_focus_block";
 
 // Settings layout metrics (SPEC FR-5.9.8 spacing, §7.2 widths). Every number the
 // settings screen uses comes from here so the four pages keep one rhythm.
@@ -2531,85 +2540,78 @@ impl App {
     ///
     /// The card is drawn by hand rather than with a `Label`, because the whole
     /// body has to be one click target: a label only senses its own text, which
-    /// left most of the card dead (B7).
+    /// left most of the card dead (B7). It is hand-painted rather than a `Frame`
+    /// for the same reason the loop card is: a `Frame` paints its fill before
+    /// the content exists, so it cannot react to a hover in the same frame, and
+    /// the two cards must share one hover treatment (G1).
     fn stop_all_card(&mut self, ui: &mut Ui) {
-        let mut stopped = false;
-        let mut capture = false;
-        let mut clear = false;
-        Frame::NONE
-            .fill(theme::card())
-            .stroke(Stroke::new(1.0_f32, theme::border_soft()))
-            .corner_radius(theme::RADIUS_MD)
-            .inner_margin(Margin::symmetric(10, 4))
-            .show(ui, |ui| {
-                let (row, _) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), STOP_ALL_PILL_H),
-                    Sense::hover(),
-                );
-                let painter = ui.painter().clone();
-                // The pill owns the right end of the row; the body is everything
-                // left of it. The two hit rects never overlap, so a body click
-                // cannot also fire the capture pill.
-                let pill_rect = Rect::from_min_max(
-                    Pos2::new(
-                        row.right() - STOP_ALL_PILL_W,
-                        row.center().y - STOP_ALL_PILL_H * 0.5,
-                    ),
-                    row.right_bottom(),
-                );
-                let body_rect = Rect::from_min_max(
-                    row.min,
-                    Pos2::new(pill_rect.left() - STOP_ALL_BODY_GAP, row.max.y),
-                );
+        let size = Vec2::new(ui.available_width(), STOP_ALL_PILL_H + 2.0 * STOP_ALL_PAD_Y);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            anim::hover_fill(ui, Id::new("stop_all_card"), rect),
+            Stroke::new(1.0_f32, theme::border_soft()),
+            StrokeKind::Inside,
+        );
+        let inner = rect.shrink2(Vec2::new(STOP_ALL_PAD_X, STOP_ALL_PAD_Y));
+        let row = Rect::from_min_size(inner.min, Vec2::new(inner.width(), STOP_ALL_PILL_H));
+        let painter = ui.painter().clone();
+        // The pill owns the right end of the row; the body is everything
+        // left of it. The two hit rects never overlap, so a body click
+        // cannot also fire the capture pill.
+        let pill_rect = Rect::from_min_max(
+            Pos2::new(
+                row.right() - STOP_ALL_PILL_W,
+                row.center().y - STOP_ALL_PILL_H * 0.5,
+            ),
+            row.right_bottom(),
+        );
+        let body_rect = Rect::from_min_max(
+            row.min,
+            Pos2::new(pill_rect.left() - STOP_ALL_BODY_GAP, row.max.y),
+        );
 
-                let body = ui.interact(body_rect, Id::new("stop_all_body"), Sense::click());
-                if body.hovered() {
-                    painter.rect_filled(
-                        body_rect,
-                        CornerRadius::same(theme::RADIUS_SM),
-                        theme::alpha(theme::text(), 8),
-                    );
-                }
-                painter.text(
-                    body_rect.left_center(),
-                    Align2::LEFT_CENTER,
-                    "Stop all",
-                    theme::ui_font(12.0),
-                    theme::text(),
-                );
-                stopped = body.clicked();
-                body.on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text("Stop every playing sound now");
+        let body = ui.interact(body_rect, Id::new("stop_all_body"), Sense::click());
+        painter.text(
+            body_rect.left_center(),
+            Align2::LEFT_CENTER,
+            "Stop all",
+            theme::ui_font(12.0),
+            theme::text(),
+        );
+        let stopped = body.clicked();
+        body.on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Stop every playing sound now");
 
-                let unset = self.stop_all.is_none();
-                let label = self
-                    .stop_all
-                    .map(|hotkey| hotkey.label())
-                    .unwrap_or_else(|| "Set hotkey".to_string());
-                // Same surface as the hotkey pill on a sound card.
-                painter.rect(
-                    pill_rect,
-                    CornerRadius::same(theme::RADIUS_MD),
-                    theme::field(),
-                    Stroke::new(1.0_f32, theme::border_soft()),
-                    StrokeKind::Inside,
-                );
-                painter.text(
-                    pill_rect.center(),
-                    Align2::CENTER_CENTER,
-                    label,
-                    theme::ui_font(11.0),
-                    if unset {
-                        theme::faint()
-                    } else {
-                        theme::muted()
-                    },
-                );
-                let pill = ui.interact(pill_rect, Id::new("stop_all_hotkey"), Sense::click());
-                capture = pill.clicked();
-                clear = pill.secondary_clicked() && !unset;
-                pill.on_hover_text("Click to set, right-click to clear");
-            });
+        let unset = self.stop_all.is_none();
+        let label = self
+            .stop_all
+            .map(|hotkey| hotkey.label())
+            .unwrap_or_else(|| "Set hotkey".to_string());
+        // Same surface as the hotkey pill on a sound card.
+        painter.rect(
+            pill_rect,
+            CornerRadius::same(theme::RADIUS_MD),
+            theme::field(),
+            Stroke::new(1.0_f32, theme::border_soft()),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            pill_rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            theme::ui_font(11.0),
+            if unset {
+                theme::faint()
+            } else {
+                theme::muted()
+            },
+        );
+        let pill = ui.interact(pill_rect, Id::new("stop_all_hotkey"), Sense::click());
+        let capture = pill.clicked();
+        let clear = pill.secondary_clicked() && !unset;
+        pill.on_hover_text("Click to set, right-click to clear");
 
         if stopped {
             self.engine.stop_all();
@@ -2823,10 +2825,9 @@ impl App {
         let height = if compact { 44.0 } else { 84.0 };
         let (rect, card_response) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-        let hover = anim::hover(ui, Id::new("loop_card"), ui.rect_contains_pointer(rect));
         let painter = ui.painter();
 
-        let fill = theme::mix(theme::card(), theme::text(), 0.03 * hover);
+        let fill = anim::hover_fill(ui, Id::new("loop_card"), rect);
         let fill = if active {
             theme::mix(fill, theme::accent(), 0.08)
         } else {
@@ -5110,9 +5111,12 @@ impl App {
             return;
         }
 
-        // Whether a text field owns the keyboard. Everything below that changes
+        // Whether a widget owns the keyboard. Everything below that changes
         // the board is suppressed while that is true; only quitting and the
-        // settings toggle above stay available.
+        // settings toggle above stay available. A text field takes focus by
+        // click or by `focus_search`; the only other way in is egui's Tab
+        // navigation, and Ctrl+Tab cancels the move that press would make (G3),
+        // so one chord can never suppress the next.
         let typing = ctx.memory(|m| m.focused().is_some());
 
         // Esc is a universal "back": close an open popup first, then the current
@@ -5171,6 +5175,15 @@ impl App {
                     // The tab-click path, not a copy of it.
                     self.switch_library(id);
                 }
+                // egui reads Tab for focus navigation at the start of the pass,
+                // before `update` runs, so the chord we just consumed has
+                // already queued a "focus the next widget" move. Left alone it
+                // lands on the first clickable widget, which then paints its
+                // active skin and makes the next press look like typing — the
+                // chord died until the window was clicked (G3). Parking the
+                // focus on an id no widget owns cancels the grant; `update`
+                // clears it again once the pass has painted.
+                ctx.memory_mut(|memory| memory.request_focus(Id::new(TAB_FOCUS_BLOCK)));
                 return;
             }
         }
@@ -5555,6 +5568,12 @@ impl eframe::App for App {
         self.draw_drop_overlay(ctx);
         self.drag_ghost(ctx);
         self.modals(ctx);
+
+        // Undo the focus block a Ctrl+Tab press parked in `global_shortcuts`
+        // now that every widget has painted and the grant is cancelled.
+        if ctx.memory(|memory| memory.focused()) == Some(Id::new(TAB_FOCUS_BLOCK)) {
+            ctx.memory_mut(|memory| memory.stop_text_input());
+        }
 
         stats::record_frame(frame_start.elapsed(), false, self.last_interval_ms);
     }
@@ -8066,6 +8085,52 @@ mod tests {
         assert_eq!(cycle_library(&libraries, 8, 1), Some(3), "next wraps");
         assert_eq!(cycle_library(&libraries, 3, -1), Some(8), "previous wraps");
         assert_eq!(cycle_library(&libraries, 5, -1), Some(3));
+    }
+
+    /// G3: egui reads Tab for focus navigation at the start of the pass, before
+    /// `update` runs, so a Ctrl+Tab press would otherwise drop focus — and an
+    /// "active" skin — onto the first clickable widget, and the next press
+    /// would look like typing. Parking the focus on an id no widget owns is what
+    /// cancels that move; this pins the mechanism so an egui bump cannot bring
+    /// the dead chord back silently.
+    #[test]
+    fn a_parked_focus_cancels_the_move_a_tab_press_makes() {
+        let probe = Id::new("focus_probe");
+
+        fn focused_after_a_tab_pass(park: bool) -> Option<Id> {
+            let ctx = egui::Context::default();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if park {
+                        ctx.memory_mut(|memory| memory.request_focus(Id::new(TAB_FOCUS_BLOCK)));
+                    }
+                    ui.interact(ui.max_rect(), Id::new("focus_probe"), Sense::click());
+                });
+            });
+            ctx.memory(|memory| memory.focused())
+        }
+
+        assert_eq!(
+            focused_after_a_tab_pass(false),
+            Some(probe),
+            "a bare Tab press focuses the first clickable widget"
+        );
+        assert_eq!(
+            focused_after_a_tab_pass(true),
+            Some(Id::new(TAB_FOCUS_BLOCK)),
+            "the park holds the focus, so no widget is granted it — and `update` \
+             clears exactly this id again after painting"
+        );
     }
 
     #[test]

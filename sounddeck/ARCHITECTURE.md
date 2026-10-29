@@ -519,8 +519,8 @@ top-level layer, so it can never draw over modals or popups.
   muted, faint, accent, purple, amber, red (optional `accent_soft`).
 - Missing/invalid token → Graphite's value. **The file stem is the id** (that is what
   `settings.json` stores and every lookup matches); `name` is the display name (missing or
-  empty → the id). `theme::available()` labels an entry `"<name> (<id>)"` when the name
-  does not spell the id, so two files sharing a name stay distinguishable. `accent_soft`
+  empty → the id) and it is the whole dropdown label — `theme::available()` adds no file
+  name or id suffix. `accent_soft`
   is derived when absent. A file that is not valid JSON is skipped with a warning; the
   other themes still load.
 - Seeding writes the five embedded palettes as JSON only while the folder holds **no**
@@ -540,6 +540,9 @@ top-level layer, so it can never draw over modals or popups.
 ### Motion (`ui/anim.rs`)
 
 - 60–90 ms ease-out tweens for hover, press, fades and the layout pill; no bounce.
+- `hover_fill` is the one hover surface for a card (resting `card()` lifted toward
+  `text()` by `HOVER_LIFT`): the loop card and the stop-all card both paint through it,
+  so a hover cannot read differently on the two (SPEC UI-8).
 - `animate_ui` **and** the Windows client-area animation flag gate everything; when
   disabled, tweens snap.
 - Tween state lives in egui memory keyed by stable IDs; repaints are requested only

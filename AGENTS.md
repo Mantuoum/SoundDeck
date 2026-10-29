@@ -18,7 +18,9 @@ one line.
 Log: `2026-10-28 — created (codebase review); 0.4.0 iteration syncs` · `2026-10-29 — QA
 workflow (checklist + test material)` · `2026-10-29 — 0.5.0 round (shell worker, blocked
 chords, trim dialog, theme id/name)` · `2026-10-29 — themes are JSON (<id>.json, a 0.5.0 .md
-auto-migrated to .md.migrated)`. Details live in git history.
+auto-migrated to .md.migrated)` · `2026-10-29 — review deltas G1–G4 (one hover surface,
+unselectable chrome text, Ctrl+Tab focus block, theme labels without the id)`. Details live
+in git history.
 
 ## 1. Repository layout
 
@@ -274,7 +276,10 @@ checker stays happy. Singleton chrome (sidebar, settings) mutates directly by de
 **Frame lifecycle** (`update`): detect Settings transition → debounce search
 (`search` → `filter_needle`, 120 ms) → `poll_events` (playback/engine/hotkey channels plus
 the `explorer_tx` shell-log channel) → close/minimize handling → `global_shortcuts`
-(typing-guarded) → edge-resize
+(typing-guarded: `focused().is_some()`, and egui reads Tab for focus navigation *before*
+`update` runs, so Ctrl+Tab parks the focus on `TAB_FOCUS_BLOCK` to cancel that grant —
+cleared after painting; without it the chord dies until the window is clicked) →
+edge-resize
 hit-testing → `tick` (loop state, save debounce, meters, frame pacing) → paint title
 bar + (board | settings) → chrome, drop overlay, drag ghost, modals. When hidden
 (tray): `hidden_tick` only, zero painting — the window is *minimized*, never
@@ -325,7 +330,7 @@ export/import/reset all). The three field pages end with a Reset card
 **Themes** (`ui/theme*`): JSON `config/themes/<id>.json` — `name`, optional `light`, one
 key per colour from the single `COLOUR_TOKENS` table (hex, `#` optional). The **file stem
 is the id** (what `settings.json` stores); `name` is the display **name** (empty → the id),
-and the dropdown labels an entry `"<name> (<id>)"` when the name does not spell the id.
+and the dropdown labels an entry by its display name only — no `(id)` suffix.
 Invalid/missing token falls back to Graphite, a corrupt file is skipped with a warning; 5
 embedded palettes seed the folder only while it holds no theme file in either format. A
 0.5.0 `<id>.md` is converted once to `<id>.json` and renamed `<id>.md.migrated`
@@ -335,13 +340,17 @@ reselecting) and a vanished id falls back to Graphite with a warning naming the 
 available ones, then the stored id is corrected to `graphite`. Runtime `RwLock<Palette>` →
 egui style. Radii constants `SM/MD/LG/XL`. Fonts: bundled Satoshi via
 `theme::ui_font`/`medium` (the sidebar credit uses `medium` at 12.5 px);
-`theme::truncate` for ellipsis.
+`theme::truncate` for ellipsis. `apply_style` also turns off
+`interaction.selectable_labels`: chrome text the user did not type is never selectable,
+while `TextEdit` (search, rename, gain) keeps its own selection (SPEC UI-9).
 
 **Volume** (`ui/volume.rs`): stored linear 0..1, slider position logarithmic over
 −60…0 dBFS (one curve everywhere, UI-4 — never add a second). The bar has no icon and
 consumes the wheel on every frame the pointer is over it, so the page never scrolls while
 a value is being dragged or wheeled. **Animation**
-(`ui/anim.rs`): 60–90 ms tweens, gated on the user setting AND the OS animation flag.
+(`ui/anim.rs`): 60–90 ms tweens, gated on the user setting AND the OS animation flag;
+`anim::hover_fill` is the one card-hover surface — the loop and stop-all cards both paint
+through it (SPEC UI-8).
 
 ---
 
@@ -468,6 +477,7 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | **None (silent) is a closed slot**, not an unconfigured one: the render thread is shut down, the choice is stored, and no substitute is resolved for it | SPEC FR-5.5.9 |
 | Blocked chords (`BLOCKED_CHORDS`) are never bindable — refused at capture, unbound at load; the sound survives | SPEC FR-5.7.11 |
 | Theme **file stem = id** (what settings stores), `name` field = display name; a vanished id falls back to Graphite with a warning and the id is corrected | SPEC FR-5.10.2/5.10.8 |
+| **Chrome text is not selectable** (`interaction.selectable_labels = false`): copying text out of the log or About is deliberately lost | SPEC UI-9 |
 | No progress bar until duration is known | decided 2026-10-28 |
 | A user `Graphite.json` **is** the built-in seed file (Windows names are case-insensitive; the stem is the id) — there is no "alongside" case | decided 2026-10-29 |
 

@@ -8,7 +8,12 @@
 
 use std::hash::Hash;
 
-use eframe::egui::{self, Id};
+use eframe::egui::{self, Color32, Id, Rect};
+
+use super::theme;
+
+/// How far a hover lifts a card's fill toward the text colour.
+const HOVER_LIFT: f32 = 0.03;
 
 static USER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static OS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -60,6 +65,16 @@ pub fn hover(ui: &egui::Ui, id: impl Hash, hovered: bool) -> f32 {
         ui.ctx().request_repaint();
     }
     value
+}
+
+/// Fill for a card surface under the pointer: the resting `card()` colour
+/// lifted toward `text()` by the shared hover tween. The loop card and the
+/// stop-all card both paint through this, so their hover treatment cannot
+/// drift apart (G1). A caller with its own state colouring (the loop card's
+/// accent wash while it plays) layers that on the returned colour.
+pub fn hover_fill(ui: &egui::Ui, id: impl Hash, rect: Rect) -> Color32 {
+    let hover = hover(ui, id, ui.rect_contains_pointer(rect));
+    theme::mix(theme::card(), theme::text(), HOVER_LIFT * hover)
 }
 
 /// 0 when released, 1 while pressed; eases over ~50 ms / 90 ms.

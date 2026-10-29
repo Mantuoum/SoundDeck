@@ -34,6 +34,7 @@ already parked and waiting.
       `config\themes\` contains the 5 seeded themes; `config\settings.json` + `libraries.json` created. - [only when I interact with anything that changes the defaults]
 - [x] Drag the title bar (not over tabs) → window moves; double-click title bar → maximize/restore.
 - [x] Hover the three window buttons → Minimize/Maximize highlight, **Close turns red**.
+- [ ] **No selectable chrome text** (G2): drag across the title bar, the "Developed by Mantum" credit, a status-bar message, an About row and an activity-log row → **no text selection appears anywhere**; the search box, the rename field and the gain numeric field still select and edit normally.
 - [x] Resize from each window edge (6 px hot zone) → resize cursor; below 860×500 it refuses.
 - [x] Size is **not** remembered: quit, relaunch at a different size → back to 960×540.
 - [x] Launch a **second copy** (same exe) → it focuses the running window and exits (no second window, no crash).
@@ -102,7 +103,7 @@ already parked and waiting.
 - [x] **+** creates a library and immediately opens its rename dialog; it becomes active.
 - [x] Tab context menu: **Rename…** works (Esc cancels); **Delete** (see below). Last remaining library has **no delete** (or refuses).
 - [x] Switch tabs → sound list swaps, search cleared, playback stops, **hotkeys switch to the new tab's set**, loop keeps playing.
-- [ ] **Ctrl+Tab cycling** (Settings → Window → "Cycle tabs with Ctrl+Tab", **off by default**): off → `Ctrl+Tab` does nothing to the board (it falls through untouched); on → `Ctrl+Tab` = next library, `Ctrl+Shift+Tab` = previous, both wrap around; ignored while a text field has focus or a modal is open. Survives a restart.
+- [ ] **Ctrl+Tab cycling** (Settings → Window → "Cycle tabs with Ctrl+Tab", **off by default**): off → `Ctrl+Tab` does nothing to the board (it falls through untouched); on → `Ctrl+Tab` = next library, `Ctrl+Shift+Tab` = previous, both wrap around, and **repeated presses keep cycling without clicking the window in between** (G3 — no focus ring appears on a board widget); ignored while a text field has focus or a modal is open. Survives a restart.
 - [x] Delete library **with sounds** → dialog: `Move to [▾]` (defaults to first remaining), **Move sounds**, **Delete sounds** (red label), **Cancel**:
       - [x] Cancel → nothing changes.
       - [x] Move → sounds appear in the chosen library; counts correct; log summary.
@@ -130,6 +131,7 @@ already parked and waiting.
 - [x] Volume sliders: drag moves the % label; **link toggle** makes one slider move both; unlink and they separate; values persist.
 - [ ] Master gain: 0…+12 dB, audible at max; label shows `+3.0 dB` style with sign; hidden when "Show gain slider" is off (Settings → Window). **Right-click on the slider snaps it back to `0.0 dB`** without starting a drag or disturbing the output levels (B9).
 - [ ] **Sidebar order** (top to bottom of the scrollable part): devices + link → **Gain** → **Stop all** → **Loop**; the credit, the peak meter and the Settings button stay **pinned** at the bottom and never scroll away. On a 540 px-tall window the whole upper stack scrolls instead of hiding a widget (F4).
+- [ ] **Stop-all hover matches the Loop card** (G1): hovering the stop-all card lifts the whole card's fill with the same soft tint and easing as the Loop card — no grey blocky patch behind "Stop all", no smaller inner radius.
 - [x] Peak meter: green/yellow/red zones track playback on **each** output independently; falls to floor when silence; no stale flash after restore from tray.
 - [ ] **Unplug a device** mid-play → status: activity-log warning + Settings → Playback shows the amber `"X" not found - using "Y"` line; audio continues on the fallback. Replug + refresh → resolves back. 
 
@@ -161,7 +163,7 @@ already parked and waiting.
 - [x] Switch theme → whole UI recolours live; choice survives restart.
 - [x] Edit a colour in `config\themes\<id>.json` → Settings → Reload themes → change visible **without reselecting the theme** (B12 — reload re-resolves the active id).
 - [ ] **Rename a theme file** (`mocha.json` → `mocha2.json`) while it is the active theme → Reload: the log warns `theme "mocha" is not in config/themes (available: …); using Graphite`, the UI repaints in Graphite, and `settings.json` now stores `"graphite"`.
-- [ ] **Two files, one name**: copy `graphite.json` to `mytheme.json` and leave `"name": "Graphite"` → the dropdown lists `Graphite` **and** `Graphite (mytheme)`, and picking either is distinguishable. Change the name to `My Graphite` → the entry reads `My Graphite (mytheme)`.
+- [ ] **Two files, one name**: copy `graphite.json` to `mytheme.json` and leave `"name": "Graphite"` → the dropdown lists `Graphite` twice (the label is the display name, no `(id)` suffix — G4), so the two entries are indistinguishable; change the name to `My Graphite` → that entry reads `My Graphite`.
 - [ ] Delete a token from a theme file → reload → falls back to Graphite's value; warning in activity log. Re-add it → returns.
 - [ ] Invalid hex (`"accent": "banana"`) → fallback + warning; app stays healthy.
 - [ ] Corrupt JSON (`"bg": `) → that theme is skipped with a `not valid JSON` warning; every other theme still loads.

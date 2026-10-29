@@ -90,7 +90,9 @@ live in `config/` next to the executable.
   colours repaint immediately, without restarting or reselecting the theme.
   The shipped palettes use a `#0097FF` accent. A file named like a built-in (for example
   `Graphite.json`) is listed as its own theme alongside the built-in Graphite instead of
-  replacing it — edit `graphite.json` itself to change the default palette. A 0.5.0
+  replacing it — edit `graphite.json` itself to change the default palette. The dropdown
+  shows each theme's `name` and nothing else, so two files sharing a name read the same
+  there: change the `name` field to tell them apart. A 0.5.0
   `<id>.md` theme is converted once on load and kept beside the JSON as `<id>.md.migrated`.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.

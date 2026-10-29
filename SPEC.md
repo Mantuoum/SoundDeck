@@ -220,7 +220,7 @@ specification:**
 | FR-5.10.6 | Motion MUST honour both the user setting and the OS animation preference. |
 | FR-5.10.7 | Theme reload MUST NOT accumulate font atlases. |
 | FR-5.10.8 | Reload MUST re-resolve the active theme, so an edited colour repaints without reselecting it. A stored id whose file was renamed or deleted MUST fall back to Graphite with a warning naming the id and the available ids, and the stored id MUST be corrected to `graphite`. |
-| FR-5.10.9 | The theme list MUST label an entry `"<name> (<id>)"` when the name does not spell the id, so two files with the same name stay distinguishable. |
+| FR-5.10.9 | The theme list MUST label an entry by its display name only — no file name or id in the label. The display name is therefore what tells two themes apart (FR-5.10.2). |
 | FR-5.10.10 | A pre-0.6 `<id>.md` theme MUST be converted once on load: `<id>.json` is written from the old parser's result, the Markdown file is renamed `<id>.md.migrated` (never deleted), and each conversion is reported in one log line. When both `<id>.json` and `<id>.md` exist the JSON wins and is not overwritten. |
 
 ### 5.11 Persistence
@@ -372,6 +372,8 @@ top-level layer, so it cannot draw over modals or popups.
 | UI-5 | Drop target highlights only while a drag is over the window. Library tabs are drop targets too: the tab under the pointer tints, and dropping a card there moves the sound to that library (the same move as the context menu, and a drop on the sound's own library is a no-op) without changing the active library. |
 | UI-6 | Status messages are terse and never stack duplicates for the same event: a repeated message refreshes the newest entry instead of adding another, and the log keeps the last 200 entries. |
 | UI-7 | Modals centre on the content area currently shown (board or Settings), not on the window, so a modal opened from Settings is not offset toward the sidebar. |
+| UI-8 | A card surface lifts its fill on hover through one shared treatment (same fill, alpha and easing everywhere); the loop and stop-all widgets read identically on hover, and their resting appearance is unchanged. |
+| UI-9 | Only typed text is selectable: static chrome (title bar, credit, captions, About and log rows, card text) never paints a selection, while `TextEdit`s keep normal selection and editing. |
 
 ### 7.4 Keyboard (application-local)
 
@@ -392,7 +394,8 @@ top-level layer, so it cannot draw over modals or popups.
 
 `Ctrl+Tab` and `Ctrl+Shift+Tab` are ignored while a text field has focus or a modal is
 open. While the setting is off the chords are never consumed, so they keep whatever
-meaning the focused application gives them.
+meaning the focused application gives them. A press MUST NOT leave widget focus behind:
+consecutive presses cycle without an intervening click.
 
 ## 8. Non-functional requirements
 
