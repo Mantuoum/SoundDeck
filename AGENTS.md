@@ -17,7 +17,8 @@ one line.
 
 Log: `2026-10-28 — created (codebase review); 0.4.0 iteration syncs` · `2026-10-29 — QA
 workflow (checklist + test material)` · `2026-10-29 — 0.5.0 round (shell worker, blocked
-chords, trim dialog, theme id/name)`. Details live in git history.
+chords, trim dialog, theme id/name)` · `2026-10-29 — themes are JSON (<id>.json, a 0.5.0 .md
+auto-migrated to .md.migrated)`. Details live in git history.
 
 ## 1. Repository layout
 
@@ -106,8 +107,9 @@ Files convert once at decode; devices convert once at output. SFX go to *both* o
 5. `storage::load(app_dir())` (see §2.4) → undecorated 960×540 window (min 860×500,
    size deliberately not persisted) → `App::new` → `eframe::run_native`.
 
-`App::new`: unpack config → install theme (seeds `config/themes/*.md` from embedded
-palettes only while the folder holds no Markdown) → parse stop-all hotkey → build
+`App::new`: unpack config → install theme (converts a 0.5.0 `.md` theme once, seeds
+`config/themes/*.json` from embedded palettes only while the folder holds no theme file) →
+parse stop-all hotkey → build
 `sounds`/`libraries` + per-sound `search_key` → create `Engine` + `Playback`, register
 sounds → enumerate devices (Monitor = default output; Cable = first "cable"/"virtual"-named
 device) → start hotkey/tray service → record JSON fingerprints (so the first save rewrites
@@ -320,16 +322,20 @@ default off), About (version, config folder, links, Data:
 export/import/reset all). The three field pages end with a Reset card
 (`Settings::reset_group`); About's Reset all is confirmed.
 
-**Themes** (`ui/theme*`): Markdown `config/themes/<id>.md`, `| token | hex |` table. The
-**file stem is the id** (what `settings.json` stores); the `# Heading` is the display
-**name**, and the dropdown labels an entry `"<name> (<id>)"` when the heading does not
-spell the id. Invalid/missing token falls back to Graphite; 5 embedded palettes seed the
-folder only while it holds no Markdown. `reload_from(dir)` is the test seam; reload
-re-resolves the active id (an edited colour repaints without reselecting) and a vanished id
-falls back to Graphite with a warning naming the id and the available ones, then the stored
-id is corrected to `graphite`. Runtime `RwLock<Palette>` → egui style. Radii constants
-`SM/MD/LG/XL`. Fonts: bundled Satoshi via `theme::ui_font`/`medium` (the sidebar credit
-uses `medium` at 12.5 px); `theme::truncate` for ellipsis.
+**Themes** (`ui/theme*`): JSON `config/themes/<id>.json` — `name`, optional `light`, one
+key per colour from the single `COLOUR_TOKENS` table (hex, `#` optional). The **file stem
+is the id** (what `settings.json` stores); `name` is the display **name** (empty → the id),
+and the dropdown labels an entry `"<name> (<id>)"` when the name does not spell the id.
+Invalid/missing token falls back to Graphite, a corrupt file is skipped with a warning; 5
+embedded palettes seed the folder only while it holds no theme file in either format. A
+0.5.0 `<id>.md` is converted once to `<id>.json` and renamed `<id>.md.migrated`
+(`parse_markdown` is that format's only reader; JSON wins when both exist). `reload_from(dir)`
+is the test seam; reload re-resolves the active id (an edited colour repaints without
+reselecting) and a vanished id falls back to Graphite with a warning naming the id and the
+available ones, then the stored id is corrected to `graphite`. Runtime `RwLock<Palette>` →
+egui style. Radii constants `SM/MD/LG/XL`. Fonts: bundled Satoshi via
+`theme::ui_font`/`medium` (the sidebar credit uses `medium` at 12.5 px);
+`theme::truncate` for ellipsis.
 
 **Volume** (`ui/volume.rs`): stored linear 0..1, slider position logarithmic over
 −60…0 dBFS (one curve everywhere, UI-4 — never add a second). The bar has no icon and
@@ -359,7 +365,7 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
   `evictable`); missing-file = `Playback::info`;
   volume curve = `ui/volume.rs`; per-sound level = `engine::effective_gain` (volume ×
   dB trim) with `engine::clamp_gain_db` as the only range clamp; never-bindable chords =
-  `hotkeys::BLOCKED_CHORDS`; theme id = the file stem, theme name = the heading.
+  `hotkeys::BLOCKED_CHORDS`; theme id = the file stem, theme name = the `name` field.
   Cross-thread talk = channels drained on the UI thread.
 - Modules keep truthful `//!` headers. Parallel work only on disjoint modules;
   `app.rs`/`hotkeys.rs` always serially.
@@ -406,7 +412,7 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 | To add… | Steps |
 | --- | --- |
 | A setting | field + `Default` + `normalize()` clamp + `#[serde(default)]` → control in the right `settings_page_*` → consumer + `mark_dirty()` → test if clamped → SPEC §6.1 + README |
-| A theme token | `Palette` field → default in `theme_defaults.rs` → one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` (parser/template/coverage test follow) → use `theme::token()` |
+| A theme token | `Palette` field → default in `theme_defaults.rs` → one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` (the JSON parser, the template and the field-coverage test all follow from that one table) → use `theme::token()` |
 | A sound action | `Action` variant → `handle_actions` arm → trigger in `sound_item`/context menu |
 | A Settings tab | `SettingsTab` variant + `title()` + `ALL` → rail item (About stays pinned) → `settings_page_*` + `settings_content` match |
 | A volume | only `ui/volume.rs` — store linear, display via `to_position`/`percent_text` |
@@ -449,7 +455,7 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | **Exclusive playback**: a trigger fades out all current voices. Intentional. | SPEC FR-5.4.1 |
 | SFX go to both outputs equally (per-sound routing = future item) | SPEC FR-5.5.5 |
 | Volumes stored linear, shown log (−60…0 dBFS); one curve | SPEC UI-4 |
-| Portable: no installer/registry/AppData/network; JSON + Markdown themes; audio files never copied | SPEC ENV-2/4, FR-5.3.14 |
+| Portable: no installer/registry/AppData/network; JSON config + JSON themes; audio files never copied | SPEC ENV-2/4, FR-5.3.14 |
 | Single instance per exe path; window size not persisted | SPEC ENV-5, FR-5.8.1 |
 | RAM state hidden by default (diagnostics) | SPEC FR-5.9.9 |
 | Hidden = minimize + taskbar-DeleteTab, never `Visible(false)` (burns a core) | ARCHITECTURE §6 |
@@ -461,9 +467,9 @@ Behaviour lives in SPEC.md. The ones agents most often get wrong:
 | A gone output device keeps its stored endpoint; the slot plays on a reported substitute | SPEC FR-5.5.7 |
 | **None (silent) is a closed slot**, not an unconfigured one: the render thread is shut down, the choice is stored, and no substitute is resolved for it | SPEC FR-5.5.9 |
 | Blocked chords (`BLOCKED_CHORDS`) are never bindable — refused at capture, unbound at load; the sound survives | SPEC FR-5.7.11 |
-| Theme **file stem = id** (what settings stores), `# Heading` = display name; a vanished id falls back to Graphite with a warning and the id is corrected | SPEC FR-5.10.2/5.10.8 |
+| Theme **file stem = id** (what settings stores), `name` field = display name; a vanished id falls back to Graphite with a warning and the id is corrected | SPEC FR-5.10.2/5.10.8 |
 | No progress bar until duration is known | decided 2026-10-28 |
-| A user `Graphite.md` **is** the built-in seed file (Windows names are case-insensitive; the stem is the id) — there is no "alongside" case | decided 2026-10-29 |
+| A user `Graphite.json` **is** the built-in seed file (Windows names are case-insensitive; the stem is the id) — there is no "alongside" case | decided 2026-10-29 |
 
 Scope exclusions: SPEC §10 Non-goals. `plan.md` is the work list — implement items in
 order; parallel work only on disjoint file sets (`app.rs`/`hotkeys.rs` serial); mark

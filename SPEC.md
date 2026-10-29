@@ -41,7 +41,7 @@ specification:**
 - A single streamed looping track with independent level and routing.
 - Global hotkeys that pass through to the focused window.
 - Tray residency with configurable minimize behaviour.
-- Markdown themes, JSON config, everything portable beside the executable.
+- JSON themes, JSON config, everything portable beside the executable.
 - Measured idle/active CPU and memory budgets (§8).
 
 **Out of scope** — see §10.
@@ -212,15 +212,16 @@ specification:**
 
 | ID | Requirement |
 | --- | --- |
-| FR-5.10.1 | Themes MUST be Markdown files in `config/themes/<id>.md` containing a heading and a `\| token \| value \|` table. The five embedded palettes MUST be seeded only while the folder holds no Markdown file, and an existing file is never overwritten. |
-| FR-5.10.2 | The file stem is the theme id; the heading is the display name. |
-| FR-5.10.3 | A missing or invalid token MUST fall back to the Graphite value. |
-| FR-5.10.4 | Markdown, not JSON: users must be able to copy a theme and edit colours in a text editor. |
+| FR-5.10.1 | Themes MUST be JSON files in `config/themes/<id>.json`: one pretty-printed object (two-space indent) holding `name`, an optional `light` flag and one key per colour token. The five embedded palettes MUST be seeded as JSON only while the folder holds no theme file in either format, and an existing file is never overwritten. |
+| FR-5.10.2 | The file stem is the theme id; the `name` field is the display name. A missing or empty `name` falls back to the id. |
+| FR-5.10.3 | A missing or invalid token MUST fall back to the Graphite value. A file that is not valid JSON MUST be skipped with a warning while every other theme still loads. |
+| FR-5.10.4 | Human-editable JSON, not a binary format: users must be able to copy a theme and edit colours (hex strings, with or without `#`) in a text editor. |
 | FR-5.10.5 | Palette colours MUST come from tokens. No hardcoded colours outside the theme module, except the documented `Color32::WHITE` on the active layout segment. |
 | FR-5.10.6 | Motion MUST honour both the user setting and the OS animation preference. |
 | FR-5.10.7 | Theme reload MUST NOT accumulate font atlases. |
 | FR-5.10.8 | Reload MUST re-resolve the active theme, so an edited colour repaints without reselecting it. A stored id whose file was renamed or deleted MUST fall back to Graphite with a warning naming the id and the available ids, and the stored id MUST be corrected to `graphite`. |
-| FR-5.10.9 | The theme list MUST label an entry `"<name> (<id>)"` when the heading does not spell the id, so two files with the same heading stay distinguishable. |
+| FR-5.10.9 | The theme list MUST label an entry `"<name> (<id>)"` when the name does not spell the id, so two files with the same name stay distinguishable. |
+| FR-5.10.10 | A pre-0.6 `<id>.md` theme MUST be converted once on load: `<id>.json` is written from the old parser's result, the Markdown file is renamed `<id>.md.migrated` (never deleted), and each conversion is reported in one log line. When both `<id>.json` and `<id>.md` exist the JSON wins and is not overwritten. |
 
 ### 5.11 Persistence
 
@@ -304,16 +305,16 @@ dialog (FR-5.3.18); a value written under the old `-24` floor loads clamped at `
 and a file that predates the field is unity. Paths inside the app folder are stored
 relative; anything outside is absolute.
 
-### 6.3 `config/themes/<id>.md`
+### 6.3 `config/themes/<id>.json`
 
-```markdown
-# Graphite
-
-| token | value |
-| --- | --- |
-| bg | #0F1115 |
-| panel | #151922 |
-| accent | #0097FF |
+```json
+{
+  "name": "Graphite",
+  "light": false,
+  "bg": "#0E1013",
+  "panel": "#15171B",
+  "accent": "#0097FF"
+}
 ```
 
 ### 6.4 Configuration bundle (export/import)

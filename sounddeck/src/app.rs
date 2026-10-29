@@ -608,7 +608,7 @@ impl App {
             push_status(StatusKind::Warning, warning);
         }
 
-        // Themes are read from config/themes/*.md before anything is drawn.
+        // Themes are read from config/themes/*.json before anything is drawn.
         for warning in theme::install(&cc.egui_ctx, &cfg.theme) {
             push_status(StatusKind::Warning, warning);
         }
@@ -4242,7 +4242,7 @@ impl App {
             settings_divider(ui);
             settings_value(ui, "Reload themes", SETTINGS_BUTTON_SIZE.x, |ui| {
                 if ghost_button(ui, "Reload", SETTINGS_BUTTON_SIZE)
-                    .on_hover_text("Re-read config/themes/*.md")
+                    .on_hover_text("Re-read config/themes/*.json")
                     .clicked()
                 {
                     self.reload_themes(ctx);

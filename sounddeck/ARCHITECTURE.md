@@ -31,7 +31,7 @@ service. Everything lives beside the executable.
 | Resampling | `src/audio/resample.rs` | Stateful 48 kHz stereo conversion |
 | Storage | `src/storage/*` | JSON schemas, atomic writes, backups, migration |
 | Hotkeys/tray | `src/hotkeys.rs` | Low-level keyboard hook, tray icon, message loop |
-| Theme | `src/ui/theme*.rs` | Markdown palettes, fonts, radii, icons, style |
+| Theme | `src/ui/theme*.rs` | JSON palettes, fonts, radii, icons, style |
 | Motion | `src/ui/anim.rs` | Hover/press/fade tweens, OS animation flag |
 | Volume | `src/ui/volume.rs` | Log curve, percentage, slim volume bar |
 | Icon asset | `src/icon.rs` | PNG decode/resize for the window/tray icon |
@@ -113,7 +113,8 @@ loop open) hand it to one of the threads above.
    resizable. Window size is deliberately **not** restored.
 6. `App::new` runs:
    - applies `animate_ui` and the Windows animation flag;
-   - installs themes from `config/themes/` (writes embedded files if missing);
+   - installs themes from `config/themes/` (converts a 0.5.0 Markdown theme once,
+     writes embedded JSON files if missing);
    - builds runtime `Sound`/`Library` vectors from storage;
    - creates `Engine`, then `Playback`;
    - enumerates render devices, resolves Monitor/Cable, applies routes;
@@ -144,7 +145,8 @@ config/
   libraries.json.bak / settings.json.bak   (one rolling backup each)
   *.corrupt                                (only after a failed parse)
   themes/
-    graphite.md, macchiato.md, mocha.md, frappe.md, latte.md
+    graphite.json, macchiato.json, mocha.json, frappe.json, latte.json
+    *.md.migrated                          (a 0.5.0 Markdown theme, converted once)
 ```
 
 Paths inside the app folder are stored relative (`model::portable_path`), so the whole
@@ -511,16 +513,22 @@ top-level layer, so it can never draw over modals or popups.
 
 ### Theme system (`ui/theme.rs`, `theme_file.rs`, `theme_defaults.rs`)
 
-- `config/themes/<id>.md`: heading + `| token | value |` table.
+- `config/themes/<id>.json`: one pretty-printed object — `name`, an optional `light`
+  flag, then one key per colour token (`"#RRGGBB"`, `#` optional).
 - Tokens: bg, panel, panel_deep, card, card_hover, field, border, border_soft, text,
   muted, faint, accent, purple, amber, red (optional `accent_soft`).
 - Missing/invalid token → Graphite's value. **The file stem is the id** (that is what
-  `settings.json` stores and every lookup matches); the `# Heading` is the display name.
-  `theme::available()` labels an entry `"<name> (<id>)"` when the heading does not spell
-  the id, so two files sharing a heading stay distinguishable. `accent_soft` is derived
-  when absent.
-- Seeding writes the five embedded palettes only while the folder holds **no** Markdown,
-  and never overwrites an existing file.
+  `settings.json` stores and every lookup matches); `name` is the display name (missing or
+  empty → the id). `theme::available()` labels an entry `"<name> (<id>)"` when the name
+  does not spell the id, so two files sharing a name stay distinguishable. `accent_soft`
+  is derived when absent. A file that is not valid JSON is skipped with a warning; the
+  other themes still load.
+- Seeding writes the five embedded palettes as JSON only while the folder holds **no**
+  theme file in either format, and never overwrites an existing file.
+- Migration: a 0.5.0 `<id>.md` is parsed by `theme_file::parse_markdown` (the only
+  reader of that format), written out as `<id>.json` and renamed `<id>.md.migrated` —
+  never deleted. When both formats exist the JSON wins and is not touched. One warning
+  line per conversion.
 - Reload is manual; `reload_from(dir)` is the test seam behind `reload()`. A reload
   re-resolves the active id (an edited colour repaints without reselecting) and an
   unknown id falls back to Graphite with a warning naming the id and the available ones;
@@ -696,7 +704,8 @@ cargo build --release
 
 1. Add it to `Palette` in `ui/theme.rs`.
 2. Add defaults in `ui/theme_defaults.rs`.
-3. Map the token in `ui/theme_file.rs` (and the template).
+3. Add the row to `COLOUR_TOKENS` in `ui/theme_file.rs` (parser, template and the
+   coverage test all read that one table).
 4. Use `theme::token()` in painting; missing values already fall back.
 
 **Add a sound action**
@@ -754,7 +763,7 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/storage/migrate.rs` | Legacy `sounddeck.json` import |
 | `src/storage/bundle.rs` | One-file config bundle: export, parse, version/stamp validation |
 | `src/ui/theme.rs` | Palette registry, radii, fonts, style, helpers |
-| `src/ui/theme_file.rs` | Markdown theme parser/template/fallback |
+| `src/ui/theme_file.rs` | JSON theme parser/template, legacy Markdown migration reader |
 | `src/ui/theme_defaults.rs` | Embedded palettes |
 | `src/ui/theme_color.rs` | Hex parsing and blending |
 | `src/ui/anim.rs` | Ease/tween/hover/press, OS animation flag |

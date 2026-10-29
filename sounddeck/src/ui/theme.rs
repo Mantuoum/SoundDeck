@@ -1,19 +1,21 @@
 //! Theme registry and the live palette.
 //!
 //! **Contract** (the one thing that keeps going wrong): a theme lives in
-//! `config/themes/<id>.md`; the **file stem is the id** — the key `settings.json`
-//! stores and every lookup matches — and the `# Heading` line is the display
-//! **name**. So renaming the file renames the theme: an id the settings still
-//! point at no longer exists, and [`set_theme`] falls back to Graphite **and
-//! says so** in its warnings instead of silently swapping the user's colours
-//! out. Because a rename is otherwise invisible in the UI, the dropdown label
-//! carries the id (`"<name> (<id>)"`) whenever the heading does not spell it.
+//! `config/themes/<id>.json`; the **file stem is the id** — the key
+//! `settings.json` stores and every lookup matches — and the `"name"` field is
+//! the display **name**. So renaming the file renames the theme: an id the
+//! settings still point at no longer exists, and [`set_theme`] falls back to
+//! Graphite **and says so** in its warnings instead of silently swapping the
+//! user's colours out. Because a rename is otherwise invisible in the UI, the
+//! dropdown label carries the id (`"<name> (<id>)"`) whenever the name does not
+//! spell it.
 //!
 //! [`reload`] re-reads the folder and rebuilds the registry ([`reload_from`] is
-//! the same pass over an explicit folder, for tests); [`install`] is the only
-//! entry point that touches egui (fonts + style). The active palette is one
-//! `RwLock<Palette>` read through a generation-tagged thread-local snapshot, so
-//! a theme switch is visible to every `palette()` caller on the next frame.
+//! the same pass over an explicit folder, for tests); a pre-0.6 `<id>.md` is
+//! converted to JSON once on the way (see `migrate_markdown`). [`install`] is
+//! the only entry point that touches egui (fonts + style). The active palette is
+//! one `RwLock<Palette>` read through a generation-tagged thread-local snapshot,
+//! so a theme switch is visible to every `palette()` caller on the next frame.
 
 use std::cell::Cell;
 use std::fs;
@@ -136,8 +138,8 @@ fn embedded_entries() -> Vec<ThemeEntry> {
 ///
 /// The label is the display name plus the id in parentheses when the name does
 /// not already spell it: the file name is the thing a user renames, so it has
-/// to be visible in the list — two files with the same heading would otherwise
-/// be indistinguishable. The dropdown draws the label as-is, so this is the one
+/// to be visible in the list — two files with the same name would otherwise be
+/// indistinguishable. The dropdown draws the label as-is, so this is the one
 /// place the rule lives.
 pub fn available() -> Vec<(String, String)> {
     read_themes(|themes| {
@@ -148,7 +150,7 @@ pub fn available() -> Vec<(String, String)> {
     })
 }
 
-/// `"<name> (<id>)"` when the heading cannot identify the file, else the name.
+/// `"<name> (<id>)"` when the name cannot identify the file, else the name.
 fn choice_label(name: &str, id: &str) -> String {
     if name.eq_ignore_ascii_case(id) {
         name.to_string()
@@ -295,22 +297,20 @@ fn themes_dir() -> PathBuf {
     crate::model::config_dir().join("themes")
 }
 
-/// Seed the five built-in themes only when the folder has no Markdown files.
-/// Existing files are never overwritten.
+/// Seed the five built-in themes only when the folder holds no theme file in
+/// either format (JSON, or Markdown that is about to be converted). Existing
+/// files are never overwritten.
 fn seed_defaults(dir: &Path, warnings: &mut Vec<String>) {
-    let has_markdown = fs::read_dir(dir)
+    let has_themes = fs::read_dir(dir)
         .map(|entries| {
             entries.flatten().any(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.eq_ignore_ascii_case("md"))
-                    .unwrap_or(false)
+                let path = entry.path();
+                theme_file::has_extension(&path, theme_file::THEME_EXTENSION)
+                    || theme_file::has_extension(&path, theme_file::LEGACY_EXTENSION)
             })
         })
         .unwrap_or(false);
-    if has_markdown {
+    if has_themes {
         return;
     }
     if let Err(err) = fs::create_dir_all(dir) {
@@ -318,17 +318,106 @@ fn seed_defaults(dir: &Path, warnings: &mut Vec<String>) {
         return;
     }
     for (id, name, palette) in theme_defaults::all() {
-        let path = dir.join(format!("{id}.md"));
+        let path = dir.join(format!("{id}.{}", theme_file::THEME_EXTENSION));
         if path.exists() {
             continue;
         }
-        if let Err(err) = fs::write(&path, theme_file::template(name, &palette)) {
+        if let Err(err) = write_theme_file(&path, &theme_file::template(name, &palette)) {
             warnings.push(format!("themes: could not write {}: {err}", path.display()));
         }
     }
 }
 
-/// Re-read `config/themes/*.md` and rebuild the in-memory registry.
+/// Bare file name for a warning line; the folder is already named by the message.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Write one theme file without ever leaving a half-written one: the temp name
+/// carries no theme extension, so a crash mid-write leaves an inert file instead
+/// of a corrupt theme. (The config files' `.tmp`/`.bak` rotation belongs to
+/// `storage`; the UI layer does not reach into it.)
+fn write_theme_file(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", theme_file::THEME_EXTENSION));
+    fs::write(&tmp, text)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
+/// Convert pre-0.6 `<id>.md` files to `<id>.json`, once per file.
+///
+/// The Markdown file is renamed `<id>.md.migrated` (never deleted) so nothing
+/// lingers as a live theme. A `<id>.json` that already exists wins and is not
+/// touched; the old file is then left beside it, inert and still convertible if
+/// the JSON is ever removed.
+fn migrate_markdown(dir: &Path, fallback: &Palette, warnings: &mut Vec<String>) {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| theme_file::has_extension(path, theme_file::LEGACY_EXTENSION))
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+
+    for path in files {
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let target = dir.join(format!("{id}.{}", theme_file::THEME_EXTENSION));
+        if target.exists() {
+            continue;
+        }
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                warnings.push(format!("themes: could not read {}: {err}", path.display()));
+                continue;
+            }
+        };
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let parsed = theme_file::parse_markdown(&id, text, fallback);
+        warnings.extend(parsed.warnings);
+        if let Err(err) = write_theme_file(
+            &target,
+            &theme_file::template(&parsed.name, &parsed.palette),
+        ) {
+            warnings.push(format!(
+                "themes: could not write {}: {err}",
+                target.display()
+            ));
+            continue;
+        }
+        let migrated = path.with_extension(theme_file::MIGRATED_SUFFIX);
+        let converted = format!(
+            "themes: converted {} to {}",
+            file_name(&path),
+            file_name(&target)
+        );
+        match fs::rename(&path, &migrated) {
+            Ok(()) => warnings.push(format!("{converted} (kept as {})", file_name(&migrated))),
+            Err(err) => warnings.push(format!(
+                "{converted} but could not rename the old file ({err}); the JSON wins"
+            )),
+        }
+    }
+}
+
+/// Re-read `config/themes/*.json` and rebuild the in-memory registry.
 pub fn reload() -> Vec<String> {
     reload_from(&themes_dir())
 }
@@ -337,6 +426,8 @@ pub fn reload() -> Vec<String> {
 /// the real `config/themes` path (tests point it at a temp folder).
 pub(crate) fn reload_from(dir: &Path) -> Vec<String> {
     let mut warnings = Vec::new();
+    let fallback = theme_defaults::graphite();
+    migrate_markdown(dir, &fallback, &mut warnings);
     seed_defaults(dir, &mut warnings);
 
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
@@ -344,18 +435,12 @@ pub(crate) fn reload_from(dir: &Path) -> Vec<String> {
             entries
                 .flatten()
                 .map(|entry| entry.path())
-                .filter(|path| {
-                    path.extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext.eq_ignore_ascii_case("md"))
-                        .unwrap_or(false)
-                })
+                .filter(|path| theme_file::has_extension(path, theme_file::THEME_EXTENSION))
                 .collect()
         })
         .unwrap_or_default();
     files.sort();
 
-    let fallback = theme_defaults::graphite();
     let mut entries = Vec::new();
     for path in &files {
         let id = path
@@ -374,13 +459,18 @@ pub(crate) fn reload_from(dir: &Path) -> Vec<String> {
             }
         };
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-        let parsed = theme_file::parse(&id, text, &fallback);
-        warnings.extend(parsed.warnings);
-        entries.push(ThemeEntry {
-            id,
-            name: parsed.name,
-            palette: parsed.palette,
-        });
+        match theme_file::parse(&id, text, &fallback) {
+            Ok(parsed) => {
+                warnings.extend(parsed.warnings);
+                entries.push(ThemeEntry {
+                    id,
+                    name: parsed.name,
+                    palette: parsed.palette,
+                });
+            }
+            // Corrupt JSON: skip this file, keep every other theme.
+            Err(warning) => warnings.push(warning),
+        }
     }
 
     if files.is_empty() {
@@ -654,26 +744,31 @@ mod tests {
         }
     }
 
-    fn write_theme(path: &Path, heading: &str, rows: &[(&str, &str)]) {
+    /// A hand-written theme file, in the shape a user would edit.
+    fn write_theme(path: &Path, name: &str, rows: &[(&str, &str)]) {
+        let mut body = format!("\"name\": \"{name}\"");
+        for (token, value) in rows {
+            body.push_str(&format!(",\n  \"{token}\": \"{value}\""));
+        }
+        fs::write(path, format!("{{\n  {body}\n}}\n")).expect("write theme file");
+    }
+
+    /// A real 0.5.0 theme file, verbatim — what a migration has to convert.
+    fn write_markdown_theme(path: &Path, heading: &str, rows: &[(&str, &str)]) {
         let mut text = format!("# {heading}\n\n| token | value |\n| --- | --- |\n");
         for (token, value) in rows {
             text.push_str(&format!("| {token} | {value} |\n"));
         }
-        fs::write(path, text).expect("write theme file");
+        fs::write(path, text).expect("write Markdown theme file");
     }
 
-    fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+    fn files_with_extension(dir: &Path, extension: &str) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = fs::read_dir(dir)
             .map(|entries| {
                 entries
                     .flatten()
                     .map(|entry| entry.path())
-                    .filter(|path| {
-                        path.extension()
-                            .and_then(|ext| ext.to_str())
-                            .map(|ext| ext.eq_ignore_ascii_case("md"))
-                            .unwrap_or(false)
-                    })
+                    .filter(|path| theme_file::has_extension(path, extension))
                     .collect()
             })
             .unwrap_or_default();
@@ -688,7 +783,7 @@ mod tests {
     fn edited_colour_reaches_the_palette_after_reload() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("edit-colour");
-        let path = dir.path().join("custom.md");
+        let path = dir.path().join("custom.json");
         write_theme(&path, "Custom", &[("bg", "#123456")]);
         reload_from(dir.path());
         let _ = set_theme("custom");
@@ -702,15 +797,28 @@ mod tests {
         assert_eq!(palette().bg, Color32::from_rgb(0x65, 0x43, 0x21));
         assert_eq!(set_theme("custom"), Vec::<String>::new());
         assert_eq!(palette().bg, Color32::from_rgb(0x65, 0x43, 0x21));
+
+        // Last hop: the egui style the app paints with is rebuilt from that
+        // palette, so the edit is on screen and not just in the registry.
+        let ctx = eframe::egui::Context::default();
+        apply_style(&ctx);
+        assert_eq!(
+            ctx.style().visuals.panel_fill,
+            Color32::from_rgb(0x65, 0x43, 0x21)
+        );
+        assert_eq!(
+            ctx.style().visuals.override_text_color,
+            Some(palette().text)
+        );
     }
 
-    /// The heading is the display name, so editing it must show up in the list
-    /// the Appearance dropdown draws.
+    /// The `name` field is the display name, so editing it must show up in the
+    /// list the Appearance dropdown draws.
     #[test]
-    fn heading_change_updates_the_display_name() {
+    fn name_change_updates_the_display_name() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("heading");
-        let path = dir.path().join("mine.md");
+        let path = dir.path().join("mine.json");
         write_theme(&path, "First Name", &[("bg", "#101010")]);
         reload_from(dir.path());
         assert!(
@@ -737,12 +845,12 @@ mod tests {
     fn renaming_a_theme_file_changes_its_id() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("rename");
-        let old = dir.path().join("old-id.md");
+        let old = dir.path().join("old-id.json");
         write_theme(&old, "Mine", &[("bg", "#101010")]);
         reload_from(dir.path());
         assert!(available().iter().any(|(id, _)| id == "old-id"));
 
-        fs::rename(&old, dir.path().join("new-id.md")).expect("rename theme file");
+        fs::rename(&old, dir.path().join("new-id.json")).expect("rename theme file");
         reload_from(dir.path());
         let ids: Vec<String> = available().into_iter().map(|(id, _)| id).collect();
         assert!(ids.iter().any(|id| id == "new-id"), "{ids:?}");
@@ -756,13 +864,13 @@ mod tests {
     fn reload_warns_when_the_current_theme_file_disappears() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("vanish");
-        let path = dir.path().join("mine.md");
+        let path = dir.path().join("mine.json");
         write_theme(&path, "Mine", &[("bg", "#112233")]);
         reload_from(dir.path());
         assert_eq!(set_theme("mine"), Vec::<String>::new());
         assert_eq!(palette().bg, Color32::from_rgb(0x11, 0x22, 0x33));
 
-        fs::rename(&path, dir.path().join("renamed.md")).expect("rename theme file");
+        fs::rename(&path, dir.path().join("renamed.json")).expect("rename theme file");
         let warnings = reload_from(dir.path());
         assert!(
             warnings
@@ -773,14 +881,14 @@ mod tests {
         assert_eq!(palette(), theme_defaults::graphite());
     }
 
-    /// Seeding is a first-run convenience: a folder that already holds Markdown
+    /// Seeding is a first-run convenience: a folder that already holds a theme
     /// belongs to the user and must never be overwritten or added to.
     #[test]
-    fn reload_keeps_user_theme_files_when_the_folder_has_markdown() {
+    fn reload_keeps_user_theme_files_when_the_folder_has_themes() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("no-overwrite");
-        let path = dir.path().join("mine.md");
-        let original = "# Mine\n\n| token | value |\n| --- | --- |\n| bg | #010203 |\n";
+        let path = dir.path().join("mine.json");
+        let original = "{\n  \"name\": \"Mine\",\n  \"bg\": \"#010203\"\n}\n";
         fs::write(&path, original).expect("write theme file");
 
         reload_from(dir.path());
@@ -790,10 +898,120 @@ mod tests {
             original
         );
         assert_eq!(
-            markdown_files(dir.path()),
+            files_with_extension(dir.path(), theme_file::THEME_EXTENSION),
             vec![path.clone()],
             "reload must not seed into a folder that already has themes"
         );
+    }
+
+    /// A folder with no theme file at all gets the five built-ins, as JSON.
+    #[test]
+    fn reload_seeds_json_files_into_an_empty_folder() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("seed");
+        reload_from(dir.path());
+
+        let seeded = files_with_extension(dir.path(), theme_file::THEME_EXTENSION);
+        assert_eq!(seeded.len(), theme_defaults::all().len(), "{seeded:?}");
+        assert!(
+            files_with_extension(dir.path(), theme_file::LEGACY_EXTENSION).is_empty(),
+            "seeding must write JSON, not Markdown"
+        );
+        let graphite = seeded
+            .iter()
+            .find(|path| path.file_stem().is_some_and(|stem| stem == "graphite"))
+            .expect("graphite seeded");
+        let text = fs::read_to_string(graphite).expect("read seeded theme");
+        let parsed = theme_file::parse("graphite", &text, &theme_defaults::graphite())
+            .expect("seeded file parses");
+        assert_eq!(parsed.palette, theme_defaults::graphite());
+    }
+
+    /// A pre-0.6 Markdown theme is converted once: the JSON becomes the live
+    /// theme and the old file is kept as `.md.migrated`, never deleted.
+    #[test]
+    fn markdown_theme_is_migrated_to_json_and_kept() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("migrate");
+        let md = dir.path().join("legacy.md");
+        write_markdown_theme(&md, "Legacy", &[("bg", "#123456")]);
+
+        let warnings = reload_from(dir.path());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("converted") && w.contains("legacy.md")),
+            "one line per conversion: {warnings:?}"
+        );
+
+        let json = dir.path().join("legacy.json");
+        assert!(json.exists(), "converted JSON missing");
+        assert!(!md.exists(), "the old Markdown file must not stay live");
+        let migrated = dir.path().join("legacy.md.migrated");
+        assert!(migrated.exists(), "the old file must be kept, not deleted");
+        assert_eq!(
+            fs::read_to_string(&migrated).expect("read kept file"),
+            "# Legacy\n\n| token | value |\n| --- | --- |\n| bg | #123456 |\n"
+        );
+
+        // The converted theme is the live one, with the same name and colour.
+        assert!(
+            available()
+                .iter()
+                .any(|(id, label)| id == "legacy" && label == "Legacy"),
+            "{:?}",
+            available()
+        );
+        assert_eq!(set_theme("legacy"), Vec::<String>::new());
+        assert_eq!(palette().bg, Color32::from_rgb(0x12, 0x34, 0x56));
+
+        // Second reload: the migration is finished and quiet.
+        assert!(reload_from(dir.path()).is_empty());
+    }
+
+    /// Both formats present → the JSON wins and is never overwritten; the old
+    /// Markdown file is left beside it, inert.
+    #[test]
+    fn json_wins_when_both_formats_exist() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("json-wins");
+        let json = dir.path().join("both.json");
+        let md = dir.path().join("both.md");
+        write_theme(&json, "From JSON", &[("bg", "#010203")]);
+        let md_text = "# From Markdown\n\n| token | value |\n| --- | --- |\n| bg | #040506 |\n";
+        fs::write(&md, md_text).expect("write Markdown theme");
+
+        let warnings = reload_from(dir.path());
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            fs::read_to_string(&json).expect("read json"),
+            "{\n  \"name\": \"From JSON\",\n  \"bg\": \"#010203\"\n}\n",
+            "the JSON file must not be overwritten"
+        );
+        assert_eq!(fs::read_to_string(&md).expect("read md"), md_text);
+        assert_eq!(set_theme("both"), Vec::<String>::new());
+        assert_eq!(palette().bg, Color32::from_rgb(0x01, 0x02, 0x03));
+    }
+
+    /// Corrupt JSON is skipped with a warning; the other themes still load.
+    #[test]
+    fn corrupt_theme_is_skipped_and_the_others_load() {
+        let _registry = registry_guard();
+        let dir = TempThemeDir::new("corrupt");
+        fs::write(dir.path().join("broken.json"), "{ \"bg\": ").expect("write broken theme");
+        write_theme(&dir.path().join("good.json"), "Good", &[("bg", "#0A0B0C")]);
+
+        let warnings = reload_from(dir.path());
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("broken.json") && w.contains("not valid JSON")),
+            "{warnings:?}"
+        );
+        let ids: Vec<String> = available().into_iter().map(|(id, _)| id).collect();
+        assert!(!ids.iter().any(|id| id == "broken"), "{ids:?}");
+        assert_eq!(set_theme("good"), Vec::<String>::new());
+        assert_eq!(palette().bg, Color32::from_rgb(0x0A, 0x0B, 0x0C));
     }
 
     /// A stored id whose file was renamed must fall back to Graphite *loudly*:
@@ -802,7 +1020,7 @@ mod tests {
     fn missing_theme_id_falls_back_to_graphite_with_a_warning() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("missing-id");
-        write_theme(&dir.path().join("kept.md"), "Kept", &[("bg", "#101010")]);
+        write_theme(&dir.path().join("kept.json"), "Kept", &[("bg", "#101010")]);
         reload_from(dir.path());
 
         let warnings = set_theme("renamed-away");
@@ -824,17 +1042,17 @@ mod tests {
     }
 
     /// The dropdown label has to identify the file, otherwise renaming a file
-    /// (or two files sharing a heading) is invisible in the list.
+    /// (or two files sharing a name) is invisible in the list.
     #[test]
-    fn dropdown_label_names_the_file_when_the_heading_differs() {
+    fn dropdown_label_names_the_file_when_the_name_differs() {
         let _registry = registry_guard();
         let dir = TempThemeDir::new("label");
         write_theme(
-            &dir.path().join("mine.md"),
+            &dir.path().join("mine.json"),
             "My Theme",
             &[("bg", "#101010")],
         );
-        write_theme(&dir.path().join("same.md"), "same", &[("bg", "#101010")]);
+        write_theme(&dir.path().join("same.json"), "same", &[("bg", "#101010")]);
         reload_from(dir.path());
 
         let choices = available();
@@ -848,7 +1066,7 @@ mod tests {
             choices
                 .iter()
                 .any(|(id, label)| id == "same" && label == "same"),
-            "a heading that already spells the id needs no suffix: {choices:?}"
+            "a name that already spells the id needs no suffix: {choices:?}"
         );
     }
 

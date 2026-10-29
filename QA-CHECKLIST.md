@@ -159,12 +159,14 @@ already parked and waiting.
 ## 13. Themes
 
 - [x] Switch theme → whole UI recolours live; choice survives restart.
-- [x] Edit a colour in `config\themes\<id>.md` → Settings → Reload themes → change visible **without reselecting the theme** (B12 — reload re-resolves the active id).
-- [ ] **Rename a theme file** (`mocha.md` → `mocha2.md`) while it is the active theme → Reload: the log warns `theme "mocha" is not in config/themes (available: …); using Graphite`, the UI repaints in Graphite, and `settings.json` now stores `"graphite"`.
-- [ ] **Two files, one heading**: copy `graphite.md` to `mytheme.md` and leave the `# Graphite` heading → the dropdown lists `Graphite` **and** `Graphite (mytheme)`, and picking either is distinguishable. Rename the heading to `My Graphite` → the entry reads `My Graphite (mytheme)`.
+- [x] Edit a colour in `config\themes\<id>.json` → Settings → Reload themes → change visible **without reselecting the theme** (B12 — reload re-resolves the active id).
+- [ ] **Rename a theme file** (`mocha.json` → `mocha2.json`) while it is the active theme → Reload: the log warns `theme "mocha" is not in config/themes (available: …); using Graphite`, the UI repaints in Graphite, and `settings.json` now stores `"graphite"`.
+- [ ] **Two files, one name**: copy `graphite.json` to `mytheme.json` and leave `"name": "Graphite"` → the dropdown lists `Graphite` **and** `Graphite (mytheme)`, and picking either is distinguishable. Change the name to `My Graphite` → the entry reads `My Graphite (mytheme)`.
 - [ ] Delete a token from a theme file → reload → falls back to Graphite's value; warning in activity log. Re-add it → returns.
-- [ ] Invalid hex (`| accent | banana |`) → fallback + warning; app stays healthy.
-- [ ] A file named `Graphite.md` **is** the built-in seed file (same id on a case-insensitive filesystem) — it must be edited in place, not appear twice.
+- [ ] Invalid hex (`"accent": "banana"`) → fallback + warning; app stays healthy.
+- [ ] Corrupt JSON (`"bg": `) → that theme is skipped with a `not valid JSON` warning; every other theme still loads.
+- [ ] A file named `Graphite.json` **is** the built-in seed file (same id on a case-insensitive filesystem) — it must be edited in place, not appear twice.
+- [ ] A 0.5.0 `<id>.md` theme (drop one in beside the JSON files) → launch: converted to `<id>.json` with the same colours and name, the old file kept as `<id>.md.migrated`, one `converted` line in the log, no duplicate entry in the dropdown.
 - [ ] Very long theme names in the dropdown look fine.
 
 ## 14. RAM / preload behaviour

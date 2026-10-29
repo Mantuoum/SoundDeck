@@ -83,12 +83,15 @@ live in `config/` next to the executable.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
-- Themes are editable Markdown files in `config/themes/`. Graphite is the default
-  and the fallback for any missing token; every colour (including the accent) can
-  be overridden per theme. Use **Reload themes** in Settings after editing.
+- Themes are editable JSON files in `config/themes/` — one `<id>.json` per theme with
+  `name`, an optional `light` flag, then one key per colour as `"#RRGGBB"`. Graphite is
+  the default and the fallback for any missing token; every colour (including the accent)
+  can be overridden per theme. Use **Reload themes** in Settings after editing: the
+  colours repaint immediately, without restarting or reselecting the theme.
   The shipped palettes use a `#0097FF` accent. A file named like a built-in (for example
-  `Graphite.md`) is listed as its own theme alongside the built-in Graphite instead of
-  replacing it — edit `graphite.md` itself to change the default palette.
+  `Graphite.json`) is listed as its own theme alongside the built-in Graphite instead of
+  replacing it — edit `graphite.json` itself to change the default palette. A 0.5.0
+  `<id>.md` theme is converted once on load and kept beside the JSON as `<id>.md.migrated`.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.
 - Missing file detection: the card is marked, triggering it logs an error and does
@@ -188,7 +191,7 @@ SoundDeck.exe
 config/
   settings.json     window, devices, volumes, theme, layout, active tab, loop file
   libraries.json    tabs and the sounds registered in each tab
-  themes/           one Markdown palette per theme
+  themes/           one JSON palette per theme
 ```
 
 Sounds keep their original paths; audio files are never copied. The looping
