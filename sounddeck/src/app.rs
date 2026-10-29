@@ -15,8 +15,8 @@ use crate::audio::engine::{
 use crate::audio::stream::LoopState;
 use crate::audio::wasapi::{self, DeviceInfo};
 use crate::hotkeys::{
-    chord_owner, duplicate_sounds, main_window_minimized, mods_from_egui, ChordOwner, Hotkey,
-    HotkeyService, ServiceEvent, TrayCommand,
+    blocked_reason, chord_owner, duplicate_sounds, held_chord, main_window_minimized,
+    mods_from_egui, parse_bindable, ChordOwner, Hotkey, HotkeyService, ServiceEvent, TrayCommand,
 };
 use crate::icon;
 use crate::model::{
@@ -525,8 +525,9 @@ impl App {
         let theme_choices = theme::available();
 
         // The stop-all binding is stored as a label string like every other
-        // hotkey; a hand-edited file must not take the app down.
-        let stop_all = match cfg.stop_all_hotkey.as_deref().map(Hotkey::parse) {
+        // hotkey; a hand-edited file must not take the app down, and a blocked
+        // chord is never allowed (F5).
+        let stop_all = match cfg.stop_all_hotkey.as_deref().map(parse_bindable) {
             Some(Ok(hotkey)) => Some(hotkey),
             Some(Err(err)) => {
                 push_status(
@@ -1955,8 +1956,9 @@ impl App {
         }
         self.apply_routes();
 
-        // Stop-all is stored as a label like every other hotkey.
-        self.stop_all = match self.cfg.stop_all_hotkey.as_deref().map(Hotkey::parse) {
+        // Stop-all is stored as a label like every other hotkey, and a blocked
+        // chord is refused exactly as on load.
+        self.stop_all = match self.cfg.stop_all_hotkey.as_deref().map(parse_bindable) {
             Some(Ok(hotkey)) => Some(hotkey),
             Some(Err(err)) => {
                 self.log(
@@ -4251,7 +4253,7 @@ impl App {
         // Read the keyboard directly so the global hotkey wins over widgets. The
         // events are walked inside the closure: cloning the frame's event list
         // bought nothing when only the resulting chord matters.
-        let (escape, picked) = ctx.input(|input| {
+        let (escape, mut picked) = ctx.input(|input| {
             let mut escape = false;
             let mut picked: Option<Option<Hotkey>> = None;
             for event in &input.events {
@@ -4280,6 +4282,12 @@ impl App {
             }
             (escape, picked)
         });
+        // The shell consumes Win chords (`Win+X`) before this window sees a key
+        // event, so egui reports nothing at all for them: fall back to the
+        // physical keyboard, which is what the hook matches against (B8).
+        if picked.is_none() {
+            picked = held_chord().map(Some);
+        }
         let mut close = escape;
         if let Some(picked) = picked {
             capture.current = picked;
@@ -4307,6 +4315,9 @@ impl App {
             )
             .map(|owner| self.owner_label(owner))
         });
+        // A blocked chord is never allowed (F5): the dialog refuses it with the
+        // one message, and the load path unbinds one a hand-edited config let in.
+        let blocked = capture.current.and_then(blocked_reason);
 
         modal_shell(
             ctx,
@@ -4352,7 +4363,9 @@ impl App {
                 ui.allocate_space(box_rect.size());
 
                 ui.add_space(6.0);
-                if let Some(conflict) = &conflict {
+                if let Some(blocked) = &blocked {
+                    ui.label(RichText::new(blocked).size(12.5).color(theme::red()));
+                } else if let Some(conflict) = &conflict {
                     ui.label(
                         RichText::new(format!("Already used by {conflict}"))
                             .size(12.5)
@@ -4361,7 +4374,7 @@ impl App {
                 }
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    let can_save = conflict.is_none();
+                    let can_save = conflict.is_none() && blocked.is_none();
                     if accent_button_enabled(ui, "Save", Vec2::new(100.0, 32.0), can_save).clicked()
                         && can_save
                     {
@@ -7216,10 +7229,11 @@ fn register_sounds(playback: &Playback, sounds: &[Sound]) {
 }
 
 /// Build the runtime tabs/sounds from their storage shape. Returns the warnings
-/// the board produced (invalid hotkeys) for the caller to log.
+/// the board produced (invalid or blocked hotkeys) for the caller to log.
 ///
 /// Startup and config import both go through this, so a bundle that imports
-/// builds the same board a restart would.
+/// builds the same board a restart would. A chord capture refuses is unbindable
+/// here too (F5): the sound is kept, only its binding is dropped.
 fn build_board(
     stored: &[storage::LibraryConfig],
     preload_hotkey_sounds: bool,
@@ -7234,7 +7248,7 @@ fn build_board(
             name: library.name.clone(),
         });
         for sound in &library.sounds {
-            let hotkey = match sound.hotkey.as_deref().map(Hotkey::parse) {
+            let hotkey = match sound.hotkey.as_deref().map(parse_bindable) {
                 Some(Ok(hotkey)) => Some(hotkey),
                 Some(Err(err)) => {
                     warnings.push(format!("Hotkey for \"{}\" is invalid: {err}", sound.name));
@@ -7543,6 +7557,36 @@ mod tests {
         // With the global preload off, a sound without a hotkey stays on disk.
         let (_, sounds, _) = build_board(&stored, false);
         assert!(!sounds[0].ram);
+    }
+
+    /// A blocked chord that arrives through a hand-edited config is unbound, and
+    /// the sound itself is kept: capture refuses the same chord (F5).
+    #[test]
+    fn a_stored_blocked_chord_is_unbound_and_the_sound_kept() {
+        let stored = vec![storage::LibraryConfig {
+            id: 1,
+            name: "Main".into(),
+            sounds: vec![storage::SoundConfig {
+                id: 1,
+                name: "Paste".into(),
+                path: "audio/paste.wav".into(),
+                hotkey: Some("Ctrl+V".into()),
+                volume: 1.0,
+                gain_db: 0.0,
+                ram: Some(true),
+            }],
+        }];
+
+        let (_, sounds, warnings) = build_board(&stored, true);
+
+        assert_eq!(sounds.len(), 1, "only the binding is dropped");
+        assert_eq!(sounds[0].hotkey, None);
+        assert!(!sounds[0].ram, "no binding, no retention");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("Ctrl+V is a system shortcut and can't be used"),
+            "{warnings:?}"
+        );
     }
 
     #[test]

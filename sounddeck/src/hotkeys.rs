@@ -5,9 +5,11 @@
 //! `Shift+T` hotkey also types `T` in Notepad. Sounds are triggered by posting
 //! to the hidden window; the hook callback stays short.
 //!
-//! This module also owns the two pieces of hotkey knowledge the rest of the app
-//! asks for: the key table (`KEYS`, used by parsing, display and capture) and the
-//! duplicate-chord rules (`chord_owner`, `duplicate_sounds`, FR-5.7.5).
+//! This module also owns the three pieces of hotkey knowledge the rest of the app
+//! asks for: the key table (`KEYS`, used by parsing, display and capture), the
+//! duplicate-chord rules (`chord_owner`, `duplicate_sounds`, FR-5.7.5) and the
+//! blocked chords (`BLOCKED_CHORDS`/`blocked_reason`, which capture refuses and
+//! load unbinds).
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -169,10 +171,7 @@ impl Hotkey {
 
     /// Convert a captured egui key press into a Windows virtual-key hotkey.
     pub fn from_egui(key: egui::Key, modifiers: &egui::Modifiers) -> Option<Self> {
-        Some(Self {
-            mods: mods_from_egui(modifiers),
-            vk: vk_from_egui(key)?,
-        })
+        chord_from_egui(key, modifiers, win_key_held())
     }
 }
 
@@ -326,6 +325,94 @@ fn vk_from_egui(key: egui::Key) -> Option<u32> {
         .map(|spec| spec.vk)
 }
 
+// ---------------------------------------------------------------------------
+// Blocked chords (F5) — the one owner of "which chords may never be bound"
+// ---------------------------------------------------------------------------
+
+/// A chord built from the same `Hotkey`/`Mods` types the rest of the module uses,
+/// so the blocklist has no second chord spelling that could drift from `KEYS`.
+const fn ctrl_chord(vk: u32) -> Hotkey {
+    Hotkey {
+        mods: Mods {
+            ctrl: true,
+            alt: false,
+            shift: false,
+            win: false,
+        },
+        vk,
+    }
+}
+
+const fn alt_chord(vk: u32) -> Hotkey {
+    Hotkey {
+        mods: Mods {
+            ctrl: false,
+            alt: true,
+            shift: false,
+            win: false,
+        },
+        vk,
+    }
+}
+
+const fn plain_chord(vk: u32) -> Hotkey {
+    Hotkey {
+        mods: Mods {
+            ctrl: false,
+            alt: false,
+            shift: false,
+            win: false,
+        },
+        vk,
+    }
+}
+
+/// Chords that are never bindable: the Windows editing/menu set and this app's
+/// own board shortcuts. Capture refuses them (see [`blocked_reason`]) and a chord
+/// that reaches the config by hand is unbound at load, so the two paths cannot
+/// disagree. `Ctrl+Z` is both the Windows undo and the board's undo — listed once;
+/// plain `Delete` is the dialog's "clear" key, so its entry only bites at load.
+const BLOCKED_CHORDS: &[Hotkey] = &[
+    // Windows editing set.
+    ctrl_chord(b'C' as u32),
+    ctrl_chord(b'V' as u32),
+    ctrl_chord(b'X' as u32),
+    ctrl_chord(b'A' as u32),
+    ctrl_chord(b'Z' as u32),
+    ctrl_chord(b'Y' as u32),
+    // App-local shortcuts.
+    ctrl_chord(b'O' as u32),
+    ctrl_chord(b'F' as u32),
+    ctrl_chord(b'L' as u32),
+    ctrl_chord(VK_OEM_COMMA),
+    ctrl_chord(b'Q' as u32),
+    plain_chord(VK_DELETE),
+    plain_chord(VK_SPACE),
+    plain_chord(VK_F1 + 1),
+    alt_chord(VK_F1 + 3),
+];
+
+/// Why `hotkey` may not be bound, or `None` when it may. The one wording: the
+/// capture dialog shows it and the load path logs it. The chord is rendered the
+/// way every other hotkey is (`Hotkey::label`).
+pub fn blocked_reason(hotkey: Hotkey) -> Option<String> {
+    BLOCKED_CHORDS
+        .contains(&hotkey)
+        .then(|| format!("{} is a system shortcut and can't be used", hotkey.label()))
+}
+
+/// Parse a stored/typed hotkey and refuse a blocked chord. Every config path
+/// (libraries, stop-all, import) goes through this, so a hand-edited file can
+/// never bind one: the caller logs the `Err` and drops the binding through its
+/// normal invalid-hotkey path.
+pub fn parse_bindable(text: &str) -> Result<Hotkey, String> {
+    let hotkey = Hotkey::parse(text)?;
+    match blocked_reason(hotkey) {
+        Some(reason) => Err(reason),
+        None => Ok(hotkey),
+    }
+}
+
 /// Modifier set for a captured key event. egui reports Ctrl/Alt/Shift, but the
 /// Win key has no egui flag on Windows, so it is read from the physical state —
 /// the same source the hook uses when it matches a chord.
@@ -339,6 +426,80 @@ fn mods_with_win(modifiers: &egui::Modifiers, win: bool) -> Mods {
         alt: modifiers.alt,
         shift: modifiers.shift,
         win,
+    }
+}
+
+/// Assemble a chord from a key egui delivered, folding the physical Win state in
+/// (egui has no Win modifier bit, so a `Ctrl+Win+S` press arrives as `Ctrl+S`).
+/// The key is mapped through `KEYS` like every other capture. `win` is a
+/// parameter rather than a poll so the assembly itself stays testable.
+pub fn chord_from_egui(key: egui::Key, modifiers: &egui::Modifiers, win: bool) -> Option<Hotkey> {
+    Some(Hotkey {
+        mods: mods_with_win(modifiers, win),
+        vk: vk_from_egui(key)?,
+    })
+}
+
+/// Assemble a chord from the virtual keys physically down: the first bindable key
+/// supplies the key, the rest of the set supplies the modifiers through
+/// `Mods::from_keys` — the same derivation the hook matches with, so a captured
+/// chord and a triggered one cannot disagree. Escape is excluded because it stays
+/// the capture dialog's cancel key.
+fn chord_from_keys(keys: &[u32]) -> Option<Hotkey> {
+    let vk = keys
+        .iter()
+        .copied()
+        .find(|vk| *vk != VK_ESCAPE && KEYS.iter().any(|spec| spec.vk == *vk))?;
+    Some(Hotkey {
+        mods: Mods::from_keys(keys),
+        vk,
+    })
+}
+
+/// The modifier codes `Mods::from_keys` understands, polled by [`held_chord`].
+/// The generic codes report "either side is down", so left/right are not needed.
+#[cfg(windows)]
+const MODIFIER_KEYS: &[u32] = &[VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN];
+
+#[cfg(windows)]
+const KEY_PROBE_CAPACITY: usize = MODIFIER_KEYS.len() + KEYS.len();
+
+/// The chord the keyboard is physically holding, or `None`.
+///
+/// The shell consumes Win chords (`Win+X`) before this window sees any key event,
+/// so the capture dialog gets no egui event to fold the Win key into — it reads
+/// the physical keys instead (B8). Only Win chords need this: every other chord
+/// reaches the window as a normal key event, and polling for those would capture
+/// keys the dialog never legitimately saw.
+pub fn held_chord() -> Option<Hotkey> {
+    #[cfg(windows)]
+    {
+        if !win_key_held() {
+            return None;
+        }
+        let mut keys = [0u32; KEY_PROBE_CAPACITY];
+        let mut len = 0;
+        let candidates = MODIFIER_KEYS
+            .iter()
+            .copied()
+            .chain(KEYS.iter().map(|spec| spec.vk));
+        for vk in candidates {
+            // SAFETY: `GetAsyncKeyState` accepts any virtual-key code and only
+            // reports key state, so it has no preconditions to violate.
+            if !unsafe { win::key_down(vk as i32) } {
+                continue;
+            }
+            if len == keys.len() {
+                break;
+            }
+            keys[len] = vk;
+            len += 1;
+        }
+        chord_from_keys(&keys[..len])
+    }
+    #[cfg(not(windows))]
+    {
+        None
     }
 }
 
@@ -1367,6 +1528,88 @@ mod tests {
                 win: true,
                 ..Mods::default()
             }
+        );
+
+        // Chord assembly folds the same state in: egui reports `Ctrl+S` for a
+        // `Ctrl+Win+S` press, so the physical Win key is the only source for it.
+        assert_eq!(
+            chord_from_egui(egui::Key::S, &ctrl, true).map(|hotkey| hotkey.label()),
+            Some("Ctrl+Win+S".to_string())
+        );
+        assert_eq!(
+            chord_from_egui(egui::Key::S, &ctrl, false).map(|hotkey| hotkey.label()),
+            Some("Ctrl+S".to_string())
+        );
+        // The key arrived with no modifier flags at all and is still a Win chord.
+        assert_eq!(
+            chord_from_egui(egui::Key::X, &egui::Modifiers::default(), true)
+                .map(|hotkey| hotkey.label()),
+            Some("Win+X".to_string())
+        );
+        // A key outside the table has no chord, Win or not.
+        assert_eq!(chord_from_egui(egui::Key::Copy, &ctrl, true), None);
+    }
+
+    #[test]
+    fn the_physical_fallback_assembles_the_chord_the_hook_would_match() {
+        // The shell swallows a Win chord, so no egui event exists: the physical
+        // key set is the only input, and it must produce the hook's own chord.
+        assert_eq!(
+            chord_from_keys(&[VK_RWIN, b'X' as u32]),
+            Some(hotkey("Win+X"))
+        );
+        // Modifiers come from the held set, through `Mods::from_keys`.
+        assert_eq!(
+            chord_from_keys(&[VK_LWIN, VK_LSHIFT, b'X' as u32]),
+            Some(hotkey("Shift+Win+X"))
+        );
+        // Only modifiers down: nothing captured yet.
+        assert_eq!(chord_from_keys(&[VK_LWIN, VK_LCONTROL]), None);
+        // Escape stays the dialog's cancel key.
+        assert_eq!(chord_from_keys(&[VK_LWIN, VK_ESCAPE]), None);
+        // A key the table does not know is never part of a chord.
+        assert_eq!(chord_from_keys(&[VK_LWIN, 0xE2]), None);
+    }
+
+    #[test]
+    fn every_blocked_chord_is_refused_with_the_one_message() {
+        for blocked in BLOCKED_CHORDS {
+            let reason =
+                blocked_reason(*blocked).unwrap_or_else(|| panic!("{blocked} should be refused"));
+            assert_eq!(
+                reason,
+                format!("{} is a system shortcut and can't be used", blocked.label())
+            );
+            // The same refusal reaches a stored/typed chord.
+            assert_eq!(parse_bindable(&blocked.label()), Err(reason));
+        }
+        // Each chord is listed once, so it is refused for exactly one reason.
+        let mut labels: Vec<String> = BLOCKED_CHORDS.iter().map(|h| h.label()).collect();
+        let listed = labels.len();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), listed);
+    }
+
+    #[test]
+    fn a_near_miss_chord_is_still_bindable() {
+        for text in [
+            "Ctrl+Shift+C",
+            "Ctrl+Alt+V",
+            "Win+C",
+            "Shift+Delete",
+            "Ctrl+Shift+Z",
+            "F3",
+            "Ctrl+Shift+,",
+        ] {
+            let parsed = hotkey(text);
+            assert_eq!(blocked_reason(parsed), None, "{text}");
+            assert_eq!(parse_bindable(text), Ok(parsed), "{text}");
+        }
+        // And the refusal names the chord the way the app renders it everywhere.
+        assert_eq!(
+            blocked_reason(hotkey("Ctrl+V")).as_deref(),
+            Some("Ctrl+V is a system shortcut and can't be used")
         );
     }
 
