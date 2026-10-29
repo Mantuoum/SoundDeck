@@ -24,7 +24,7 @@ live in `config/` next to the executable.
   hotkey set. Hotkeys in background tabs never fire.
 - **Single active sound**: triggering a sound fades out whatever is playing
   (including the same sound) and starts the new one.
-- **Looping track** (opt-in): enable it in Settings → Playback to show a loop
+- **Looping track** (opt-in): enable it in Settings → Playback → Looping to show a loop
   player in the sidebar above the pinned meter. One file, streamed from disk, repeating forever, with
   its own volume independent of Monitor/Cable. The loop can be routed to Monitor,
   Cable, both, or neither. It plays underneath sound effects and keeps playing through
@@ -43,10 +43,9 @@ live in `config/` next to the executable.
   way (a hand-edited config, or a new stop-all key), the sound loses its hotkey with a
   warning in the log — it still plays on click, it just has no hotkey and no RAM preload
   any more.
-- **Stop-all hotkey** (off by default): enable it in Settings → Playback, then set a
-  key on the sidebar widget above the meters. Clicking the **body** of that card stops
-  everything (the pill on its right captures on click, clears on right-click); the key
-  works while hidden and still reaches the focused app.
+- **Stop-all hotkey** (off by default): enable it in Settings → Playback → Hotkeys and
+  set the key there (the same capture dialog as a sound hotkey). The sidebar then shows a
+  compact **Stop all** button; the key works while hidden and still reaches the focused app.
 - **Long sounds stream from disk**: anything over 30 s, or that does not fit the
   preload budget, streams with constant memory. No file is fully decoded just to be
   played once.
@@ -79,14 +78,14 @@ live in `config/` next to the executable.
 - **Peak meter** in the sidebar with a `-60` to `0 dBFS` scale, one full-width
   bar per output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
-  - Global `Load into RAM` switch in Settings → Playback.
+  - Global `Load hotkey sounds into RAM` switch in Settings → Playback → Memory.
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
 - Themes are editable JSON files in `config/themes/` — one `<id>.json` per theme with
   `name`, an optional `light` flag, then one key per colour as `"#RRGGBB"`. Graphite is
   the default and the fallback for any missing token; every colour (including the accent)
-  can be overridden per theme. Use **Reload themes** in Settings after editing: the
+  can be overridden per theme. Use **Theme files → Reload** in Settings after editing: the
   colours repaint immediately, without restarting or reselecting the theme.
   The shipped palettes use a `#0097FF` accent. A file named like a built-in (for example
   `Graphite.json`) is listed as its own theme alongside the built-in Graphite instead of
@@ -107,30 +106,33 @@ live in `config/` next to the executable.
 - One instance per executable path. Launching the same exe again focuses the
   window that is already open (including one hidden in the tray).
 - Settings screen (`Ctrl+,` or the Settings button): full-window **Playback /
-  Appearance / Window / About** tabs. Changes apply immediately and save automatically.
+  Appearance / Window / General** tabs. Changes apply immediately and save automatically.
 
 ## Settings
 
 The Settings button (or `Ctrl+,`) replaces the soundboard with a full-window view.
-The rail on the left switches tabs; the status bar stays available.
+The rail on the left switches tabs; the status bar stays available. On a wide window the
+editable settings sit in the main column and read-only status (output devices, cache,
+About, Support) in a second column; on a narrow window those panels move under the main
+column.
 
-- **Playback** — enable the looping track, choose its file, route it to Monitor and/or
-  Cable; load hotkey sounds into RAM; enable the stop-all hotkey.
-- **Appearance** — theme, reload themes, Animate UI.
-- **Window** — minimize-to-tray, whether the sidebar shows the master-gain slider, and
-  **Cycle tabs with Ctrl+Tab** (off by default).
-- **About** — version, config folder, developer details, and the **Data** group.
+- **Playback** — **Looping** (enable, choose the file, send it to Monitor and/or Cable),
+  **Memory** (load hotkey sounds into RAM, show the RAM state), **Output devices**
+  (read-only status) and **Hotkeys** (stop-all switch plus the key row).
+- **Appearance** — theme, reload themes, Animate the interface.
+- **Window** — minimize-to-tray, whether the sidebar shows the master gain, and
+  **Cycle tabs with Ctrl+Tab** (off by default; hover the row for what it does).
+- **General** — configuration folder, **Export**/**Import**, the whole-file
+  **Reset all settings** (confirmed, near the bottom), and the About/Support information.
 
-Each of Playback, Appearance and Window ends with a **Defaults** card: **Reset** puts that
-page's settings back to their defaults and leaves every other page alone. About's
-**Reset all settings** does the same for the whole settings file after a confirmation.
-Neither touches your libraries, your sounds or any audio file — only `settings.json`
-values change, and the loop stops if the reset disables it. The theme falls back to
-Graphite like any missing theme.
+**Reset all settings** is the only reset: it puts every value in `settings.json` back to
+its default after a confirmation and leaves your libraries, sounds and audio files
+alone. The loop stops if the reset disables it, and the theme falls back to Graphite
+like any missing theme.
 
 ### Export and import
 
-**About → Data → Export** writes everything SoundDeck remembers to one JSON file you
+**General → Export** writes everything SoundDeck remembers to one JSON file you
 choose: settings (devices, volumes, theme, layout, loop, hotkeys) and the libraries with
 their sounds, volumes and hotkeys. Use it as a backup, or to move the setup to another PC.
 
@@ -170,14 +172,14 @@ dropdown first. There is no Save button; changes apply immediately.
 
 ## Looping track
 
-- Enable **Looping track** in Settings → Playback. The card appears in the sidebar's
+- Enable **Looping** in Settings → Playback. The card appears in the sidebar's
   scroll area (above the pinned meter); until a file is chosen, Play is disabled.
-- Controls are Play/Stop and the volume bar on the loop card; **Choose file** lives in
-  Settings → Playback. Start and stop are instant.
+- Controls are Play/Stop and the volume bar on the loop card; **Choose** for the file
+  lives in Settings → Playback → Looping. Start and stop are instant.
 - It has its own volume bar, independent of Monitor/Cable. Master gain still applies
   to everything.
-- **Loop outputs** in Settings → Playback: enable Monitor and Cable separately. Both,
-  either, or neither can carry the loop; sound effects still go to both.
+- **Send to Monitor** and **Send to Cable** in the same Looping section: both, either,
+  or neither can carry the loop; sound effects still go to both.
 - The path and volume are remembered in `settings.json`, but playback always starts
   stopped.
 - A missing or corrupt file keeps its path and shows the error; the picker becomes
@@ -203,7 +205,7 @@ launch and renamed to `sounddeck.v1.json.bak`. Each JSON file is written
 atomically and keeps one rolling `.bak`; interrupted writes are recovered on the
 next start.
 
-**Settings → About → Export configuration** writes both files into one
+**General → Export** writes both files into one
 `sounddeck-config.json` bundle (and **Import** restores it); the bundle stores the same
 paths, never the audio.
 
@@ -244,7 +246,8 @@ aimed at elevated windows, and some security/anti-cheat tools may block keyboard
   settings, undo, rename, delete, play and quit all have a key. Selecting a card or row
   on the board is still pointer-driven — there is no arrow-key cursor.
 - **Motion** follows the Windows animation preference: turning off *Show animations in
-  Windows* (or **Animate UI** in Settings → Appearance) skips the hover/press tweens.
+  Windows* (or **Animate the interface** in Settings → Appearance) skips the hover/press
+  tweens.
 - Contrast is the theme author's responsibility; the bundled themes target normal-text
   contrast, and a custom theme file can lower it.
 

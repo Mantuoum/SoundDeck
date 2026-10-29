@@ -133,7 +133,7 @@ specification:**
 | FR-5.4.6 | Starting a sound MUST be independent of decoding: a disk-backed sound decodes off the UI thread. |
 | FR-5.4.7 | Active sounds MUST expose progress in `0..=1` for the card progress line once their total duration is known; while it is unknown (a streamed sound's first trigger) no progress line MUST be drawn. |
 | FR-5.4.8 | "Stop all" MUST fade out every voice and MUST be available from the tray menu. |
-| FR-5.4.9 | The sidebar stop-all widget MUST stop every voice when its body is clicked and log `Stopped all sounds`; its hotkey pill MUST keep capture-on-click and clear-on-right-click. The widget MUST only be shown while the stop-all hotkey is enabled. |
+| FR-5.4.9 | The sidebar **Stop all** button MUST stop every voice when clicked and log `Stopped all sounds`. The button MUST only be shown while the stop-all hotkey is enabled; it MUST NOT set the key (that is Settings → Playback → Hotkeys, FR-5.7.9). |
 
 ### 5.5 Outputs and routing
 
@@ -174,7 +174,7 @@ specification:**
 | FR-5.7.6 | Hotkeys MUST be clearable without removing the sound. |
 | FR-5.7.7 | Only the active library's hotkeys are registered; switching tabs rebinds them. |
 | FR-5.7.8 | Hotkeys are best-effort: elevated foreground windows and some anti-cheat/AV tools can block a low-level hook. This MUST be documented, not hidden. |
-| FR-5.7.9 | An optional global stop-all hotkey MUST be off by default, own a sidebar widget above the meters when enabled, pass the key through, and work while hidden. |
+| FR-5.7.9 | An optional global stop-all hotkey MUST be off by default, be set from Settings → Playback → Hotkeys through the shared capture dialog (blocked chords and conflicts apply as FR-5.7.5/5.7.11), pass the key through, and work while hidden. The sidebar MUST show a **Stop all** button while the feature is enabled; it MUST NOT set the key. |
 | FR-5.7.10 | Bare keys without a modifier are allowed; pass-through means the keystroke still reaches the focused application. |
 | FR-5.7.11 | A blocklist of chords MUST never be bindable: the Windows editing set (`Ctrl+C/V/X/A/Z/Y`), the board's own shortcuts (`Ctrl+O/F/L/,,/Q`, `Delete`, `Space`, `F2`) and `Alt+F4`. The capture dialog MUST refuse one with exactly `<chord> is a system shortcut and can't be used` and save nothing. A blocked chord that reaches the config by hand MUST be unbound at load (sound or stop-all) with the sound kept and a warning logged. |
 
@@ -195,18 +195,21 @@ specification:**
 
 | ID | Requirement |
 | --- | --- |
-| FR-5.9.1 | Settings MUST replace the board in the same window and MUST have four tabs: Playback, Appearance, Window, About. |
-| FR-5.9.2 | Controls that belong to the board (devices, output volumes, link, master gain, RAM summary) MUST NOT be duplicated in Settings. |
-| FR-5.9.3 | Playback MUST own: loop on/off, loop file, loop volume, loop routing. |
-| FR-5.9.4 | Appearance MUST own: theme, reload, motion. |
-| FR-5.9.5 | Window MUST own: minimize to tray, sidebar gain visibility. |
-| FR-5.9.6 | About MUST show the application name, version, config folder, licence and project links, plus the author credit. |
+| FR-5.9.1 | Settings MUST replace the board in the same window and MUST have four tabs: Playback, Appearance, Window and General. General MUST be pinned at the bottom of the rail. |
+| FR-5.9.2 | Controls that belong to the board (devices, output volumes, link, master gain, RAM summary) MUST NOT be duplicated in Settings. Settings MAY show the same state as read-only status. |
+| FR-5.9.3 | Playback MUST have four sections: **Looping** (loop on/off, loop file, Monitor/Cable routing — one section), **Memory** (RAM preloading, RAM-state visibility), **Output devices** (read-only status) and **Hotkeys** (stop-all on/off plus its key row). |
+| FR-5.9.4 | Appearance MUST have two sections: **Theme** (theme picker, reload) and **Animation** (motion). |
+| FR-5.9.5 | Window MUST have three sections: **System tray** (minimize to tray), **Sidebar** (master-gain visibility) and **Tab navigation** (`Ctrl+Tab` cycling). |
+| FR-5.9.6 | General MUST have **Configuration** (config folder, export, import), **Reset** (reset all settings, confirmed, near the bottom), **About** (name, version, licence, accessibility note) and **Support** (project links, author credit). |
 | FR-5.9.7 | Every control MUST save immediately (debounced), with no Apply/Cancel step. |
-| FR-5.9.8 | Spacing MUST stay compact: group gap 5/8 px, card padding 10 px, divider 7 px, row control height 28 px. |
-| FR-5.9.9 | RAM/disk state (card chips, counts, toolbar pill) is hidden by default; a Playback switch reveals it. |
-| FR-5.9.10 | About MUST offer **Export configuration**: one version-stamped JSON bundle of settings and libraries, written atomically. Audio files MUST NOT be copied into it; paths stay references. |
+| FR-5.9.8 | Spacing MUST stay compact: group gap 5/8 px, card padding 10 px, divider 7 px, row height 28 px. |
+| FR-5.9.9 | RAM/disk state (card chips, counts, toolbar pill) is hidden by default; a Playback → Memory switch reveals it. |
+| FR-5.9.10 | General → Configuration MUST offer **Export configuration**: one version-stamped JSON bundle of settings and libraries, written atomically. Audio files MUST NOT be copied into it; paths stay references. |
 | FR-5.9.11 | Import MUST validate the bundle's kind and version, report a corrupt, foreign or newer file as a status error, and replace settings and libraries only after the user confirms a dialog stating how many sounds and libraries will be replaced. Cancel MUST change nothing. |
-| FR-5.9.12 | Playback, Appearance and Window MUST each offer a **Reset** that restores only that page's fields. About MUST offer **Reset all settings** behind a confirmation. Neither MUST touch libraries, sounds or audio files. |
+| FR-5.9.12 | **Reset all settings** MUST be the only reset. It lives in General → Reset, behind a confirmation, and restores every settings field. There MUST be no per-page reset. A reset MUST NOT touch libraries, sounds or audio files. |
+| FR-5.9.13 | Every row MUST use one geometry: the label starts at the row's left edge, the control ends flush with the row's right edge, both are vertically centred in the 28 px row, and a detail line under a row starts at the label origin. Changing one geometry constant MUST reflow every page. |
+| FR-5.9.14 | On a wide window Settings MUST show two columns: the editable main column and a read-only info/status column (Playback: output devices and cache; General: About and Support). Below the breakpoint the info panels MUST stack under the main column rather than disappear. |
+| FR-5.9.15 | Explanations MUST be shown on demand (tooltip or info icon). A page MUST NOT carry an introductory paragraph, a description of an obvious control, or a repeated note; warnings, device errors and confirmation messages stay visible. |
 
 ### 5.10 Themes and appearance
 
@@ -270,7 +273,7 @@ specification:**
 | `show_gain_slider` | bool | true | Sidebar gain |
 | `show_ram_state` | bool | false | Reveals RAM/disk chips, counts and the toolbar pill (FR-5.9.9) |
 | `cycle_tabs_ctrl_tab` | bool | false | Cycle libraries with `Ctrl+Tab` / `Ctrl+Shift+Tab` (off: the chords pass through untouched) |
-| `stop_all_hotkey_enabled` | bool | false | Enables the stop-all hotkey and its sidebar widget |
+| `stop_all_hotkey_enabled` | bool | false | Enables the stop-all hotkey and its sidebar button |
 | `stop_all_hotkey` | string? | null | Label form, e.g. `"Ctrl+Alt+S"` |
 | `window_size` | `[f32;2]`? | null | Parsed for old files, unused |
 
@@ -343,7 +346,7 @@ relative; anything outside is absolute.
 | Screen | Contents |
 | --- | --- |
 | **Board** | Title bar (logo, library tabs, window buttons), toolbar (search, RAM pill), grid or list of sounds, sidebar (scrollable: outputs + link, gain, stop-all, loop; pinned footer: credit, meter, Settings). |
-| **Settings** | Left rail (Back + four tabs), content column, same title/status bars. |
+| **Settings** | Left rail (Back + Playback/Appearance/Window, General pinned), editable main column, read-only info column on wide windows, same title/status bars. |
 | **Modals** | Hotkey capture, rename (sound or library), delete library, set gain (trim), import confirmation, reset-all confirmation, activity log. |
 
 ### 7.2 Layout invariants
@@ -354,12 +357,18 @@ relative; anything outside is absolute.
 | Status bar height | 34 px |
 | Sidebar width | 300 px |
 | Board list max width | 1100 px, centred |
-| Settings content max width | 780 px |
-| About column max width | 680 px |
+| Settings content max width | 1040 px |
+| Settings info column | 300 px, with an 18 px gap |
+| Settings two-column breakpoint | 938 px of content (main column 620 px + gap + info column) |
+| Settings row height | 28 px; rows stack below 620 px of main-column content |
 | Sidebar compact mode | below 620 px height: labels, dB scale and credit hidden |
 
 The sidebar divider MUST be painted inside the central panel layer, never as its own
 top-level layer, so it cannot draw over modals or popups.
+
+Every settings row MUST share one geometry (FR-5.9.13): one label origin, one control
+right edge, one row height. The two-column breakpoint is derived from the row-stack
+breakpoint, so the main column can never be too narrow for its own rows.
 
 ### 7.3 Interaction rules
 
@@ -373,7 +382,7 @@ top-level layer, so it cannot draw over modals or popups.
 | UI-6 | Status messages are terse and never stack duplicates for the same event: a repeated message refreshes the newest entry instead of adding another, and the log keeps the last 200 entries. |
 | UI-7 | Modals centre on the content area currently shown (board or Settings), not on the window, so a modal opened from Settings is not offset toward the sidebar. |
 | UI-8 | A card surface lifts its fill on hover through one shared treatment (same fill, alpha and easing everywhere); the loop and stop-all widgets read identically on hover, and their resting appearance is unchanged. |
-| UI-9 | Only typed text is selectable: static chrome (title bar, credit, captions, About and log rows, card text) never paints a selection, while `TextEdit`s keep normal selection and editing. |
+| UI-9 | Only typed text is selectable: static chrome (title bar, credit, captions, Settings and log rows, card text) never paints a selection, while `TextEdit`s keep normal selection and editing. |
 
 ### 7.4 Keyboard (application-local)
 
@@ -518,9 +527,9 @@ A release is acceptable when all of the following hold.
 5. Loop: choose, play, stop, missing file, corrupt file, both routes off and back on.
 6. Hotkeys: trigger while another app is focused and the keystroke still lands.
 7. Tray: hide, restore, hide again, Stop all, Quit; no taskbar button while hidden.
-8. Settings: every control saves immediately and survives a restart. Each page's Reset
-   restores only that page, Reset all settings survives a restart, and neither touches a
-   library, a sound or an audio file.
+8. Settings: every control saves immediately and survives a restart. Reset all settings
+   (General) restores every settings field after its confirmation and touches no
+   library, sound or audio file; no page offers its own reset.
 9. Backup: export a config bundle, import it into a fresh config, and the board —
    libraries, sounds, volumes, trims, hotkeys, settings — returns exactly; a foreign,
    corrupt or newer bundle is refused and changes nothing.
@@ -538,7 +547,7 @@ A release is acceptable when all of the following hold.
 ## 12. Versioning and compatibility
 
 - The application version follows SemVer (`MAJOR.MINOR.PATCH`) and lives only in
-  `Cargo.toml`; the About tab reads it from there.
+  `Cargo.toml`; Settings → General reads it from there.
 - `0.x` means "unstable": config may change between minor versions, but a migration
   MUST be provided for anything that would otherwise lose user data.
 - `1.0.0` is reserved for the point where the config schema and behaviour are frozen

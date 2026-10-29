@@ -448,10 +448,10 @@ above-normal so audio still meets its deadlines.
 
 - **Title bar:** logo, library tabs, window buttons; draggable except over tabs.
 - **Sidebar:** scrollable part is Load sounds, layout switch, Monitor/Cable devices +
-  volumes + link, master gain (optional), stop-all card (when its hotkey is enabled),
-  loop card (when enabled); the footer below it is **pinned** (credit → peak meter →
-  Settings button) and never scrolls. Compact layout (<620 px sidebar height) hides
-  labels, dB scale and credit.
+  volumes + link, master gain (optional), **Stop all** button (when its hotkey is
+  enabled; the key itself is set in Settings), loop card (when enabled); the footer below
+  it is **pinned** (credit → peak meter → Settings button) and never scrolls. Compact
+  layout (<620 px sidebar height) hides labels, dB scale and credit.
 - **Main page:** search toolbar + RAM pill, grid/list of the active library, empty/no
   results states, drop handling. The toolbar and the grid both size from
   `board_content_width(ui)` (available width less the floating scroll-bar gutter), which
@@ -472,24 +472,43 @@ above-normal so audio still meets its deadlines.
 ### Settings screen
 
 - Reached from the sidebar, `Ctrl+,`, or `--settings`; replaces the board.
-- Left rail: Back, Playback, Appearance, Window, About (bottom).
+- Left rail: Back, Playback, Appearance, Window, General (bottom).
 - Content: fixed header + per-tab scroll; grouped cards and label/control rows.
-  `SettingsTab` holds the tab metadata. Text is intentionally terse.
-- Layout metrics live in the `SETTINGS_*` consts (SPEC FR-5.9.8 / §7.2); rows stack
-  below `SETTINGS_ROW_STACK_W`.
-- Playback owns loop enable/file, loop output routing and hotkey RAM; Appearance owns
-  theme/motion; Window owns minimize-to-tray, sidebar gain visibility and `Ctrl+Tab`
-  cycling (`cycle_tabs_ctrl_tab`, default off); About owns
-  version/config/dev plus the **Data** group (export, import, reset all settings).
-- Every page that owns fields ends with a **Defaults** card whose Reset restores that
-  page's fields (`Settings::reset_group`, one field list per group in `storage/mod.rs`);
-  libraries and sounds are never part of a reset.
-- Devices, output volumes, link and master gain live in the sidebar, not Settings.
+  `SettingsTab` holds the tab metadata. Text is intentionally terse: explanations live
+  in row tooltips, not in paragraphs (FR-5.9.15).
+- Tabs: Playback (Looping, Memory, Output devices, Hotkeys), Appearance (Theme,
+  Animation), Window (System tray, Sidebar, Tab navigation), General (Configuration,
+  Reset, About, Support).
+- Two columns: `settings_columns` puts the tab's editable main column beside a
+  read-only info column (`settings_playback_info` / `settings_general_info`) when
+  `settings_two_columns(content_width)` holds; otherwise it stacks the info panels under
+  the main column, so no status is lost on a narrow window.
+- Layout metrics live in the `SETTINGS_*` consts (SPEC FR-5.9.8 / §7.2). The
+  two-column breakpoint is derived from the row-stack breakpoint
+  (`SETTINGS_TWO_COLUMN_MIN_W = SETTINGS_ROW_STACK_W + SETTINGS_INFO_COL_W +
+  SETTINGS_COLUMN_GAP`), so the main column can never be too narrow for its own rows.
+- Every row goes through `settings_row`: one label column (label at the row's left
+  edge), one control column (control flush with the row's right edge), one 28 px row
+  height, both vertically centred. `settings_value`, `settings_toggle`
+  (`settings_toggle_hinted` for a tooltip), `settings_status_row` and
+  `settings_hotkey_row` are the only row builders; a detail line under a row starts at
+  the same label origin (`settings_detail` / `settings_detail_colored`). Rows stack below
+  `SETTINGS_ROW_STACK_W`; the stacked control block is right-aligned the same way.
+- `settings_hotkey_row` is the one hotkey row (stop-all now, the mic mute key later): key
+  pill + Set/Change + Clear, and it returns a `HotkeyRowAction` so the caller opens the
+  shared capture modal (`CaptureTarget::StopAll`) or clears the binding. The pill and the
+  buttons use explicit ids (`ghost_button_at`) so two rows cannot share interaction state.
+- Reset: the only reset is General → Reset → **Reset all settings**, behind the existing
+  confirmation (`Settings::reset_all`). There is no per-page reset and no
+  `SettingsGroup`.
+- Devices, output volumes, link and master gain live in the sidebar, not Settings; the
+  Output devices card shows the same state read-only.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
-- Shared helpers: `settings_group`, `settings_value` (one label/control row),
-  `settings_toggle` (row + switch + changed), `settings_detail`, `settings_divider`,
-  `settings_switch`, `settings_nav_item`, `settings_back`; `pressable` is the button
-  press tween + overlay.
+- Shared helpers: `settings_group`, `settings_row`, `settings_value`,
+  `settings_toggle` / `settings_toggle_hinted`, `settings_status_row`,
+  `settings_hotkey_row`, `settings_key_pill`, `settings_detail(_colored)`,
+  `settings_divider`, `settings_switch`, `settings_nav_item`, `settings_back`;
+  `pressable` is the button press tween + overlay.
 - Values that walk the sound list or lock the playback registry (`ram_summary`,
   `cache_usage`) are cached in `PlaybackStats`; the theme list is cached in
   `theme_choices` and rebuilt on reload.
@@ -601,18 +620,19 @@ master stage clamps the mix.
 
 ### Loop
 
-Enable in Settings → Playback and choose the file there; the same page routes the loop
-to Monitor and/or Cable. Play/Stop and volume live on the board loop card. It survives
-tab switches, `Stop all`, and tray minimize, and stops on quit or when disabled.
+Enable in Settings → Playback → Looping and choose the file there; the same section
+routes the loop to Monitor and/or Cable. Play/Stop and volume live on the board loop
+card. It survives tab switches, `Stop all`, and tray minimize, and stops on quit or when
+disabled.
 
 ### Settings and version
 
-`About` reads the version from `Cargo.toml` at compile time. Config folder uses
-`explorer`. Developer values are constants until replaced.
+Settings → General reads the version from `Cargo.toml` at compile time. Config folder
+uses `explorer`. Developer values are constants until replaced.
 
 ### Backup, restore and reset
 
-`About → Data → Export configuration` writes `storage::bundle::to_json(cfg,
+`General → Export configuration` writes `storage::bundle::to_json(cfg,
 storage_libraries())` to the chosen file with `io::write_text_atomic`.
 
 Import reads and validates the file, then the confirmation dialog calls
@@ -621,9 +641,9 @@ the board with `build_board` (the function startup uses), `apply_config` (theme,
 output levels/gain, endpoint resolution, loop routing, stop-all, hotkeys, RAM retention)
 and save. Nothing is applied before Replace.
 
-`apply_config` is also the reset path: `Settings::reset_group` / `reset_all` change only
-the `Settings` value, then the same re-apply runs. Libraries, sounds and audio files are
-never touched by either action.
+`apply_config` is also the reset path: `Settings::reset_all` changes only the `Settings`
+value, then the same re-apply runs. Libraries, sounds and audio files are never touched
+by it.
 
 ---
 
@@ -680,10 +700,11 @@ cargo build --release
 .\target\release\sounddeck.exe --diag path\to\sound.wav
 ```
 
-- 230 unit tests cover storage recovery/round-trip, reset-group coverage, bundle
+- 231 unit tests cover storage recovery/round-trip, settings-field coverage, bundle
   validation, resampling (chunk invariance), loop streaming (wrap, stop, file release,
   errors), mixer loop gain/wrap/routing, `effective_gain`/`clamp_gain_db`, volume
-  curve/clamps, hotkey matching and the blocked-chord table, and theme-file parsing.
+  curve/clamps, hotkey matching and the blocked-chord table, settings row/column
+  geometry, and theme-file parsing.
 - Tests use temporary directories named with the process/time; no user data.
 - `--diag` enumerates devices, opens Monitor/Cable, decodes a file, plays it, and
   prints WASAPI events.
@@ -725,9 +746,17 @@ cargo build --release
 
 **Add a Settings tab**
 
-1. Add a `SettingsTab` variant, title, subtitle, icon.
-2. Add it to `ALL` and the rail (About stays pinned).
-3. Add `settings_page_*` and the match in `settings_content`.
+1. Add a `SettingsTab` variant, title and icon.
+2. Add it to `ALL` and the rail (General stays pinned).
+3. Add `settings_page_*` and the match in `settings_content`; a tab with status panels
+   routes through `settings_columns` with a main and an info fn.
+
+**Add a Settings row**
+
+Use `settings_row` (via `settings_value`, `settings_toggle`, `settings_status_row` or
+`settings_hotkey_row`) — never a hand-rolled `horizontal`. `control_width` reserves the
+control column; a detail line goes through `settings_detail`. The geometry lives in the
+`SETTINGS_*` consts, so a row that fits one page fits every page.
 
 **Add or change a volume**
 
@@ -766,7 +795,7 @@ producer→device boundary. Keep blocking work off the mixer thread.
 | `src/audio/stream.rs` | Loop and one-shot decoder threads, bounded chunk channel |
 | `src/audio/engine.rs` | Mixer, buffer and stream voices, loop, rings, gains, routes |
 | `src/audio/wasapi.rs` | Device enumeration, shared-mode render threads |
-| `src/storage/mod.rs` | Settings/libraries schemas, normalize, reset groups, load/save |
+| `src/storage/mod.rs` | Settings/libraries schemas, normalize, field classification, load/save |
 | `src/storage/io.rs` | Atomic writes, BOM, rolling backup, recovery, tmp sweep |
 | `src/storage/migrate.rs` | Legacy `sounddeck.json` import |
 | `src/storage/bundle.rs` | One-file config bundle: export, parse, version/stamp validation |

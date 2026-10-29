@@ -55,7 +55,7 @@ pub struct Settings {
     pub cycle_tabs_ctrl_tab: bool,
     /// Show RAM/disk state (card chips, counts, toolbar pill). Off by default.
     pub show_ram_state: bool,
-    /// Enables the global stop-all hotkey and its sidebar widget.
+    /// Enables the global stop-all hotkey and its sidebar button.
     pub stop_all_hotkey_enabled: bool,
     /// Label form of the stop-all hotkey, e.g. "Ctrl+Alt+S".
     pub stop_all_hotkey: Option<String>,
@@ -120,39 +120,6 @@ impl Settings {
         });
     }
 
-    /// Restore one settings page's fields to their defaults, leaving every other
-    /// group (device ids, volumes, layout, active tab) exactly as it was.
-    ///
-    /// The field lists live here and nowhere else: the Reset buttons on the three
-    /// pages all call this. Adding a field to a page means adding it to that
-    /// group — `reset_groups_should_cover_every_field` fails until it is.
-    pub fn reset_group(&mut self, group: SettingsGroup) {
-        let defaults = Self::default();
-        match group {
-            SettingsGroup::Playback => {
-                self.loop_enabled = defaults.loop_enabled;
-                self.loop_path = defaults.loop_path;
-                self.loop_volume = defaults.loop_volume;
-                self.loop_on_monitor = defaults.loop_on_monitor;
-                self.loop_on_cable = defaults.loop_on_cable;
-                self.preload_hotkey_sounds = defaults.preload_hotkey_sounds;
-                self.show_ram_state = defaults.show_ram_state;
-                self.stop_all_hotkey_enabled = defaults.stop_all_hotkey_enabled;
-                self.stop_all_hotkey = defaults.stop_all_hotkey;
-            }
-            SettingsGroup::Appearance => {
-                self.theme = defaults.theme;
-                self.animate_ui = defaults.animate_ui;
-            }
-            SettingsGroup::Window => {
-                self.minimize_to_tray = defaults.minimize_to_tray;
-                self.show_gain_slider = defaults.show_gain_slider;
-                self.cycle_tabs_ctrl_tab = defaults.cycle_tabs_ctrl_tab;
-            }
-        }
-        self.normalize();
-    }
-
     /// Every field back to its default. Settings only: libraries, sounds and
     /// audio files are a different file and are never part of a reset.
     pub fn reset_all(&mut self) {
@@ -167,30 +134,6 @@ impl Settings {
         }
         if let Some(first) = library_ids.first() {
             self.active_library = *first;
-        }
-    }
-}
-
-/// The settings pages that own a group of fields. One definition per group, so
-/// "reset this page" is a single mapping instead of a match on every page.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingsGroup {
-    Playback,
-    Appearance,
-    Window,
-}
-
-impl SettingsGroup {
-    /// Every page group, for the coverage test that fails when a new `Settings`
-    /// field reaches no group.
-    #[cfg(test)]
-    pub const ALL: [Self; 3] = [Self::Playback, Self::Appearance, Self::Window];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Playback => "Playback",
-            Self::Appearance => "Appearance",
-            Self::Window => "Window",
         }
     }
 }
@@ -937,24 +880,9 @@ mod tests {
         }
     }
 
-    /// JSON keys whose value changed between two settings values.
-    fn changed_keys(before: &Settings, after: &Settings) -> Vec<String> {
-        let before: serde_json::Value =
-            serde_json::from_str(&serialize_settings(before).unwrap()).unwrap();
-        let after: serde_json::Value =
-            serde_json::from_str(&serialize_settings(after).unwrap()).unwrap();
-        let after = after.as_object().expect("settings serialize to an object");
-        before
-            .as_object()
-            .expect("settings serialize to an object")
-            .iter()
-            .filter(|(key, value)| after.get(*key) != Some(*value))
-            .map(|(key, _)| key.to_string())
-            .collect()
-    }
-
     /// Fields with no settings page: they live on the board (devices, volumes,
-    /// layout, active tab) and only "Reset all settings" restores them.
+    /// layout, active tab) or on the loop card, and only "Reset all settings"
+    /// restores them.
     const BOARD_OWNED: &[&str] = &[
         "version",
         "active_library",
@@ -967,53 +895,33 @@ mod tests {
         "cable_volume",
         "master_gain_db",
         "link_volumes",
+        "loop_volume",
     ];
 
-    #[test]
-    fn resetting_a_page_should_leave_the_other_groups_intact() {
-        let mut settings = non_default_settings();
-        settings.reset_group(SettingsGroup::Playback);
+    /// Fields with a control on a Settings page. Reset-all is the only reset now,
+    /// so this list is the drift guard's other half: a field added to `Settings`
+    /// must either get a row here or be board-owned.
+    const SETTINGS_PAGE_FIELDS: &[&str] = &[
+        "theme",
+        "preload_hotkey_sounds",
+        "loop_enabled",
+        "loop_path",
+        "loop_on_monitor",
+        "loop_on_cable",
+        "animate_ui",
+        "minimize_to_tray",
+        "show_gain_slider",
+        "cycle_tabs_ctrl_tab",
+        "show_ram_state",
+        "stop_all_hotkey_enabled",
+        "stop_all_hotkey",
+    ];
 
-        // Playback is back to its defaults.
-        assert_eq!(settings.loop_enabled, Settings::default().loop_enabled);
-        assert!(settings.loop_path.is_none());
-        assert_eq!(settings.loop_volume, 1.0);
-        assert!(settings.loop_on_monitor && settings.loop_on_cable);
-        assert!(settings.preload_hotkey_sounds);
-        assert!(!settings.show_ram_state);
-        assert!(!settings.stop_all_hotkey_enabled);
-        assert!(settings.stop_all_hotkey.is_none());
-
-        // Appearance and Window are untouched.
-        assert_eq!(settings.theme, "mocha");
-        assert!(!settings.animate_ui);
-        assert!(settings.minimize_to_tray);
-        assert!(!settings.show_gain_slider);
-        assert!(settings.cycle_tabs_ctrl_tab);
-
-        // So is everything that belongs to the board.
-        assert_eq!(settings.active_library, 7);
-        assert_eq!(settings.layout, Layout::List);
-        assert_eq!(settings.monitor_device.as_deref(), Some("mon-a"));
-        assert_eq!(settings.cable_name.as_deref(), Some("Cable"));
-        assert_eq!(settings.monitor_volume, 0.5);
-        assert!(!settings.link_volumes);
-        assert!((settings.master_gain_db - 3.0).abs() < 1e-6);
-    }
-
-    /// Drift guard: a settings field must belong to a page group or be listed as
+    /// Drift guard: a settings field must be shown on a Settings page or be
     /// board-owned. A new field added to `Settings` and forgotten in both fails
-    /// here with its own name.
+    /// here with its own name; a stale name in either list fails too.
     #[test]
-    fn reset_groups_should_cover_every_field() {
-        let mut settings = non_default_settings();
-        let mut covered: HashSet<String> = BOARD_OWNED.iter().map(|key| key.to_string()).collect();
-        for group in SettingsGroup::ALL {
-            let before = settings.clone();
-            settings.reset_group(group);
-            covered.extend(changed_keys(&before, &settings));
-        }
-
+    fn every_settings_field_is_owned_by_a_control_or_the_board() {
         let all_keys: HashSet<String> = serde_json::from_str::<serde_json::Value>(
             &serialize_settings(&Settings::default()).unwrap(),
         )
@@ -1023,29 +931,20 @@ mod tests {
         .keys()
         .cloned()
         .collect();
+
+        let mut covered: HashSet<String> = HashSet::new();
+        for key in BOARD_OWNED.iter().chain(SETTINGS_PAGE_FIELDS) {
+            assert!(
+                all_keys.contains(*key),
+                "{key} is classified but is not a Settings field any more"
+            );
+            covered.insert((*key).to_string());
+        }
+
         let missing: Vec<&String> = all_keys.difference(&covered).collect();
         assert!(
             missing.is_empty(),
-            "settings fields belong to no reset group and are not board-owned: {missing:?}"
-        );
-
-        // What the three resets leave alone is exactly the board-owned set.
-        let mut defaults = Settings::default();
-        defaults.normalize();
-        let leftover = changed_keys(&defaults, &settings);
-        assert!(
-            leftover
-                .iter()
-                .all(|key| BOARD_OWNED.contains(&key.as_str())),
-            "a page reset changed a field outside its group: {leftover:?}"
-        );
-        assert!(
-            !leftover.iter().any(|key| key == "loop_enabled"),
-            "a Playback field is back at its default"
-        );
-        assert!(
-            leftover.iter().any(|key| key == "master_gain_db"),
-            "a board field keeps its value"
+            "settings fields have no Settings control and are not board-owned: {missing:?}"
         );
     }
 

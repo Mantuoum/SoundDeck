@@ -21,7 +21,9 @@ chords, trim dialog, theme id/name)` · `2026-10-29 — themes are JSON (<id>.js
 auto-migrated to .md.migrated)` · `2026-10-29 — review deltas G1–G4 (one hover surface,
 unselectable chrome text, Ctrl+Tab focus block, theme labels without the id)` · `2026-10-29 —
 G5 (gain menu row is the label only) + doc stragglers (UI-9 and Ctrl+Tab trap in
-ARCHITECTURE)`. Details live in git history.
+ARCHITECTURE)` · `2026-10-29 — Settings reorganization (4 tabs, two-column wide layout,
+one row geometry, reset-all only, stop-all key set in Settings)`. Details live in git
+history.
 
 ## 1. Repository layout
 
@@ -152,8 +154,10 @@ restart cannot re-resolve it to a device.
   built from those same structs; import validates the stamps, `normalize()`s, and
   `App::apply_import` swaps the board only after the user confirms. Settings export is
   the only writer of a user-chosen file (`io::write_text_atomic`, no rolling `.bak`).
-- **Reset** (`Settings::reset_group`/`reset_all`): one field list per settings page;
-  the coverage test fails when a new field reaches no group. Never touches libraries.
+- **Reset** (`Settings::reset_all`): every settings field back to its default, from
+  General → Reset behind the confirmation. There is no per-page reset; a
+  `SETTINGS_PAGE_FIELDS`/`BOARD_OWNED` coverage test names any field that is neither
+  shown on a Settings page nor board-owned. Never touches libraries.
 
 ### 2.5 Playback registry & RAM policy (`playback/`)
 
@@ -292,8 +296,9 @@ Frame pacing: 33 ms moving, 100 ms settings+audio, 1 s idle (the idle-CPU guaran
 NFR-8.1.x).
 
 **Board**: sidebar (scrollable: Load sounds + layout switch → Monitor/Cable device +
-volume sliders + link → optional master gain 0..+12 dB right-click-reset → stop-all card
-→ loop card; pinned footer: credit → peak meter → Settings button), toolbar (search, RAM
+volume sliders + link → optional master gain 0..+12 dB right-click-reset → **Stop all**
+button (no key; the key is set in Settings) → loop card; pinned footer: credit → peak
+meter → Settings button), toolbar (search, RAM
 pill), grid/list of the active library, cards/rows (name, hotkey pill, RAM chip, missing
 state, log-curve volume bar, progress line — drawn only once the total duration is known —
 context menu with **Set gain…** between Stop and Rename, label only: the dialog carries
@@ -323,12 +328,16 @@ stay live). Tab drop targets live beside them: a card dragged over a library tab
 that tab, and the drop is a move with the context menu's semantics, without switching the
 active library.
 
-**Settings** (immediate save, no Apply): Playback (loop enable/file/level/routing,
-hotkey RAM, Show RAM state, stop-all hotkey), Appearance (theme + motion), Window
-(minimize-to-tray, gain slider visibility, `Ctrl+Tab` cycling — `cycle_tabs_ctrl_tab`,
-default off), About (version, config folder, links, Data:
-export/import/reset all). The three field pages end with a Reset card
-(`Settings::reset_group`); About's Reset all is confirmed.
+**Settings** (immediate save, no Apply): four tabs — Playback (Looping: enable + file +
+Monitor/Cable routing; Memory: RAM preload + Show RAM state; Output devices: status;
+Hotkeys: stop-all switch + key row), Appearance (Theme + Reload, Animation), Window
+(System tray, Sidebar gain, `Ctrl+Tab` cycling — `cycle_tabs_ctrl_tab`, default off),
+General (Configuration: folder/export/import; Reset: **Reset all settings**, confirmed;
+About; Support). On a wide window each tab is a main column plus a read-only info/status
+column; below the breakpoint the info panels stack under it. Every row is
+`settings_row`: one label origin, one control right edge, one 28 px height, detail lines
+at the label origin — geometry lives in the `SETTINGS_*` consts. Explanations are row
+tooltips, not paragraphs.
 
 **Themes** (`ui/theme*`): JSON `config/themes/<id>.json` — `name`, optional `light`, one
 key per colour from the single `COLOUR_TOKENS` table (hex, `#` optional). The **file stem
@@ -395,8 +404,9 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 - **Naming/ids**: `Slot::index()` iteration (no bare `0..2`); egui ids
   `ui.id().with((tag, id))` (no `enum as i32`); function names state side effects.
 - **UI**: cards/rows collect `Action`s (painting doesn't mutate; singleton chrome
-  excepted). Reuse `sound_item`, `modal_shell`, `settings_*`, `hotkey_pill`,
-  `volume::bar`, `theme::truncate`, `press_overlay`. Board widths come from
+  excepted). Reuse `sound_item`, `modal_shell`, `settings_row` (+ its thin variants),
+  `settings_columns`, `hotkey_pill`, `volume::bar`, `theme::truncate`, `press_overlay`.
+  Board widths come from
   `board_content_width(ui)` — never a bare `available_width()` — so the toolbar and the
   grid stay aligned. Colors = theme tokens only. Radii
   SM/MD/LG/XL. Volumes/percentages only via `ui/volume.rs`. Fetch `theme::palette()`
@@ -423,18 +433,20 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
 
 | To add… | Steps |
 | --- | --- |
-| A setting | field + `Default` + `normalize()` clamp + `#[serde(default)]` → control in the right `settings_page_*` → consumer + `mark_dirty()` → test if clamped → SPEC §6.1 + README |
+| A setting | field + `Default` + `normalize()` clamp + `#[serde(default)]` → control in the right `settings_page_*` → consumer + `mark_dirty()` → classify the field in `SETTINGS_PAGE_FIELDS` or `BOARD_OWNED` (storage coverage test) → test if clamped → SPEC §6.1 + README |
 | A theme token | `Palette` field → default in `theme_defaults.rs` → one `Colour` variant + one `COLOUR_TOKENS` row in `theme_file.rs` (the JSON parser, the template and the field-coverage test all follow from that one table) → use `theme::token()` |
 | A sound action | `Action` variant → `handle_actions` arm → trigger in `sound_item`/context menu |
-| A Settings tab | `SettingsTab` variant + `title()` + `ALL` → rail item (About stays pinned) → `settings_page_*` + `settings_content` match |
+| A Settings tab | `SettingsTab` variant + `title()` + `ALL` → rail item (General stays pinned) → `settings_page_*` + `settings_content` match; status panels go through `settings_columns(main, info)` |
+| A Settings row | `settings_row` (or `settings_value` / `settings_toggle` / `settings_status_row` / `settings_hotkey_row`) — never a hand-rolled `horizontal`; `control_width` reserves the control column, `settings_detail(_colored)` for a line under it. Geometry = `SETTINGS_*` consts only (SPEC FR-5.9.13) |
 | A volume | only `ui/volume.rs` — store linear, display via `to_position`/`percent_text` |
 | A file format | Symphonia feature → `model::SUPPORTED_EXTENSIONS` → dialog filter → test file |
 | Audio routing | `Engine` = devices/routes, `Mixer` = voices/loop/gains, `Ring` = producer→device boundary; nothing blocking on the mixer thread |
 | Hotkey behaviour | `hotkeys.rs`: `KEYS` table + `chord_owner`/`duplicate_sounds` (extend, never copy) → shared capture path in `app.rs` → SPEC §5.7 |
+| A global hotkey row | `settings_hotkey_row` in the owning section (it returns `HotkeyRowAction`) → open the shared capture modal with a `CaptureTarget` variant; the modal and the conflict rules stay in one place |
 | A modal | `modal_shell(ctx, content_rect, …)` + `modal_header` + `close_button`; anchor on `App::content_rect`, no one-off backdrops |
 | A tray/menu item | `handle_menu_command` in `hotkeys.rs` |
 | A shell/Explorer call | `App::spawn_shell_call(label, job)` — the job returns `Result<(), String>` and runs on a `sounddeck-shell` worker; failures reach the activity log, the frame never waits. Never build an `explorer.exe` command line for a path |
-| A settings reset | field → the owning arm of `Settings::reset_group` (coverage test names any orphan) → side effect in `App::apply_config`; the page's Reset row follows `SettingsTab::group` |
+| A settings reset | there is one: `Settings::reset_all` (General → Reset, confirmed) → side effect in `App::apply_config`; a new field needs no reset entry, only the coverage classification |
 | Export/import data | `storage/bundle.rs` (stamps + `normalize()` + one `BundleError`) → UI only calls it; the board swap belongs to `App::apply_import` |
 
 ## 6. Guardrails (refuse these)

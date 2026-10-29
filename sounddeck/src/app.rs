@@ -53,14 +53,12 @@ const BOARD_CONTENT_MIN_W: f32 = 180.0;
 /// The search field keeps at least this much of the toolbar.
 const SEARCH_MIN_W: f32 = 160.0;
 
-// Sidebar stop-all widget (B7): one hit rect for the body, one for the pill.
-const STOP_ALL_PILL_W: f32 = 96.0;
-const STOP_ALL_PILL_H: f32 = 24.0;
-/// Gap between the body's hit rect and the pill's, so they never overlap.
-const STOP_ALL_BODY_GAP: f32 = 8.0;
+// Sidebar stop-all widget: one click target (the whole card), no hotkey pill —
+// the key is set in Settings.
+/// Height of the hand-painted stop-all card.
+const STOP_ALL_CARD_H: f32 = 28.0;
 /// Inner padding of the hand-painted stop-all card.
 const STOP_ALL_PAD_X: f32 = 10.0;
-const STOP_ALL_PAD_Y: f32 = 4.0;
 /// Master gain slider range. `Settings::normalize` clamps to the same bounds;
 /// the UI only ever hands it a value from inside this range.
 const MASTER_GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=12.0;
@@ -74,9 +72,13 @@ const MASTER_GAIN_NEUTRAL_DB: f32 = 0.0;
 const TAB_FOCUS_BLOCK: &str = "tab_focus_block";
 
 // Settings layout metrics (SPEC FR-5.9.8 spacing, §7.2 widths). Every number the
-// settings screen uses comes from here so the four pages keep one rhythm.
-const SETTINGS_CONTENT_MAX_W: f32 = 780.0;
-const SETTINGS_ABOUT_MAX_W: f32 = 680.0;
+// settings screen uses comes from here, so every page keeps one rhythm: one row
+// height, one label gap, one control right edge.
+const SETTINGS_CONTENT_MAX_W: f32 = 1040.0;
+/// Width of the right-hand info/status column. It holds read-only panels only.
+const SETTINGS_INFO_COL_W: f32 = 300.0;
+/// Gap between the main column and the info column.
+const SETTINGS_COLUMN_GAP: f32 = 18.0;
 const SETTINGS_CARD_PADDING: i8 = 10;
 /// Title of a group to the top of its card.
 const SETTINGS_GROUP_TITLE_GAP: f32 = 5.0;
@@ -87,9 +89,17 @@ const SETTINGS_ROW_H: f32 = 28.0;
 /// Space between a row's label and its control.
 const SETTINGS_ROW_LABEL_GAP: f32 = 16.0;
 const SETTINGS_ROW_LABEL_MIN_W: f32 = 160.0;
+/// Narrowest label column inside the 300 px info column: the main column's
+/// 160 px minimum would leave no room for the value there.
+const SETTINGS_INFO_LABEL_MIN_W: f32 = 72.0;
 /// Content width below which a row stacks its label above the control. This is a
 /// width breakpoint; it is unrelated to the sidebar's 620 px *height* rule.
 const SETTINGS_ROW_STACK_W: f32 = 620.0;
+/// Content width at which the info column appears. Derived from the row
+/// breakpoint, so the two thresholds cannot drift apart: the main column still
+/// keeps its rows side by side beside the info column.
+const SETTINGS_TWO_COLUMN_MIN_W: f32 =
+    SETTINGS_ROW_STACK_W + SETTINGS_INFO_COL_W + SETTINGS_COLUMN_GAP;
 /// Space above and below a divider rule.
 const SETTINGS_DIVIDER_GAP: f32 = 7.0;
 /// Row to the muted detail line under it.
@@ -103,6 +113,31 @@ const SETTINGS_SWITCH_SIZE: Vec2 = Vec2::new(40.0, 22.0);
 /// clipped, and `right_to_left` keeps the text flush with the other controls.
 const SETTINGS_TEXT_COL_W: f32 = 200.0;
 const SETTINGS_THEME_W: f32 = 240.0;
+/// Reserved width of a status row's value column (the info column's readouts).
+const SETTINGS_STATUS_W: f32 = 160.0;
+/// Gap between the two controls of one control block (the key pill and its button).
+const SETTINGS_CONTROL_GAP: f32 = 8.0;
+/// Height of the key pill in a hotkey row: a control, not a button.
+const SETTINGS_HOTKEY_PILL_H: f32 = 22.0;
+/// The pill never gets narrower than this, so a short chord still reads as a key.
+const SETTINGS_HOTKEY_PILL_MIN_W: f32 = 96.0;
+/// Nor wider than this: a longer chord is truncated in the pill (the capture
+/// dialog shows it in full) instead of eating the row's label column.
+const SETTINGS_HOTKEY_PILL_MAX_W: f32 = 160.0;
+/// Horizontal padding inside the key pill, both sides.
+const SETTINGS_HOTKEY_PILL_PAD: f32 = 10.0;
+const SETTINGS_HOTKEY_CLEAR_W: f32 = 64.0;
+/// What a hotkey row's pill says before a chord is bound. The row's button is the
+/// action ("Set"), so the pill only states the value.
+const SETTINGS_HOTKEY_UNBOUND: &str = "Not set";
+/// Reserved width of a hotkey row's control block: Clear, gap, the pill at its
+/// widest, gap, Set/Change. The block is right-aligned, so its button ends on the
+/// same edge as every other control.
+const SETTINGS_HOTKEY_CTRL_W: f32 = SETTINGS_HOTKEY_CLEAR_W
+    + SETTINGS_CONTROL_GAP
+    + SETTINGS_HOTKEY_PILL_MAX_W
+    + SETTINGS_CONTROL_GAP
+    + SETTINGS_BUTTON_SIZE.x;
 const SETTINGS_RULE_H: f32 = 1.0;
 const SETTINGS_RAIL_ITEM_H: f32 = 34.0;
 const SETTINGS_RAIL_ITEM_GAP: f32 = 3.0;
@@ -170,17 +205,17 @@ const GAIN_DIALOG_RANGE: std::ops::RangeInclusive<f32> = SOUND_GAIN_MIN_DB..=SOU
 
 const DEVELOPER_NAME: &str = "Mantum";
 
-/// Personal links shown under the credit line in About. Entries with an empty
-/// URL are skipped, so nothing renders until the URL is real.
+/// Personal links shown under the credit line in Settings -> General -> Support.
+/// Entries with an empty URL are skipped, so nothing renders until the URL is real.
 const DEVELOPER_LINKS: &[(&str, &str)] = &[
     ("YouTube", "https://youtube.com/@mantu_um"),
     ("GitHub", "https://github.com/mantuoum"),
 ];
 
-/// About -> project links. These assume the repository is called `SoundDeck`;
-/// change the URLs (and `Cargo.toml`) if it ends up with another name.
+/// Settings -> General -> Support links. These assume the repository is called
+/// `SoundDeck`; change the URLs (and `Cargo.toml`) if it ends up with another name.
 const ABOUT_LINKS: &[(&str, &str)] = &[
-    ("Support", "https://github.com/mantuoum/SoundDeck/issues"),
+    ("Issues", "https://github.com/mantuoum/SoundDeck/issues"),
     ("Releases", "https://github.com/mantuoum/SoundDeck/releases"),
 ];
 
@@ -198,29 +233,23 @@ enum SettingsTab {
     Playback,
     Appearance,
     Window,
-    About,
+    General,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::Playback, Self::Appearance, Self::Window, Self::About];
+    const ALL: [Self; 4] = [
+        Self::Playback,
+        Self::Appearance,
+        Self::Window,
+        Self::General,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Self::Playback => "Playback",
             Self::Appearance => "Appearance",
             Self::Window => "Window",
-            Self::About => "About",
-        }
-    }
-
-    /// The `SettingsGroup` the page's Reset button restores. About has no fields
-    /// of its own — only the whole-config actions — so it has no group.
-    fn group(self) -> Option<storage::SettingsGroup> {
-        match self {
-            Self::Playback => Some(storage::SettingsGroup::Playback),
-            Self::Appearance => Some(storage::SettingsGroup::Appearance),
-            Self::Window => Some(storage::SettingsGroup::Window),
-            Self::About => None,
+            Self::General => "General",
         }
     }
 }
@@ -2053,18 +2082,6 @@ impl App {
         }
     }
 
-    /// Restore one settings page to its defaults and re-apply the side effects.
-    /// No confirmation (a page reset is small and repeatable) and no effect on
-    /// libraries or sounds.
-    fn reset_settings_group(&mut self, ctx: &egui::Context, group: storage::SettingsGroup) {
-        self.cfg.reset_group(group);
-        self.apply_config(ctx);
-        self.log(
-            StatusKind::Info,
-            format!("{} settings reset to defaults", group.title()),
-        );
-    }
-
     /// Every settings field back to its default. The config is saved at once so a
     /// crash right after cannot resurrect the old values.
     fn reset_all_settings(&mut self, ctx: &egui::Context) {
@@ -2536,7 +2553,8 @@ impl App {
         );
     }
 
-    /// Sidebar widget: stop everything now, and own the stop-all hotkey.
+    /// Sidebar widget: stop everything now. The stop-all key is set in Settings
+    /// (Playback -> Hotkeys), so the card is one click target and nothing else.
     ///
     /// The card is drawn by hand rather than with a `Label`, because the whole
     /// body has to be one click target: a label only senses its own text, which
@@ -2545,8 +2563,8 @@ impl App {
     /// the content exists, so it cannot react to a hover in the same frame, and
     /// the two cards must share one hover treatment (G1).
     fn stop_all_card(&mut self, ui: &mut Ui) {
-        let size = Vec2::new(ui.available_width(), STOP_ALL_PILL_H + 2.0 * STOP_ALL_PAD_Y);
-        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let size = Vec2::new(ui.available_width(), STOP_ALL_CARD_H);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         ui.painter().rect(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
@@ -2554,79 +2572,21 @@ impl App {
             Stroke::new(1.0_f32, theme::border_soft()),
             StrokeKind::Inside,
         );
-        let inner = rect.shrink2(Vec2::new(STOP_ALL_PAD_X, STOP_ALL_PAD_Y));
-        let row = Rect::from_min_size(inner.min, Vec2::new(inner.width(), STOP_ALL_PILL_H));
-        let painter = ui.painter().clone();
-        // The pill owns the right end of the row; the body is everything
-        // left of it. The two hit rects never overlap, so a body click
-        // cannot also fire the capture pill.
-        let pill_rect = Rect::from_min_max(
-            Pos2::new(
-                row.right() - STOP_ALL_PILL_W,
-                row.center().y - STOP_ALL_PILL_H * 0.5,
-            ),
-            row.right_bottom(),
-        );
-        let body_rect = Rect::from_min_max(
-            row.min,
-            Pos2::new(pill_rect.left() - STOP_ALL_BODY_GAP, row.max.y),
-        );
-
-        let body = ui.interact(body_rect, Id::new("stop_all_body"), Sense::click());
-        painter.text(
-            body_rect.left_center(),
+        ui.painter().text(
+            rect.left_center() + Vec2::new(STOP_ALL_PAD_X, 0.0),
             Align2::LEFT_CENTER,
             "Stop all",
             theme::ui_font(12.0),
             theme::text(),
         );
-        let stopped = body.clicked();
-        body.on_hover_cursor(egui::CursorIcon::PointingHand)
+        let stopped = response.clicked();
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text("Stop every playing sound now");
-
-        let unset = self.stop_all.is_none();
-        let label = self
-            .stop_all
-            .map(|hotkey| hotkey.label())
-            .unwrap_or_else(|| "Set hotkey".to_string());
-        // Same surface as the hotkey pill on a sound card.
-        painter.rect(
-            pill_rect,
-            CornerRadius::same(theme::RADIUS_MD),
-            theme::field(),
-            Stroke::new(1.0_f32, theme::border_soft()),
-            StrokeKind::Inside,
-        );
-        painter.text(
-            pill_rect.center(),
-            Align2::CENTER_CENTER,
-            label,
-            theme::ui_font(11.0),
-            if unset {
-                theme::faint()
-            } else {
-                theme::muted()
-            },
-        );
-        let pill = ui.interact(pill_rect, Id::new("stop_all_hotkey"), Sense::click());
-        let capture = pill.clicked();
-        let clear = pill.secondary_clicked() && !unset;
-        pill.on_hover_text("Click to set, right-click to clear");
 
         if stopped {
             self.engine.stop_all();
             self.log(StatusKind::Info, "Stopped all sounds");
-        }
-        if clear {
-            self.stop_all = None;
-            self.sync_active_library();
-            self.mark_dirty();
-        }
-        if capture {
-            self.capture = Some(CaptureState {
-                target: CaptureTarget::StopAll,
-                current: self.stop_all,
-            });
         }
     }
 
@@ -3949,7 +3909,7 @@ impl App {
         ui.add_space(SETTINGS_RAIL_SECTION_GAP);
         for tab in SettingsTab::ALL
             .into_iter()
-            .filter(|tab| *tab != SettingsTab::About)
+            .filter(|tab| *tab != SettingsTab::General)
         {
             if settings_nav_item(ui, tab, self.settings_tab == tab) {
                 self.select_settings_tab(tab, ui.ctx());
@@ -3957,16 +3917,16 @@ impl App {
             ui.add_space(SETTINGS_RAIL_ITEM_GAP);
         }
 
-        // About pinned to the bottom; everything else is a normal tab.
+        // General pinned to the bottom; everything else is a normal tab.
         ui.add_space((ui.available_height() - SETTINGS_RAIL_FOOTER_H).max(SETTINGS_GROUP_GAP));
         settings_rule(ui);
         ui.add_space(SETTINGS_RAIL_RULE_GAP);
         if settings_nav_item(
             ui,
-            SettingsTab::About,
-            self.settings_tab == SettingsTab::About,
+            SettingsTab::General,
+            self.settings_tab == SettingsTab::General,
         ) {
-            self.select_settings_tab(SettingsTab::About, ui.ctx());
+            self.select_settings_tab(SettingsTab::General, ui.ctx());
         }
     }
 
@@ -3996,52 +3956,69 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.scope(|ui| {
-                    ui.set_width(ui.available_width().min(SETTINGS_CONTENT_MAX_W));
+                    // The same gutter rule as the board, so a floating scroll bar
+                    // never covers the content's right edge.
+                    ui.set_width(board_content_width(ui).min(SETTINGS_CONTENT_MAX_W));
                     match tab {
                         SettingsTab::Playback => self.settings_page_playback(ui),
                         SettingsTab::Appearance => self.settings_page_appearance(ctx, ui),
                         SettingsTab::Window => self.settings_page_window(ui),
-                        SettingsTab::About => self.settings_page_about(ui),
-                    }
-                    // Every page that owns fields ends with its Reset row; the
-                    // group list lives in `storage::Settings`, not per page.
-                    if let Some(group) = tab.group() {
-                        self.settings_reset_group(ui, ctx, group);
+                        SettingsTab::General => self.settings_page_general(ui),
                     }
                     ui.add_space(SETTINGS_GROUP_GAP);
                 });
             });
     }
 
-    /// The trailing "Defaults" card on a settings page: restores that page's
-    /// fields only. Libraries and sounds are not settings, so they are never
-    /// part of it.
-    fn settings_reset_group(
+    /// The settings body for one tab: the editable main column, plus the tab's
+    /// read-only info/status column when the content is wide enough for both.
+    /// One place owns the two-column split, so every tab switches at the same
+    /// width; below the breakpoint the info panels stack under the main column
+    /// instead of disappearing.
+    fn settings_columns(
         &mut self,
         ui: &mut Ui,
-        ctx: &egui::Context,
-        group: storage::SettingsGroup,
+        main: fn(&mut Self, &mut Ui),
+        info: fn(&mut Self, &mut Ui),
     ) {
-        settings_group(ui, "Defaults", |ui| {
-            settings_value(ui, "Reset this page", SETTINGS_BUTTON_SIZE.x, |ui| {
-                if ghost_button(ui, "Reset", SETTINGS_BUTTON_SIZE)
-                    .on_hover_text(format!("Restore the {} defaults", group.title()))
-                    .clicked()
-                {
-                    self.reset_settings_group(ctx, group);
-                }
+        let width = ui.available_width();
+        if !settings_two_columns(width) {
+            main(self, ui);
+            info(self, ui);
+            return;
+        }
+        let main_width = settings_main_width(width);
+        ui.horizontal_top(|ui| {
+            // The gap is explicit, so the column geometry is the consts' alone.
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.vertical(|ui| {
+                ui.set_width(main_width);
+                main(self, ui);
             });
-            settings_detail(ui, "Libraries and sounds are not affected.");
+            ui.add_space(SETTINGS_COLUMN_GAP);
+            ui.vertical(|ui| {
+                ui.set_width(SETTINGS_INFO_COL_W);
+                info(self, ui);
+            });
         });
     }
 
     fn settings_page_playback(&mut self, ui: &mut Ui) {
-        settings_group(ui, "Looping track", |ui| {
+        self.settings_columns(
+            ui,
+            Self::settings_playback_main,
+            Self::settings_playback_info,
+        );
+    }
+
+    /// Playback's editable column: Looping, Memory, Hotkeys.
+    fn settings_playback_main(&mut self, ui: &mut Ui) {
+        settings_group(ui, "Looping", |ui| {
             let mut enabled = self.cfg.loop_enabled;
             if settings_toggle(
                 ui,
                 Id::new("settings_loop_enabled"),
-                "Enabled",
+                "Loop a track",
                 &mut enabled,
                 false,
                 true,
@@ -4050,17 +4027,13 @@ impl App {
             }
             if self.cfg.loop_enabled {
                 settings_divider(ui);
-                self.loop_settings_body(ui);
-            }
-        });
-
-        if self.cfg.loop_enabled {
-            settings_group(ui, "Loop outputs", |ui| {
+                self.loop_file_row(ui);
+                settings_divider(ui);
                 let mut monitor = self.cfg.loop_on_monitor;
                 if settings_toggle(
                     ui,
                     Id::new("settings_loop_monitor"),
-                    "Monitor",
+                    "Send to Monitor",
                     &mut monitor,
                     false,
                     true,
@@ -4070,13 +4043,12 @@ impl App {
                         .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
                     self.mark_dirty();
                 }
-
                 settings_divider(ui);
                 let mut cable = self.cfg.loop_on_cable;
                 if settings_toggle(
                     ui,
                     Id::new("settings_loop_cable"),
-                    "Cable",
+                    "Send to Cable",
                     &mut cable,
                     false,
                     true,
@@ -4086,10 +4058,10 @@ impl App {
                         .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
                     self.mark_dirty();
                 }
-            });
-        }
+            }
+        });
 
-        settings_group(ui, "Hotkey sounds", |ui| {
+        settings_group(ui, "Memory", |ui| {
             let ram = self.playback_stats();
             let enabled = ram.is_some();
             // A partly loaded board is neither on nor off: show the half-knob
@@ -4099,7 +4071,7 @@ impl App {
             if settings_toggle(
                 ui,
                 Id::new("settings_ram"),
-                "Load into RAM",
+                "Load hotkey sounds into RAM",
                 &mut on,
                 mixed,
                 enabled,
@@ -4119,40 +4091,9 @@ impl App {
                 self.cfg.show_ram_state = show_state;
                 self.mark_dirty();
             }
-            if self.cfg.show_ram_state {
-                settings_detail(ui, self.playback_stats.label.as_str());
-            }
         });
 
-        settings_group(ui, "Output devices", |ui| {
-            for (index, slot) in [Slot::Monitor, Slot::Cable].into_iter().enumerate() {
-                let (text, color) = match self.device_note[slot.index()].as_ref() {
-                    // A substitution or a failure outranks "ready": the device
-                    // that plays is not the one that was chosen.
-                    Some(note) => (
-                        format!("{}: {}", slot.label(), note.text),
-                        note.kind.color(),
-                    ),
-                    None if self.device_ready[slot.index()] => {
-                        (format!("{}: ready", slot.label()), theme::accent())
-                    }
-                    None => (format!("{}: not connected", slot.label()), theme::muted()),
-                };
-                ui.allocate_ui_with_layout(
-                    Vec2::new(ui.available_width(), SETTINGS_ROW_H),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        status_dot(ui, color);
-                        ui.label(RichText::new(text).size(11.0).color(color));
-                    },
-                );
-                if index == 0 {
-                    settings_divider(ui);
-                }
-            }
-        });
-
-        settings_group(ui, "Stop everything", |ui| {
+        settings_group(ui, "Hotkeys", |ui| {
             let mut enabled = self.cfg.stop_all_hotkey_enabled;
             if settings_toggle(
                 ui,
@@ -4167,72 +4108,102 @@ impl App {
                 self.mark_dirty();
             }
             if self.cfg.stop_all_hotkey_enabled {
-                let detail = match self.stop_all {
-                    Some(hotkey) => {
-                        format!("Key: {}. Set or change it in the sidebar.", hotkey.label())
+                settings_divider(ui);
+                match settings_hotkey_row(ui, "Key", self.stop_all, "stop_all") {
+                    HotkeyRowAction::Capture => {
+                        self.capture = Some(CaptureState {
+                            target: CaptureTarget::StopAll,
+                            current: self.stop_all,
+                        });
                     }
-                    None => "Set the key in the sidebar widget.".to_string(),
-                };
-                settings_detail(ui, detail);
+                    HotkeyRowAction::Clear => {
+                        self.stop_all = None;
+                        self.sync_active_library();
+                        self.mark_dirty();
+                        self.log(StatusKind::Info, "Stop-all hotkey cleared");
+                    }
+                    HotkeyRowAction::None => {}
+                }
             }
         });
     }
 
-    fn loop_settings_body(&mut self, ui: &mut Ui) {
+    /// Playback's info column: device status and the RAM cache readout.
+    fn settings_playback_info(&mut self, ui: &mut Ui) {
+        settings_group(ui, "Output devices", |ui| {
+            for (index, slot) in [Slot::Monitor, Slot::Cable].into_iter().enumerate() {
+                if index > 0 {
+                    settings_divider(ui);
+                }
+                let note = self.device_note[slot.index()].as_ref();
+                // A substitution or a failure outranks "ready": the device that
+                // plays is not the one that was chosen.
+                let (status, color) = match note {
+                    Some(note) if note.kind == StatusKind::Error => ("Failed", note.kind.color()),
+                    Some(note) => ("Substituted", note.kind.color()),
+                    None if self.device_ready[slot.index()] => ("Ready", theme::accent()),
+                    None => ("Not connected", theme::muted()),
+                };
+                settings_status_row(ui, slot.label(), status, color);
+                if let Some(note) = note {
+                    settings_detail(ui, note.text.as_str());
+                }
+            }
+        });
+
+        settings_group(ui, "Cache", |ui| {
+            // Refreshes the cached readout when the main column has not run yet.
+            let ram = self.playback_stats();
+            let (preload, color) = match ram {
+                Some(RamState::On) => ("On", theme::accent()),
+                Some(RamState::Mixed) => ("Partly", theme::amber()),
+                Some(RamState::Off) => ("Off", theme::muted()),
+                None => ("None", theme::faint()),
+            };
+            settings_status_row(ui, "Preload", preload, color);
+            settings_divider(ui);
+            settings_status_row(ui, "RAM cache", &self.playback_stats.label, theme::muted());
+        });
+    }
+
+    /// The loop file's row and its status line, on the shared row geometry: the
+    /// picker is the row's control, and the file name plus state is the detail
+    /// under it.
+    fn loop_file_row(&mut self, ui: &mut Ui) {
         let path = self.cfg.loop_path.as_deref().map(model::resolve_path);
-        let name = path
-            .as_ref()
-            .map(|path| display_name(path))
-            .unwrap_or_else(|| "No loop file".to_string());
+        let name = path.as_ref().map(|path| display_name(path));
         let state = self.loop_state.clone();
         let error = state.error().map(str::to_string);
-        let active = state.is_active();
         let missing = path.is_some() && self.loop_missing;
-        let has_file = path.is_some() && !missing;
+        let (status, color) = if missing {
+            ("Missing", theme::red())
+        } else if let Some(message) = &error {
+            (message.as_str(), theme::red())
+        } else if state.is_active() {
+            ("Playing", theme::accent())
+        } else if path.is_some() {
+            ("Ready", theme::muted())
+        } else {
+            ("No file chosen", theme::faint())
+        };
+        // A file's name and its state on one line; with no file the state says it.
+        let detail = match &name {
+            Some(name) => format!("{name} - {status}"),
+            None => status.to_string(),
+        };
 
-        ui.horizontal(|ui| {
-            let label_width =
-                (ui.available_width() - SETTINGS_BUTTON_SIZE.x - SETTINGS_ROW_LABEL_GAP)
-                    .max(SETTINGS_ROW_LABEL_MIN_W);
-            ui.allocate_ui_with_layout(
-                Vec2::new(label_width, SETTINGS_ROW_H + SETTINGS_DETAIL_GAP),
-                Layout::top_down(Align::Min),
-                |ui| {
-                    let name_color = if missing || error.is_some() {
-                        theme::red()
-                    } else if has_file {
-                        theme::text()
-                    } else {
-                        theme::faint()
-                    };
-                    ui.label(RichText::new(&name).size(12.5).color(name_color));
-                    ui.add_space(2.0);
-                    let (status, color) = if missing {
-                        ("Missing", theme::red())
-                    } else if let Some(message) = &error {
-                        (message.as_str(), theme::red())
-                    } else if active {
-                        ("Playing", theme::accent())
-                    } else if path.is_some() {
-                        ("Ready", theme::muted())
-                    } else {
-                        ("No file", theme::faint())
-                    };
-                    ui.label(RichText::new(status).size(10.5).color(color));
-                },
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ghost_button(
-                    ui,
-                    if missing { "Locate" } else { "Choose file" },
-                    SETTINGS_BUTTON_SIZE,
-                )
-                .clicked()
-                {
-                    self.pick_loop_file();
-                }
-            });
+        settings_value(ui, "Loop file", SETTINGS_BUTTON_SIZE.x, |ui| {
+            if ghost_button(
+                ui,
+                if missing { "Locate" } else { "Choose" },
+                SETTINGS_BUTTON_SIZE,
+            )
+            .clicked()
+            {
+                self.pick_loop_file();
+            }
         });
+        settings_detail_colored(ui, detail, color);
     }
 
     fn settings_page_appearance(&mut self, ctx: &egui::Context, ui: &mut Ui) {
@@ -4241,7 +4212,7 @@ impl App {
                 self.theme_picker(ctx, ui, SETTINGS_THEME_W);
             });
             settings_divider(ui);
-            settings_value(ui, "Reload themes", SETTINGS_BUTTON_SIZE.x, |ui| {
+            settings_value(ui, "Theme files", SETTINGS_BUTTON_SIZE.x, |ui| {
                 if ghost_button(ui, "Reload", SETTINGS_BUTTON_SIZE)
                     .on_hover_text("Re-read config/themes/*.json")
                     .clicked()
@@ -4251,12 +4222,12 @@ impl App {
             });
         });
 
-        settings_group(ui, "Motion", |ui| {
+        settings_group(ui, "Animation", |ui| {
             let mut animate = self.cfg.animate_ui;
             if settings_toggle(
                 ui,
                 Id::new("settings_animate"),
-                "Animate UI",
+                "Animate the interface",
                 &mut animate,
                 false,
                 true,
@@ -4269,7 +4240,7 @@ impl App {
     }
 
     fn settings_page_window(&mut self, ui: &mut Ui) {
-        settings_group(ui, "Tray", |ui| {
+        settings_group(ui, "System tray", |ui| {
             let mut minimize = self.cfg.minimize_to_tray;
             if settings_toggle(
                 ui,
@@ -4289,7 +4260,7 @@ impl App {
             if settings_toggle(
                 ui,
                 Id::new("settings_show_gain"),
-                "Show gain",
+                "Show master gain",
                 &mut show_gain,
                 false,
                 true,
@@ -4299,117 +4270,112 @@ impl App {
             }
         });
 
-        settings_group(ui, "Tabs", |ui| {
+        settings_group(ui, "Tab navigation", |ui| {
             let mut cycle = self.cfg.cycle_tabs_ctrl_tab;
-            if settings_toggle(
+            if settings_toggle_hinted(
                 ui,
                 Id::new("settings_cycle_tabs"),
                 "Cycle tabs with Ctrl+Tab",
                 &mut cycle,
                 false,
                 true,
+                Some(
+                    "Ctrl+Tab goes to the next library, Ctrl+Shift+Tab to the previous one. \
+                     Off by default, so the chords stay free for other apps.",
+                ),
             ) {
                 self.cfg.cycle_tabs_ctrl_tab = cycle;
                 self.mark_dirty();
             }
-            settings_detail(
-                ui,
-                "Ctrl+Tab goes to the next library, Ctrl+Shift+Tab to the previous one. \
-                 Off by default, so the chords stay free for other apps.",
-            );
         });
     }
 
-    fn settings_page_about(&mut self, ui: &mut Ui) {
-        // Narrow column: the page is short text, so a 780 px card reads as an
-        // empty box.
-        ui.scope(|ui| {
-            ui.set_max_width(SETTINGS_ABOUT_MAX_W.min(ui.available_width()));
+    fn settings_page_general(&mut self, ui: &mut Ui) {
+        self.settings_columns(ui, Self::settings_general_main, Self::settings_general_info);
+    }
 
-            // Application identity and links in one card: splitting them pushed the
-            // credit off a 540 px window. Data follows as its own group because
-            // export/import/reset act on the whole config, not on the app.
-            settings_group(ui, "Application", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(APP_NAME)
-                            .font(theme::medium(15.5))
-                            .color(theme::text()),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                .size(11.0)
-                                .color(theme::faint()),
-                        );
-                    });
-                });
-                ui.add_space(1.0);
-                ui.label(
-                    RichText::new("Portable Windows soundboard")
-                        .size(10.5)
-                        .color(theme::faint()),
-                );
-                // The accessibility gap is stated where users look for app info,
-                // not only in the README (SPEC NFR-8.6.3).
-                settings_detail(
-                    ui,
-                    "No screen-reader support yet - README > Accessibility lists the keyboard coverage.",
-                );
-                settings_divider(ui);
-                settings_value(ui, "Config folder", SETTINGS_BUTTON_SIZE.x, |ui| {
-                    if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
-                        self.open_folder_in_explorer(model::config_dir());
-                    }
-                });
-                settings_divider(ui);
-                settings_value(ui, "License", SETTINGS_TEXT_COL_W, |ui| {
-                    ui.label(RichText::new(LICENSE_NAME).size(11.5).color(theme::muted()));
-                });
-                for (label, url) in ABOUT_LINKS.iter().filter(|(_, url)| !url.is_empty()) {
-                    settings_divider(ui);
-                    settings_value(ui, label, SETTINGS_BUTTON_SIZE.x, |ui| {
-                        if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
-                            open_url(url);
-                        }
-                    });
+    /// General's editable column: Configuration, then Reset near the bottom.
+    fn settings_general_main(&mut self, ui: &mut Ui) {
+        settings_group(ui, "Configuration", |ui| {
+            settings_value(ui, "Config folder", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
+                    self.open_folder_in_explorer(model::config_dir());
                 }
             });
+            settings_divider(ui);
+            settings_value(ui, "Export configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button(ui, "Export", SETTINGS_BUTTON_SIZE)
+                    .on_hover_text("Save settings and libraries as one JSON file")
+                    .clicked()
+                {
+                    self.export_config();
+                }
+            });
+            settings_divider(ui);
+            settings_value(ui, "Import configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button(ui, "Import", SETTINGS_BUTTON_SIZE)
+                    .on_hover_text("Replace the board from an exported file")
+                    .clicked()
+                {
+                    self.import_config_dialog();
+                }
+            });
+        });
 
-            // Backup / move to another PC (A5), plus the settings-wide reset (A6).
-            settings_group(ui, "Data", |ui| {
-                settings_value(ui, "Export configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
-                    if ghost_button(ui, "Export", SETTINGS_BUTTON_SIZE)
-                        .on_hover_text("Save settings and libraries as one JSON file")
-                        .clicked()
-                    {
-                        self.export_config();
-                    }
-                });
-                settings_divider(ui);
-                settings_value(ui, "Import configuration", SETTINGS_BUTTON_SIZE.x, |ui| {
-                    if ghost_button(ui, "Import", SETTINGS_BUTTON_SIZE)
-                        .on_hover_text("Replace the board from an exported file")
-                        .clicked()
-                    {
-                        self.import_config_dialog();
-                    }
-                });
-                settings_divider(ui);
-                settings_value(ui, "Reset all settings", SETTINGS_BUTTON_SIZE.x, |ui| {
-                    if ghost_button_colored(ui, "Reset", SETTINGS_BUTTON_SIZE, theme::red())
-                        .on_hover_text("Settings only - libraries and sounds stay")
-                        .clicked()
-                    {
-                        self.confirm_reset = true;
-                    }
-                });
-                settings_detail(
-                    ui,
-                    "A bundle holds settings and libraries (paths stay references, audio is never copied).",
+        // The only reset: every settings field back to its default, confirmed.
+        // Libraries, sounds and audio files are never part of it.
+        settings_group(ui, "Reset", |ui| {
+            settings_value(ui, "Reset all settings", SETTINGS_BUTTON_SIZE.x, |ui| {
+                if ghost_button_colored(ui, "Reset", SETTINGS_BUTTON_SIZE, theme::red())
+                    .on_hover_text("Settings only - libraries and sounds stay")
+                    .clicked()
+                {
+                    self.confirm_reset = true;
+                }
+            });
+        });
+    }
+
+    /// General's info column: app identity, licence, accessibility note and the
+    /// project links with the author credit. The column is narrower than the row
+    /// stack breakpoint, so its rows stay inline.
+    fn settings_general_info(&mut self, ui: &mut Ui) {
+        settings_group(ui, "About", |ui| {
+            settings_value_inline(ui, APP_NAME, SETTINGS_TEXT_COL_W, |ui| {
+                ui.label(
+                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .size(11.0)
+                        .color(theme::faint()),
                 );
             });
+            settings_divider(ui);
+            settings_value_inline(ui, "License", SETTINGS_TEXT_COL_W, |ui| {
+                ui.label(RichText::new(LICENSE_NAME).size(11.5).color(theme::muted()));
+            });
+            // The accessibility gap is stated where users look for app info,
+            // not only in the README (SPEC NFR-8.6.3).
+            settings_detail(
+                ui,
+                "No screen-reader support yet - README > Accessibility lists the keyboard coverage.",
+            );
+        });
 
+        settings_group(ui, "Support", |ui| {
+            for (index, (label, url)) in ABOUT_LINKS
+                .iter()
+                .filter(|(_, url)| !url.is_empty())
+                .enumerate()
+            {
+                if index > 0 {
+                    settings_divider(ui);
+                }
+                settings_value_inline(ui, label, SETTINGS_BUTTON_SIZE.x, |ui| {
+                    if ghost_button(ui, "Open", SETTINGS_BUTTON_SIZE).clicked() {
+                        open_url(url);
+                    }
+                });
+            }
+            settings_divider(ui);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("Made by {DEVELOPER_NAME}"))
@@ -5808,37 +5774,162 @@ fn row_stacks(content_width: f32) -> bool {
     content_width < SETTINGS_ROW_STACK_W
 }
 
-/// One label/control row: the label on the left, the control flush with the
-/// right edge whatever its own width. `control_width` reserves the space the
-/// control needs; rows stack on a narrow content column.
-fn settings_value(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
+/// Whether the content column is wide enough for the main column and the info
+/// column side by side, with the main column still keeping its rows beside their
+/// labels.
+fn settings_two_columns(content_width: f32) -> bool {
+    content_width >= SETTINGS_TWO_COLUMN_MIN_W
+}
+
+/// Width the main column gets when the info column is beside it.
+fn settings_main_width(content_width: f32) -> f32 {
+    content_width - SETTINGS_INFO_COL_W - SETTINGS_COLUMN_GAP
+}
+
+/// One settings row: the single geometry every settings page shares. The label
+/// starts at the row's left edge, the control ends flush with its right edge, and
+/// both are vertically centred in [`SETTINGS_ROW_H`]. `control_width` reserves the
+/// control's column, so the label column never depends on which control happens
+/// to be in the row. A detail line under the row starts at the same label origin
+/// (see [`settings_detail`]). Rows stack below [`SETTINGS_ROW_STACK_W`].
+///
+/// The returned response covers the whole row, so a caller can hang a tooltip on
+/// it instead of adding a paragraph under it.
+fn settings_row(
+    ui: &mut Ui,
+    control_width: f32,
+    add_label: impl FnOnce(&mut Ui),
+    add_control: impl FnOnce(&mut Ui),
+) -> egui::Response {
+    if row_stacks(ui.available_width()) {
+        settings_row_stacked(ui, add_label, add_control)
+    } else {
+        settings_row_inline(
+            ui,
+            control_width,
+            SETTINGS_ROW_LABEL_MIN_W,
+            add_label,
+            add_control,
+        )
+    }
+}
+
+/// [`settings_row`] without the stack branch: the info column is narrower than
+/// the stack breakpoint by design, and its short readouts stay on one line there.
+/// `label_min` is the narrowest the label column may get (a page row and an info
+/// row have different room).
+fn settings_row_inline(
+    ui: &mut Ui,
+    control_width: f32,
+    label_min: f32,
+    add_label: impl FnOnce(&mut Ui),
+    add_control: impl FnOnce(&mut Ui),
+) -> egui::Response {
     let width = ui.available_width();
-    if row_stacks(width) {
-        ui.vertical(|ui| {
-            ui.label(RichText::new(title).size(12.5).color(theme::text()));
-            ui.add_space(SETTINGS_STACK_LABEL_GAP);
+    let label_width = (width - control_width - SETTINGS_ROW_LABEL_GAP).max(label_min);
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, SETTINGS_ROW_H),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            // Every row is exactly one row height, whatever control it holds.
+            ui.set_min_height(SETTINGS_ROW_H);
+            // The gap between the label column and the control column is the
+            // same const the reserve was computed from.
+            ui.spacing_mut().item_spacing.x = SETTINGS_ROW_LABEL_GAP;
+            ui.allocate_ui_with_layout(
+                Vec2::new(label_width, SETTINGS_ROW_H),
+                Layout::left_to_right(Align::Center),
+                |ui| add_label(ui),
+            );
             ui.allocate_ui_with_layout(
                 Vec2::new(ui.available_width(), SETTINGS_ROW_H),
-                Layout::top_down(Align::Min),
-                |ui| add_control(ui),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = SETTINGS_CONTROL_GAP;
+                    add_control(ui);
+                },
             );
-        });
-    } else {
-        ui.horizontal_top(|ui| {
-            ui.set_min_height(SETTINGS_ROW_H);
-            let label_width =
-                (width - control_width - SETTINGS_ROW_LABEL_GAP).max(SETTINGS_ROW_LABEL_MIN_W);
-            ui.vertical(|ui| {
-                ui.set_max_width(label_width);
-                ui.label(RichText::new(title).size(12.5).color(theme::text()));
-            });
-            // Right-to-left, so the control ends flush with the row's edge
-            // whether it is a switch, a dropdown or a text button.
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+        },
+    )
+    .response
+}
+
+/// The narrow-content form of a row: the label above, the control below it,
+/// right-aligned on the same edge.
+fn settings_row_stacked(
+    ui: &mut Ui,
+    add_label: impl FnOnce(&mut Ui),
+    add_control: impl FnOnce(&mut Ui),
+) -> egui::Response {
+    ui.vertical(|ui| {
+        add_label(ui);
+        ui.add_space(SETTINGS_STACK_LABEL_GAP);
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), SETTINGS_ROW_H),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.set_min_height(SETTINGS_ROW_H);
+                ui.spacing_mut().item_spacing.x = SETTINGS_CONTROL_GAP;
                 add_control(ui);
-            });
-        });
-    }
+            },
+        );
+    })
+    .response
+}
+
+/// The label cell of a row: one line, ellipsised rather than wrapped so every
+/// row keeps the one row height.
+fn settings_row_label(ui: &mut Ui, title: &str) {
+    ui.add(egui::Label::new(RichText::new(title).size(12.5).color(theme::text())).truncate());
+}
+
+/// One label/control row over [`settings_row`]. `control_width` reserves the
+/// space the control needs; rows stack on a narrow content column.
+fn settings_value(ui: &mut Ui, title: &str, control_width: f32, add_control: impl FnOnce(&mut Ui)) {
+    settings_row(
+        ui,
+        control_width,
+        |ui| settings_row_label(ui, title),
+        add_control,
+    );
+}
+
+/// [`settings_value`] that never stacks: for the info column, which is narrower
+/// than the stack breakpoint on purpose.
+fn settings_value_inline(
+    ui: &mut Ui,
+    title: &str,
+    control_width: f32,
+    add_control: impl FnOnce(&mut Ui),
+) {
+    settings_row_inline(
+        ui,
+        control_width,
+        SETTINGS_INFO_LABEL_MIN_W,
+        |ui| settings_row_label(ui, title),
+        add_control,
+    );
+}
+
+/// A read-only status row for the info column: the label at the row's left edge
+/// and a status dot plus its text flush with the right edge, on the same geometry
+/// as every editable row.
+fn settings_status_row(ui: &mut Ui, title: &str, status: &str, color: Color32) {
+    settings_row_inline(
+        ui,
+        SETTINGS_STATUS_W,
+        SETTINGS_INFO_LABEL_MIN_W,
+        |ui| {
+            ui.add(
+                egui::Label::new(RichText::new(title).size(12.5).color(theme::muted())).truncate(),
+            );
+        },
+        |ui| {
+            // Right-to-left: the text ends at the row edge, the dot before it.
+            ui.add(egui::Label::new(RichText::new(status).size(10.5).color(color)).truncate());
+            status_dot(ui, color);
+        },
+    );
 }
 
 /// One boolean setting: a [`settings_value`] row holding a switch. The value is
@@ -5855,17 +5946,162 @@ fn settings_toggle(
     mixed: bool,
     enabled: bool,
 ) -> bool {
+    settings_toggle_hinted(ui, id, title, value, mixed, enabled, None)
+}
+
+/// [`settings_toggle`] with an explanation on the row instead of a paragraph
+/// under it (the text policy's "show on demand").
+fn settings_toggle_hinted(
+    ui: &mut Ui,
+    id: Id,
+    title: &str,
+    value: &mut bool,
+    mixed: bool,
+    enabled: bool,
+    hint: Option<&str>,
+) -> bool {
     let mut changed = false;
-    settings_value(ui, title, SETTINGS_SWITCH_SIZE.x, |ui| {
-        changed = settings_switch(ui, id, value, mixed, enabled);
-    });
+    let row = settings_row(
+        ui,
+        SETTINGS_SWITCH_SIZE.x,
+        |ui| settings_row_label(ui, title),
+        |ui| {
+            changed = settings_switch(ui, id, value, mixed, enabled);
+        },
+    );
+    if let Some(hint) = hint {
+        row.on_hover_text(hint);
+    }
     changed
 }
 
-/// The muted one-line explanation under a row.
+/// The muted one-line explanation under a row. It starts at the row's label
+/// origin — the card's content edge — which is the one indent every page shares.
 fn settings_detail(ui: &mut Ui, text: impl Into<String>) {
+    settings_detail_colored(ui, text, theme::faint());
+}
+
+/// [`settings_detail`] in a status colour (a missing loop file, a device note).
+fn settings_detail_colored(ui: &mut Ui, text: impl Into<String>, color: Color32) {
     ui.add_space(SETTINGS_DETAIL_GAP);
-    ui.label(RichText::new(text).size(10.5).color(theme::faint()));
+    ui.label(RichText::new(text).size(10.5).color(color));
+}
+
+/// What a hotkey row asked for. The caller owns the capture modal and the
+/// clearing, exactly as the sound cards do.
+enum HotkeyRowAction {
+    None,
+    Capture,
+    Clear,
+}
+
+/// One global hotkey row (stop-all now, the mic mute key when it lands): label,
+/// key pill, Set/Change and Clear, all on [`settings_row`]. The pill and the
+/// button open the shared capture dialog; Clear removes the binding and leaves
+/// the feature on.
+fn settings_hotkey_row(
+    ui: &mut Ui,
+    title: &str,
+    hotkey: Option<Hotkey>,
+    id_salt: &str,
+) -> HotkeyRowAction {
+    let mut action = HotkeyRowAction::None;
+    let bound = hotkey.is_some();
+    settings_row(
+        ui,
+        SETTINGS_HOTKEY_CTRL_W,
+        |ui| settings_row_label(ui, title),
+        |ui| {
+            // Right-to-left: Set/Change at the row edge, the pill, then Clear.
+            if ghost_button_at(
+                ui,
+                Id::new(("settings_hotkey_button", id_salt)),
+                if bound { "Change" } else { "Set" },
+                SETTINGS_BUTTON_SIZE,
+                theme::text(),
+            )
+            .clicked()
+            {
+                action = HotkeyRowAction::Capture;
+            }
+            if settings_key_pill(ui, Id::new(("settings_hotkey_pill", id_salt)), hotkey) {
+                action = HotkeyRowAction::Capture;
+            }
+            if bound
+                && ghost_button_at(
+                    ui,
+                    Id::new(("settings_hotkey_clear", id_salt)),
+                    "Clear",
+                    Vec2::new(SETTINGS_HOTKEY_CLEAR_W, SETTINGS_ROW_H),
+                    theme::text(),
+                )
+                .on_hover_text("Remove the binding; the feature stays on")
+                .clicked()
+            {
+                action = HotkeyRowAction::Clear;
+            }
+        },
+    );
+    action
+}
+
+/// Width of a key pill for a chord that measures `text_width`: between the min
+/// and the max, so a short chord still reads as a key and a long one cannot eat
+/// the label column.
+fn key_pill_width(text_width: f32) -> f32 {
+    (text_width + 2.0 * SETTINGS_HOTKEY_PILL_PAD)
+        .clamp(SETTINGS_HOTKEY_PILL_MIN_W, SETTINGS_HOTKEY_PILL_MAX_W)
+}
+
+/// The key pill inside a hotkey row: the same surface as a sound card's pill,
+/// sized to its chord and clickable to open the capture dialog.
+fn settings_key_pill(ui: &mut Ui, id: Id, hotkey: Option<Hotkey>) -> bool {
+    let font = theme::ui_font(11.0);
+    let label = hotkey.map(|hotkey| hotkey.label());
+    let measure = ui.painter().clone();
+    let text = theme::truncate(
+        &measure,
+        label.as_deref().unwrap_or(SETTINGS_HOTKEY_UNBOUND),
+        font.clone(),
+        SETTINGS_HOTKEY_PILL_MAX_W - 2.0 * SETTINGS_HOTKEY_PILL_PAD,
+    );
+    let text_width = measure
+        .layout_no_wrap(text.clone(), font.clone(), theme::text())
+        .size()
+        .x;
+    let width = key_pill_width(text_width);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(width, SETTINGS_HOTKEY_PILL_H), Sense::click());
+    let hover = anim::hover(ui, id, response.hovered());
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        CornerRadius::same(theme::RADIUS_MD),
+        theme::mix(theme::field(), theme::alpha(theme::accent(), 20), hover),
+        Stroke::new(
+            1.0_f32,
+            if response.hovered() {
+                theme::accent()
+            } else {
+                theme::border_soft()
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        font,
+        if hotkey.is_some() {
+            theme::text()
+        } else {
+            theme::faint()
+        },
+    );
+    response
+        .on_hover_text("Global: works while SoundDeck is hidden")
+        .clicked()
 }
 
 fn settings_rule(ui: &mut Ui) {
@@ -6158,7 +6394,7 @@ fn paint_settings_icon(painter: &egui::Painter, rect: Rect, tab: SettingsTab, co
                 Stroke::new(1.0_f32, color),
             );
         }
-        SettingsTab::About => {
+        SettingsTab::General => {
             painter.circle_stroke(center, 6.0, Stroke::new(1.2_f32, color));
             painter.circle_filled(center + Vec2::new(0.0, -2.6), 1.0, color);
             painter.line_segment(
@@ -7225,6 +7461,19 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
 /// Ghost button with a caller-chosen label colour, for destructive actions that
 /// must not look like the neutral buttons beside them.
 fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> egui::Response {
+    ghost_button_at(
+        ui,
+        Id::new(("ghost", text, size.x as i32, size.y as i32)),
+        text,
+        size,
+        color,
+    )
+}
+
+/// [`ghost_button_colored`] with an explicit id, for two rows that carry the same
+/// label (the hotkey rows' Set/Change and Clear): egui interaction state must not
+/// be shared between them, and the styling must not be copied.
+fn ghost_button_at(ui: &mut Ui, id: Id, text: &str, size: Vec2, color: Color32) -> egui::Response {
     let response = ui.add_sized(
         size,
         Button::new(RichText::new(text).size(13.5).color(color))
@@ -7232,13 +7481,7 @@ fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> 
             .stroke(Stroke::new(1.0_f32, theme::border()))
             .corner_radius(theme::RADIUS_MD),
     );
-    pressable(
-        ui,
-        Id::new(("ghost", text, size.x as i32, size.y as i32)),
-        &response,
-        theme::RADIUS_MD,
-        2.0,
-    );
+    pressable(ui, id, &response, theme::RADIUS_MD, 2.0);
     response
 }
 
@@ -8409,12 +8652,54 @@ mod tests {
             SETTINGS_BUTTON_SIZE.x,
             SETTINGS_THEME_W,
             SETTINGS_TEXT_COL_W,
+            SETTINGS_STATUS_W,
+            SETTINGS_HOTKEY_CTRL_W,
         ] {
             assert!(
                 SETTINGS_ROW_STACK_W - control - SETTINGS_ROW_LABEL_GAP >= SETTINGS_ROW_LABEL_MIN_W,
                 "a {control} px control leaves no room for the label at the breakpoint"
             );
         }
+    }
+
+    /// The info column appears only when the main column beside it still keeps
+    /// its rows side by side — the two breakpoints come from one derivation.
+    #[test]
+    fn settings_two_columns_keep_the_main_column_wide_enough_for_its_rows() {
+        assert!(!settings_two_columns(SETTINGS_TWO_COLUMN_MIN_W - 1.0));
+        assert!(settings_two_columns(SETTINGS_TWO_COLUMN_MIN_W));
+        assert!(
+            !row_stacks(settings_main_width(SETTINGS_TWO_COLUMN_MIN_W)),
+            "at the two-column breakpoint the main column keeps its rows beside the label"
+        );
+        assert!(
+            settings_two_columns(SETTINGS_CONTENT_MAX_W),
+            "the widest content shows both columns"
+        );
+        assert_eq!(
+            settings_main_width(SETTINGS_CONTENT_MAX_W) + SETTINGS_COLUMN_GAP + SETTINGS_INFO_COL_W,
+            SETTINGS_CONTENT_MAX_W,
+            "the columns plus their gap fill the content width exactly"
+        );
+    }
+
+    /// The key pill stays inside its bounds, so a short chord reads as a key and
+    /// a long one cannot push the row's label column.
+    #[test]
+    fn the_key_pill_stays_between_its_bounds() {
+        assert_eq!(key_pill_width(0.0), SETTINGS_HOTKEY_PILL_MIN_W);
+        assert_eq!(key_pill_width(10_000.0), SETTINGS_HOTKEY_PILL_MAX_W);
+        let text = SETTINGS_HOTKEY_PILL_MIN_W - 2.0 * SETTINGS_HOTKEY_PILL_PAD;
+        assert_eq!(
+            key_pill_width(text),
+            SETTINGS_HOTKEY_PILL_MIN_W,
+            "a chord that fits the minimum keeps the pill at its minimum"
+        );
+        let middle = (SETTINGS_HOTKEY_PILL_MIN_W + SETTINGS_HOTKEY_PILL_MAX_W) * 0.5;
+        assert!(
+            (key_pill_width(middle - 2.0 * SETTINGS_HOTKEY_PILL_PAD) - middle).abs() < 0.01,
+            "a mid-length chord sizes the pill to its text"
+        );
     }
 
     /// The board's one right edge (B4): cards plus gaps fill the content width

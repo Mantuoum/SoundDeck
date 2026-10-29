@@ -12,7 +12,7 @@ already parked and waiting.
       the board itself can go.)
 - [x] Test at 960×540 and once more at 1200×800; note the window scale you use (SPEC
       targets 100 %; other factors = usable, not pixel-perfect).
-- [x] You are running `review\SoundDeck.exe` = build 0.5.0 (About must say 0.5.0).
+- [x] You are running `review\SoundDeck.exe` = build 0.5.0 (Settings → General must say 0.5.0).
 
 **Known nuances — expected, not bugs**
 
@@ -34,7 +34,7 @@ already parked and waiting.
       `config\themes\` contains the 5 seeded themes; `config\settings.json` + `libraries.json` created. - [only when I interact with anything that changes the defaults]
 - [x] Drag the title bar (not over tabs) → window moves; double-click title bar → maximize/restore.
 - [x] Hover the three window buttons → Minimize/Maximize highlight, **Close turns red**.
-- [ ] **No selectable chrome text** (G2): drag across the title bar, the "Developed by Mantum" credit, a status-bar message, an About row and an activity-log row → **no text selection appears anywhere**; the search box, the rename field and the gain numeric field still select and edit normally.
+- [ ] **No selectable chrome text** (G2): drag across the title bar, the "Developed by Mantum" credit, a status-bar message, a General/About row and an activity-log row → **no text selection appears anywhere**; the search box, the rename field and the gain numeric field still select and edit normally.
 - [x] Resize from each window edge (6 px hot zone) → resize cursor; below 860×500 it refuses.
 - [x] Size is **not** remembered: quit, relaunch at a different size → back to 960×540.
 - [x] Launch a **second copy** (same exe) → it focuses the running window and exits (no second window, no crash).
@@ -120,7 +120,7 @@ already parked and waiting.
 - [x] Hand-edit a duplicate chord into `libraries.json`, restart → deterministic: first sound in tab order keeps it; the other is unbound with a warning.
 - [ ] Bare key hotkey (`F8`) works; chord with Win (`Win+X`) binds from the capture modal **and** fires (while also triggering Windows — known). *(B8 fixed: the modal folds the physical Win key into the chord, and derives it from the physical keyboard when the shell swallowed the event.)*
 - [ ] **Blocked chords**: in the capture modal press `Ctrl+C` / `Ctrl+V` / `Ctrl+Z` / `Space` / `Delete` / `F2` / `Alt+F4` → the dialog shows exactly `Ctrl+C is a system shortcut and can't be used` and **Save does nothing** (nothing changes, no toast). Then hand-edit a blocked chord into `libraries.json` (a sound's `hotkey` and the stop-all key), relaunch → both are **unbound** with a warning in the activity log, the sounds stay on the board and still play by click.
-- [ ] Stop-all hotkey (Settings → Playback, off by default): enable → sidebar widget appears above the meters; pill-click captures, right-click clears; the chord stops everything **while hidden**. **Clicking the card body** stops all sounds (fade-out) and logs `Stopped all sounds`; the pill still captures on click and clears on right-click. *(B7 fixed.)*
+- [ ] Stop-all hotkey (Settings → Playback → Hotkeys, off by default): enable → the **Key** row appears (Set/Change/Clear, shared capture modal) and the sidebar shows a compact **Stop all** button. Clicking it stops all sounds (fade-out) and logs `Stopped all sounds`; the chord stops everything **while hidden**. *(Key moved out of the sidebar 2026-10-29.)*
 - [x] Hotkeys fire while the app is **minimized to tray** and while another app has focus.
 
 ## 10. Sidebar: devices, volumes, meter
@@ -133,7 +133,7 @@ already parked and waiting.
 - [ ] **Sidebar order** (top to bottom of the scrollable part): devices + link → **Gain** → **Stop all** → **Loop**; the credit, the peak meter and the Settings button stay **pinned** at the bottom and never scroll away. On a 540 px-tall window the whole upper stack scrolls instead of hiding a widget (F4).
 - [ ] **Stop-all hover matches the Loop card** (G1): hovering the stop-all card lifts the whole card's fill with the same soft tint and easing as the Loop card — no grey blocky patch behind "Stop all", no smaller inner radius.
 - [x] Peak meter: green/yellow/red zones track playback on **each** output independently; falls to floor when silence; no stale flash after restore from tray.
-- [ ] **Unplug a device** mid-play → status: activity-log warning + Settings → Playback shows the amber `"X" not found - using "Y"` line; audio continues on the fallback. Replug + refresh → resolves back. 
+- [ ] **Unplug a device** mid-play → status: activity-log warning + Settings → Playback → **Output devices** shows **Substituted** in amber with the `"X" not found - using "Y"` detail; audio continues on the fallback. Replug + refresh → resolves back.
 
 ## 11. Loop track
 
@@ -146,22 +146,29 @@ already parked and waiting.
 
 ## 12. Settings deep pass (⚠ mutates config — backup first)
 
-- [x] Opens via sidebar **Settings** and **Ctrl+,**; left rail: Back, Playback, Appearance, Window, About (pinned bottom); **Esc** leaves.
-- [x] **Playback**: every toggle flips and saves immediately (no Apply button): loop Enabled, loop outputs, **Load into RAM** (shows purple half-knob when partly loaded — a click loads all), Show RAM state, Stop-all enabled + its hotkey row, loop file row.
-- [x] **Appearance**: theme dropdown switches live; **Reload themes** re-reads disk; **Animate UI** off → hovers/presses/fades snap instantly (and CPU drops).
-- [x] **Window**: Minimize to tray; Show gain slider (affects sidebar immediately).
-- [x] **About**: version reads **0.5.0**; Config folder opens Explorer at the right place; links open the browser (only http/https); credits/text intact.
-- [x] **Reset this page** on each of Playback/Appearance/Window → only that page's fields reset; other pages untouched; log line.
-- [x] **Reset all settings** (About → Data) → confirm modal, Cancel works; on confirm everything returns to defaults (theme graphite, grid layout…), **libraries/sounds untouched**; survives restart.
-- [x] **Export configuration** → save dialog → `.json` written where you chose; open it: readable, contains settings + libraries.
-- [x] **Import configuration**: cancel → nothing changes. Confirm → board **replaced live** (counts, tabs, hotkeys rebind; log summary). Import your earlier export → board restored exactly.
-- [x] Import a **corrupt** file / a hand-made newer-version bundle → clear rejection message, board untouched.
+> **Re-opened 2026-10-29 by the Settings reorganization**: four tabs (General replaces
+> About), two-column wide layout, one row geometry, per-page Reset cards removed, the
+> stop-all key moved into Settings. The 0.5.0 results below no longer describe the
+> screen; walk the list again.
+
+- [ ] Opens via sidebar **Settings** and **Ctrl+,**; left rail: Back, Playback, Appearance, Window, **General** (pinned bottom); **Esc** leaves.
+- [ ] **Playback** — Looping (loop switch, **Loop file** row + name/state detail, **Send to Monitor** / **Send to Cable**), Memory (**Load hotkey sounds into RAM** — purple half-knob when partly loaded, a click loads all; Show RAM state), Output devices (read-only status, right column on a wide window), Hotkeys (stop-all switch + **Key** row). Every control saves immediately (no Apply button).
+- [ ] **Stop-all key row**: **Set**/**Change** opens the same capture modal as a sound hotkey; a taken chord is refused with its owner named; **Clear** removes the binding and the feature stays on; the sidebar card is now only a **Stop all** button (no pill).
+- [ ] **Appearance** — theme dropdown switches live; **Theme files → Reload** re-reads disk; **Animate the interface** off → hovers/presses/fades snap instantly (and CPU drops).
+- [ ] **Window** — System tray (Minimize to tray); Sidebar (Show master gain); Tab navigation (Cycle tabs with Ctrl+Tab, hover for the explanation).
+- [ ] **General** — Configuration: Config folder opens Explorer, Export/Import work; **Reset all settings** sits below it behind the confirmation; About shows the build version, licence and the accessibility note; Support opens the links and shows the credit.
+- [ ] **No per-page Reset** exists anywhere (the old Defaults cards are gone).
+- [ ] **Reset all settings** (General → Reset) → confirm modal, Cancel works; on confirm everything returns to defaults (theme graphite, grid layout…), **libraries/sounds untouched**; survives restart.
+- [ ] **Export configuration** → save dialog → `.json` written where you chose; open it: readable, contains settings + libraries.
+- [ ] **Import configuration**: cancel → nothing changes. Confirm → board **replaced live** (counts, tabs, hotkeys rebind; log summary). Import your earlier export → board restored exactly.
+- [ ] Import a **corrupt** file / a hand-made newer-version bundle → clear rejection message, board untouched.
+- [ ] **Wide/narrow layout**: at ≥1200 px the main column and the info column are side by side; narrowing stacks the info panels under the main column (nothing disappears); at every width the row labels start on one line and every control's right edge matches the card's other rows.
 - [ ] While Settings is open: board shortcuts are dead (except Ctrl+Q/Ctrl+,); modals opened from Settings are **centred over the settings content**, not 150 px left of centre (B13 — re-check the capture, rename, gain, log, import and reset modals).
 
 ## 13. Themes
 
 - [x] Switch theme → whole UI recolours live; choice survives restart.
-- [x] Edit a colour in `config\themes\<id>.json` → Settings → Reload themes → change visible **without reselecting the theme** (B12 — reload re-resolves the active id).
+- [x] Edit a colour in `config\themes\<id>.json` → Settings → Appearance → **Theme files → Reload** → change visible **without reselecting the theme** (B12 — reload re-resolves the active id).
 - [ ] **Rename a theme file** (`mocha.json` → `mocha2.json`) while it is the active theme → Reload: the log warns `theme "mocha" is not in config/themes (available: …); using Graphite`, the UI repaints in Graphite, and `settings.json` now stores `"graphite"`.
 - [ ] **Two files, one name**: copy `graphite.json` to `mytheme.json` and leave `"name": "Graphite"` → the dropdown lists `Graphite` twice (the label is the display name, no `(id)` suffix — G4), so the two entries are indistinguishable; change the name to `My Graphite` → that entry reads `My Graphite`.
 - [ ] Delete a token from a theme file → reload → falls back to Graphite's value; warning in activity log. Re-add it → returns.
@@ -173,7 +180,7 @@ already parked and waiting.
 
 ## 14. RAM / preload behaviour
 
-- [x] Settings → Playback → **Show RAM state ON** → cards show chips; toolbar pill shows counts; all reflect **actual** state (loaded vs streaming), not intent.
+- [x] Settings → Playback → **Memory → Show RAM state ON** → cards show chips; toolbar pill shows counts; all reflect **actual** state (loaded vs streaming), not intent. The **Cache** status card mirrors the counts.
 - [x] Add a **> 30 s** file with a hotkey → plays streamed; log says why it isn't preloaded; chip consistent.
 - [ ] Add **17+ hotkey sounds** → cache stops at 16 sounds / 32 MB; the excess streams and plays fine; log explains; LRU = least-recently-used gets evicted first; **playing sound is never evicted**. [untested ]
 - [ ] **Skip-and-continue (B1)**: with the RAM pill, load a batch that contains **one** file that can never fit (a 45 s file, or one bigger than the 32 MB cache) → the rest of the batch still preloads (chips fill), only the over-budget sound stays on disk, and it is logged **once** — re-asserting the same retention (e.g. clicking the same tab again) does not re-decode or re-log it; only a real change of the per-sound RAM flag retries.
