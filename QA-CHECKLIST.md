@@ -1,4 +1,7 @@
-# SoundDeck 0.5.0 — manual QA checklist
+# SoundDeck — manual QA checklist
+
+**Last checked:** v0.4.0 — the 2026-10-28 annotated pass. Full passes run every few
+versions, not every version (see AGENTS.md §8).
 
 Walk the app top to bottom in this order. Each item: **Do** → **Expect**. Tick what
 passes; for anything else write `ID · what you did · what happened` (screenshots help).
