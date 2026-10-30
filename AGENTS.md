@@ -5,7 +5,7 @@
 | `SPEC.md` | Behaviour contract (MUST/SHOULD). Settled decisions live here — never re-litigate. |
 | `sounddeck/ARCHITECTURE.md` | Implementation map — update on thread/storage/frame-loop changes. |
 | `plan.md` | Current work list (local, gitignored). No scope beyond it without asking. |
-| `QA-CHECKLIST.md` | Manual QA worksheet: ordered pass, expected behaviour per item, known-nuances table. Run before a release; record failures inline — findings become the next `plan.md`. |
+| `QA-CHECKLIST.md` | Manual QA worksheet: ordered pass, expected behaviour per item, known-nuances table. Full passes run every few versions (the user calls when) — not every release; record failures inline — findings become the next `plan.md`. |
 
 ## 0. Maintaining this file
 
@@ -500,8 +500,10 @@ Scope exclusions: SPEC §10 Non-goals. `plan.md` is the work list — implement 
 order; parallel work only on disjoint file sets (`app.rs`/`hotkeys.rs` serial); mark
 items done as they land; the plan is wiped and rewritten when the iteration ends.
 
-**QA loop.** Before a release, walk `QA-CHECKLIST.md` (expected behaviour per item;
-back up `review\config\` before the destructive sections), record failures inline, then
-fold the annotations into a fresh `plan.md` iteration. Test material:
+**QA loop.** Every few versions (the user calls when — not every release; releases in
+between ship on targeted spot-checks), walk `QA-CHECKLIST.md` (expected behaviour per
+item; back up `review\config\` before the destructive sections), record failures inline,
+then fold the annotations into a fresh `plan.md` iteration. Update the checklist's
+"Last checked" marker to the version walked. Test material:
 `scripts\make-test-material.ps1` → gitignored `test-material/` (deterministic audio,
 themes, fixtures — regenerate any time; never commit the generated files).
