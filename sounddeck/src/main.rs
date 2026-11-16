@@ -48,7 +48,7 @@ enum Instance {
 fn single_instance() -> Instance {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, BOOL, ERROR_ALREADY_EXISTS, WIN32_ERROR,
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, WIN32_ERROR,
     };
     use windows::Win32::System::Threading::CreateMutexW;
 
@@ -57,7 +57,7 @@ fn single_instance() -> Instance {
 
     unsafe {
         SetLastError(WIN32_ERROR(0));
-        let handle = match CreateMutexW(None, BOOL(0), PCWSTR(name.as_ptr())) {
+        let handle = match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(handle) => handle,
             Err(err) => {
                 eprintln!(

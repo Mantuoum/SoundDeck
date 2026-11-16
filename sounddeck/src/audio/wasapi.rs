@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::Sender;
 use windows::core::{GUID, HRESULT, PCWSTR};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{CloseHandle, BOOL, S_FALSE, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, S_FALSE, S_OK, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
     MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -221,7 +221,7 @@ unsafe fn parse_format(raw: *const WAVEFORMATEX) -> Result<Format, String> {
 
     let channels = base.nChannels as usize;
     let block_align = base.nBlockAlign as usize;
-    if block_align % channels != 0 {
+    if !block_align.is_multiple_of(channels) {
         // Truncating division here would silently give the wrong sample stride
         // and scribble one channel's samples over another's.
         return Err(format!(
@@ -361,7 +361,7 @@ fn render_loop(
             .GetService()
             .map_err(|e| format!("Could not get render client: {e}"))?;
 
-        let event = CreateEventW(None, BOOL(0), BOOL(0), PCWSTR::null())
+        let event = CreateEventW(None, false, false, PCWSTR::null())
             .map_err(|e| format!("Could not create audio event: {e}"))?;
         client
             .SetEventHandle(event)
@@ -423,7 +423,7 @@ fn render_loop(
                     // No sample data available for the rest of this cycle: pad
                     // with silence, but keep the queue's timeline intact.
                     let missing = needed - source.len() / 2;
-                    source.extend(std::iter::repeat(0.0).take(missing * 2));
+                    source.extend(std::iter::repeat_n(0.0, missing * 2));
                     break;
                 }
             }

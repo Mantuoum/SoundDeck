@@ -908,7 +908,9 @@ impl Drop for Engine {
 /// infinite sample would poison the mix (and the device conversion) for as long
 /// as the buffer is playing, so it is refused up front.
 fn is_valid_buffer(samples: &[f32]) -> bool {
-    !samples.is_empty() && samples.len() % CHANNELS == 0 && samples.iter().all(|s| s.is_finite())
+    !samples.is_empty()
+        && samples.len().is_multiple_of(CHANNELS)
+        && samples.iter().all(|s| s.is_finite())
 }
 
 /// `dst += src * gain` over a whole slice. `gain == 1.0` skips the multiply so

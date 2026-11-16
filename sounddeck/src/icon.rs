@@ -23,7 +23,7 @@ pub fn decode_png(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         png::ColorType::Rgba => buf,
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for px in buf.chunks_exact(3) {
+            for px in buf.as_chunks::<3>().0 {
                 out.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             out
@@ -37,7 +37,7 @@ pub fn decode_png(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, u32, u32)> {
         }
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for px in buf.chunks_exact(2) {
+            for px in buf.as_chunks::<2>().0 {
                 out.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
             }
             out
@@ -90,7 +90,7 @@ pub fn hicon_from_rgba(
     rgba: &[u8],
     size: u32,
 ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
-    use windows::Win32::Foundation::BOOL;
+    use windows::core::BOOL;
     use windows::Win32::Foundation::E_INVALIDARG;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Graphics::Gdi::{
@@ -131,11 +131,11 @@ pub fn hicon_from_rgba(
 
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
         let color = CreateDIBSection(
-            HDC::default(),
+            Some(HDC::default()),
             &bmi,
             DIB_RGB_COLORS,
             &mut bits,
-            HANDLE::default(),
+            Some(HANDLE::default()),
             0,
         )?;
 
@@ -214,7 +214,7 @@ mod tests {
         let (rgba, width, height) = decode_png(include_bytes!("../assets/icon.png")).unwrap();
         assert_eq!(width, height);
         assert_eq!(rgba.len(), (width * height * 4) as usize);
-        assert!(rgba.chunks_exact(4).any(|px| px[3] > 0));
+        assert!(rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
     }
 
     #[cfg(windows)]

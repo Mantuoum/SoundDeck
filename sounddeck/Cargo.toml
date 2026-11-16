@@ -2,7 +2,7 @@
 name = "sounddeck"
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.92"
 authors = ["Mantum"]
 repository = "https://github.com/mantuoum/SoundDeck"
 description = "Lightweight Windows soundboard - Soundux-inspired, WASAPI-powered, portable"
@@ -17,7 +17,7 @@ anyhow = "1"
 crossbeam-channel = "0.5"
 eframe = { version = "0.31.1", default-features = false, features = ["glow", "default_fonts"] }
 png = "0.18"
-rfd = "0.16"
+rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5.5", features = [
@@ -30,7 +30,7 @@ symphonia = { version = "0.5.5", features = [
     "vorbis",
     "wav",
 ] }
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -39,6 +39,7 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",

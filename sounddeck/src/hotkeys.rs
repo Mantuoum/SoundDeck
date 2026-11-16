@@ -797,9 +797,9 @@ mod win {
     use std::cell::RefCell;
     use std::mem::size_of;
     use std::rc::Rc;
-    use windows::core::{w, PCWSTR, PWSTR};
+    use windows::core::{w, BOOL, PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, BOOL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+        CloseHandle, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::{
@@ -921,7 +921,7 @@ mod win {
             let mut hicon = crate::icon::hicon_from_rgba(&rgba, size).unwrap_or_default();
             let mut owns_icon = !hicon.is_invalid();
             if hicon.is_invalid() {
-                hicon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default();
+                hicon = LoadIconW(Some(HINSTANCE::default()), IDI_APPLICATION).unwrap_or_default();
                 owns_icon = false;
             }
 
@@ -958,9 +958,9 @@ mod win {
                 0,
                 0,
                 0,
-                HWND::default(),
-                HMENU::default(),
-                hinstance,
+                Some(HWND::default()),
+                Some(HMENU::default()),
+                Some(hinstance),
                 Some(state_ptr as *const core::ffi::c_void),
             ) {
                 Ok(hwnd) => hwnd,
@@ -980,7 +980,7 @@ mod win {
             state.keyboard_hook = match SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(keyboard_proc),
-                HINSTANCE::default(),
+                Some(HINSTANCE::default()),
                 0,
             ) {
                 Ok(hook) => Some(hook),
@@ -1004,7 +1004,7 @@ mod win {
 
             let mut msg = MSG::default();
             loop {
-                let result = GetMessageW(&mut msg, HWND::default(), 0, 0);
+                let result = GetMessageW(&mut msg, Some(HWND::default()), 0, 0);
                 if result.0 <= 0 {
                     break;
                 }
@@ -1080,10 +1080,11 @@ mod win {
                                 .map(|hotkey| hotkey.vk == vk && hotkey.mods == mods)
                                 .unwrap_or(false)
                             {
-                                let _ = PostMessageW(hook.hwnd, STOP_MSG, WPARAM(0), LPARAM(0));
+                                let _ =
+                                    PostMessageW(Some(hook.hwnd), STOP_MSG, WPARAM(0), LPARAM(0));
                             } else if let Some(id) = find_binding(&hook.bindings, mods, vk) {
                                 let _ = PostMessageW(
-                                    hook.hwnd,
+                                    Some(hook.hwnd),
                                     PLAY_MSG,
                                     WPARAM(id as usize),
                                     LPARAM(0),
@@ -1098,7 +1099,7 @@ mod win {
             }
         }
         // Always pass the key through: the focused app sees exactly what was typed.
-        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+        CallNextHookEx(None, code, wparam, lparam)
     }
 
     /// Physical state of one key. Shared by the hook's stuck-key sweep and the
@@ -1275,7 +1276,7 @@ mod win {
                 TPM_RETURNCMD | TPM_RIGHTBUTTON,
                 pt.x,
                 pt.y,
-                0,
+                None,
                 hwnd,
                 None,
             );
@@ -1297,7 +1298,7 @@ mod win {
             }
         }
         let _ = DestroyMenu(menu);
-        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
     }
 
     /// Find the main window that belongs to this executable.
@@ -1377,7 +1378,7 @@ mod win {
     pub unsafe fn main_window_minimized() -> bool {
         let cached =
             HWND(MAIN_HWND.load(std::sync::atomic::Ordering::Relaxed) as *mut core::ffi::c_void);
-        let hwnd = if !cached.is_invalid() && IsWindow(cached).as_bool() {
+        let hwnd = if !cached.is_invalid() && IsWindow(Some(cached)).as_bool() {
             cached
         } else {
             let found = main_window();
@@ -1422,7 +1423,7 @@ mod win {
     unsafe fn close_main_window() {
         let hwnd = main_window();
         if !hwnd.is_invalid() {
-            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
     }
 }
