@@ -2645,6 +2645,9 @@ impl App {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        // Pin the content to the panel: a child that sizes to its
+                        // text (the device combo) must not widen every row after it.
+                        ui.set_width(ui.available_width());
                         let full = Vec2::new(ui.available_width(), 32.0);
                         if accent_button(ui, "Load sounds", full).clicked() {
                             self.open_file_dialog();
@@ -2927,9 +2930,18 @@ impl App {
         let mut refresh = false;
 
         let width = ui.available_width();
+        // `ComboBox::width` is a minimum, not a maximum: a long device name would
+        // make the button wider than the panel and push every row below it past
+        // the right edge. Truncate the button label to the space it has.
+        let selected_label = theme::truncate(
+            ui.painter(),
+            &selected_text,
+            theme::ui_font(13.5),
+            (width - 30.0).max(24.0),
+        );
         ComboBox::from_id_salt(("device", slot.index()))
             .width(width)
-            .selected_text(RichText::new(selected_text).size(13.5))
+            .selected_text(RichText::new(selected_label).size(13.5))
             .show_ui(ui, |ui| {
                 ui.set_min_width(width - 20.0);
                 if ui

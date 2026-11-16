@@ -129,7 +129,7 @@ already parked and waiting.
 
 ## 10. Sidebar: devices, volumes, meter
 
-- [ ] Monitor & Cable dropdowns list devices + "None (silent)"; pick a different device → audio moves there (a running sound may restart on the new route — note what you hear).
+- [ ] Monitor & Cable dropdowns list devices + "None (silent)"; pick a different device → audio moves there (a running sound may restart on the new route — note what you hear). A long device name (e.g. `Headphones (High Definition Audio Device)`) truncates with `...` inside the button; the volume `100%` and the Gain `0.0 dB` stay inside the sidebar at 960×540 instead of being clipped.
 - [ ] **"None (silent)" closes the slot**: switch a slot to None **while a sound is playing** → that output goes silent at once (the other keeps playing) and stays silent after a restart; the stored choice is not re-resolved to a device. *(B6 fixed — silence is stored as the slot's name with an empty id, so the substitute rule never applies to it.)*
 - [x] Dropdown context **Refresh devices** works; a renamed device shows its new name after refresh.
 - [x] Volume sliders: drag moves the % label; **link toggle** makes one slider move both; unlink and they separate; values persist.

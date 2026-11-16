@@ -463,7 +463,9 @@ above-normal so audio still meets its deadlines.
   volumes + link, master gain (optional), **Stop all** button (when its hotkey is
   enabled; the key itself is set in Settings), loop card (when enabled); the footer below
   it is **pinned** (credit → peak meter → Settings button) and never scrolls. Compact
-  layout (<620 px sidebar height) hides labels, dB scale and credit.
+  layout (<620 px sidebar height) hides labels, dB scale and credit. A long device name
+  truncates to the panel width: `ComboBox::width` is a minimum, so the button label is
+  elided before it is built, or every row below it is pushed past the right edge.
 - **Main page:** search toolbar + RAM pill, grid/list of the active library, empty/no
   results states, drop handling. The toolbar and the grid both size from
   `board_content_width(ui)` (available width less the floating scroll-bar gutter), which
