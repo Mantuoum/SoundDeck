@@ -52,6 +52,9 @@ live in `config/` next to the executable.
   may stay resident (16–512 MB, default 32). One sound may use the whole budget, up to
   128 MB. Raising the budget lets longer files preload; lowering it drops the least
   recently used buffers.
+- **A file with an unreadable header still gets its chance**: when the container cannot
+  report a length, SoundDeck decodes it up to the limit and decides on the real size.
+  If it fits, it preloads; if not, it streams.
 - **Progress only once the length is known**: a card's progress line appears after
   SoundDeck has read the sound's total duration, so the first trigger of a long,
   streamed file may show none. The length is remembered for the next trigger.

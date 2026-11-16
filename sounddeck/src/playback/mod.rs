@@ -46,7 +46,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use crate::audio::decode::decode_file;
+use crate::audio::decode::{decode_file_bounded, BoundedDecodeError};
 use crate::audio::engine::{effective_gain, Engine};
 use crate::audio::reader::{frames_for_seconds, probe_seconds};
 use crate::audio::stream;
@@ -861,64 +861,29 @@ fn loader_loop(
         };
 
         let duration = probe_seconds(&path);
-        let usage = {
-            let Ok(state) = state.lock() else {
-                continue;
-            };
-            usage_of(&state, job.id)
-        };
         // Copy the live budget out; the guard must not live across the decode.
         let caps = caps.lock().map(|caps| *caps).unwrap_or_default();
         let route = policy::route(&policy::Request {
             retain: retain && job.retain,
             duration,
-            usage,
-            process_bytes: policy::process_bytes(),
             caps,
         });
 
         match route {
             Route::Stream(reason) => {
-                // Preload being switched off is a choice, not a refusal; it must
-                // not clear the per-sound toggle or spam the log.
-                let intentional = reason == Refusal::PreloadOff;
-                let pending;
-                let report;
-                {
-                    let Ok(mut state) = state.lock() else {
-                        continue;
-                    };
-                    let Some(entry) = state.get_mut(&job.id) else {
-                        continue;
-                    };
-                    if entry.generation != job.generation {
-                        continue;
-                    }
-                    entry.loading = false;
-                    // Skip and continue: this sound streams from disk and the
-                    // loader takes the next job. The line is reported once — a
-                    // repeated attempt with the same verdict stays quiet.
-                    report = !intentional && entry.refused != Some(reason);
-                    if !intentional {
-                        entry.refused = Some(reason);
-                    }
-                    if duration.is_some() {
-                        entry.duration = duration;
-                    }
-                    pending = std::mem::take(&mut entry.pending_play);
-                }
-                if report {
-                    let _ = events.send(PlaybackEvent::Refused { id: job.id, reason });
-                }
-                if pending {
-                    let Some((_, gain)) = playback_snapshot(&state, job.id) else {
-                        continue;
-                    };
-                    start_stream_from(&engine, &events, &state, job.id, &path, gain, duration);
-                }
+                stream_instead(
+                    &state,
+                    &engine,
+                    &events,
+                    job.id,
+                    job.generation,
+                    &path,
+                    duration,
+                    reason,
+                );
             }
             Route::Preload => {
-                let decoded = decode_file(&path);
+                let decoded = decode_file_bounded(&path, caps.per_sound_bytes);
                 match decoded {
                     Ok(audio) => {
                         let bytes = audio.samples.len() * policy::SAMPLE_BYTES;
@@ -980,7 +945,21 @@ fn loader_loop(
                             }
                         }
                     }
-                    Err(message) => {
+                    Err(BoundedDecodeError::TooBig) => {
+                        // The exact decode crossed the per-sound bound, so this
+                        // sound can never be resident. Report once, then stream.
+                        stream_instead(
+                            &state,
+                            &engine,
+                            &events,
+                            job.id,
+                            job.generation,
+                            &path,
+                            duration,
+                            Refusal::TooLong,
+                        );
+                    }
+                    Err(BoundedDecodeError::Failed(message)) => {
                         let message = format!("{message:#}");
                         {
                             let Ok(mut state) = state.lock() else {
@@ -1005,6 +984,58 @@ fn loader_loop(
                 }
             }
         }
+    }
+}
+
+/// Marks a sound as streaming, records the reason, reports it once per verdict,
+/// and starts a pending play.
+///
+/// Switched-off preload is a choice, not a refusal, so it neither clears the
+/// per-sound toggle nor logs.
+#[allow(clippy::too_many_arguments)]
+fn stream_instead(
+    state: &Arc<Mutex<HashMap<u64, Playable>>>,
+    engine: &Engine,
+    events: &Sender<PlaybackEvent>,
+    id: u64,
+    generation: u64,
+    path: &Path,
+    duration: Option<f32>,
+    reason: Refusal,
+) {
+    let intentional = reason == Refusal::PreloadOff;
+    let pending;
+    let report;
+    {
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        let Some(entry) = state.get_mut(&id) else {
+            return;
+        };
+        if entry.generation != generation {
+            return;
+        }
+        entry.loading = false;
+        // Skip and continue: this sound streams from disk and the loader takes
+        // the next job. The line is reported once per verdict.
+        report = !intentional && entry.refused != Some(reason);
+        if !intentional {
+            entry.refused = Some(reason);
+        }
+        if duration.is_some() {
+            entry.duration = duration;
+        }
+        pending = std::mem::take(&mut entry.pending_play);
+    }
+    if report {
+        let _ = events.send(PlaybackEvent::Refused { id, reason });
+    }
+    if pending {
+        let Some((_, gain)) = playback_snapshot(state, id) else {
+            return;
+        };
+        start_stream_from(engine, events, state, id, path, gain, duration);
     }
 }
 

@@ -200,7 +200,9 @@ and the process commit ceiling scales with it (`max(125 MiB, budget + 96 MiB)`, 
 `Caps::from_budget_mb`; the loader, the eviction plan and the UI readout read that one
 value. Admission decisions and
 their explanations come from one `policy::Refusal` type — extend it, never re-derive
-the rules. `Refusal::message(name)` owns every user-visible sentence (the size caps all
+the rules. `policy::route` is only a cheap pre-filter (switched off, or a container
+estimate clearly over the per-sound bound at 5 % tolerance); everything else is decoded
+with `decode_file_bounded` and admitted on its exact bytes by `admit`/`evict_to_fit`. `Refusal::message(name)` owns every user-visible sentence (the size caps all
 read `"<name>" is too big; Streaming from disk`), and `evictable()` owns what may be paid
 for out of the cache. Only sounds with a
 hotkey **and** in the active library are RAM-eligible (FR-5.3.5); `sync_active_library`

@@ -58,8 +58,11 @@ service. Everything lives beside the executable.
 - `policy::Caps` holds every cap, derived once from the budget
   (`Caps::from_budget_mb`). The loader, the eviction plan and the UI readout all use
   that one value, so they cannot disagree.
-- A sound over the per-sound bound is refused for preload *before* decoding (container
-  probe) and streams from disk; the log says why.
+- A sound over the per-sound bound is refused for preload *before* decoding only when
+  the container estimate is clearly over (5 % tolerance); otherwise it is decoded with a
+  byte-bounded decode and admitted on its exact size. A sound whose container reports no
+  duration is decoded and weighed the same way. The bounded decode bails at the per-sound
+  cap, so a wrong estimate cannot spike memory.
 - Admission is LRU: the not-currently-playing buffer with the oldest `last_used`
   is dropped to make room. The playing sound is never evicted. Lowering the budget
   trims the cache in place, also never evicting a playing sound.

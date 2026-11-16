@@ -23,8 +23,9 @@
 
 use crate::audio::decode::{CHANNELS, SAMPLE_RATE};
 
-/// Bytes per sample in the canonical format.
-pub const SAMPLE_BYTES: usize = std::mem::size_of::<f32>();
+/// Bytes per sample in the canonical format. Re-exported so the policy and the
+/// decoder share one definition.
+pub use crate::audio::decode::SAMPLE_BYTES;
 pub const BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * CHANNELS * SAMPLE_BYTES;
 
 /// Bytes in a mebibyte: the unit every cap and every message is expressed in.
@@ -46,6 +47,11 @@ pub const RETAINED_SOUND_CAP: usize = 16;
 /// sound bigger than this is always streamed, so a large budget cannot turn one
 /// trigger into a huge transient allocation.
 pub const TRANSIENT_DECODE_CAP: usize = 128 * MIB;
+
+/// How far past the per-sound bound a container estimate may be before the sound
+/// is refused without decoding. Covers container-versus-decoded drift (edit
+/// lists, encoder padding, a frame of rounding).
+pub const DURATION_TOLERANCE: f32 = 1.05;
 
 /// Commit allowance above the decoded cache for the app itself.
 ///
@@ -130,8 +136,6 @@ pub fn bytes_for_seconds(seconds: f32) -> usize {
 pub enum Refusal {
     /// The user switched preload off for this sound: a choice, not a refusal.
     PreloadOff,
-    /// The container duration could not be read, so the size is unknown.
-    UnknownDuration,
     /// Longer than the RAM budget allows for a single sound.
     TooLong,
     /// Bigger than the per-sound cap even though the duration estimate passed.
@@ -158,9 +162,6 @@ impl Refusal {
     pub fn message(self, name: &str) -> String {
         match self {
             Refusal::PreloadOff => format!("\"{name}\" streams from disk (preload is off)"),
-            Refusal::UnknownDuration => {
-                format!("\"{name}\" streams from disk: its duration could not be read")
-            }
             Refusal::TooLong => format!("\"{name}\" is too long; Streaming from disk"),
             Refusal::TooLarge | Refusal::ByteCap | Refusal::ProcessCeiling => too_big(name),
             Refusal::NoAudio => format!("\"{name}\" has no audio"),
@@ -207,32 +208,27 @@ pub enum Route {
 pub struct Request {
     pub retain: bool,
     pub duration: Option<f32>,
-    pub usage: Usage,
-    pub process_bytes: Option<usize>,
     pub caps: Caps,
 }
 
-/// The single decision function. `None` means "already resident" and never
-/// reaches here.
+/// The cheap pre-filter: refuse only what could never fit, then decode and weigh.
+///
+/// The container estimate is trusted only for a clear rejection. Anything close
+/// to the bound, or with no duration at all, is decoded and decided on its exact
+/// bytes by [`admit`] (via the loader's eviction pass). That removes the drift
+/// between a container's claimed length and the audio it actually decodes to.
 pub fn route(request: &Request) -> Route {
     if !request.retain {
         return Route::Stream(Refusal::PreloadOff);
     }
-    let Some(duration) = request.duration else {
-        return Route::Stream(Refusal::UnknownDuration);
-    };
-    if bytes_for_seconds(duration) > request.caps.per_sound_bytes {
-        return Route::Stream(Refusal::TooLong);
+    if let Some(duration) = request.duration {
+        if bytes_for_seconds(duration) as f32
+            > request.caps.per_sound_bytes as f32 * DURATION_TOLERANCE
+        {
+            return Route::Stream(Refusal::TooLong);
+        }
     }
-    match admit(
-        request.usage,
-        bytes_for_seconds(duration),
-        request.process_bytes,
-        &request.caps,
-    ) {
-        Ok(()) => Route::Preload,
-        Err(refusal) => Route::Stream(refusal),
-    }
+    Route::Preload
 }
 
 /// Admits or refuses a sound of `bytes` against `usage` and `caps`.
@@ -314,8 +310,6 @@ mod tests {
         Request {
             retain: true,
             duration,
-            usage: Usage::default(),
-            process_bytes: ROOMY_PROCESS,
             caps: caps(),
         }
     }
@@ -427,7 +421,6 @@ mod tests {
         // Every message carries the name it was asked about.
         for refusal in [
             Refusal::PreloadOff,
-            Refusal::UnknownDuration,
             Refusal::TooLong,
             Refusal::TooLarge,
             Refusal::NoAudio,
@@ -460,49 +453,9 @@ mod tests {
     }
 
     #[test]
-    fn route_reports_the_same_refusal_admit_decides() {
-        // `route` hands `admit` the size it estimates from the duration, so both
-        // must reach the same verdict for the same caps.
-        let bytes = bytes_for_seconds(2.0);
-        let cases = [
-            (
-                Usage {
-                    bytes: 0,
-                    sounds: RETAINED_SOUND_CAP,
-                },
-                ROOMY_PROCESS,
-            ),
-            (
-                Usage {
-                    bytes: caps().total_bytes - 1000,
-                    sounds: 1,
-                },
-                ROOMY_PROCESS,
-            ),
-            (Usage::default(), None),
-            (Usage::default(), Some(PROCESS_CEILING)),
-        ];
-
-        for (usage, process) in cases {
-            let expected = admit(usage, bytes, process, &caps())
-                .err()
-                .unwrap_or(Refusal::NoAudio);
-            let mut req = request(Some(2.0));
-            req.usage = usage;
-            req.process_bytes = process;
-            assert_eq!(
-                route(&req),
-                Route::Stream(expected),
-                "route and admit must not drift"
-            );
-        }
-    }
-
-    #[test]
     fn every_refusal_explains_itself_differently() {
         let all = [
             Refusal::PreloadOff,
-            Refusal::UnknownDuration,
             Refusal::TooLong,
             Refusal::TooLarge,
             Refusal::NoAudio,
@@ -533,7 +486,6 @@ mod tests {
         }
         for refusal in [
             Refusal::PreloadOff,
-            Refusal::UnknownDuration,
             Refusal::TooLong,
             Refusal::TooLarge,
             Refusal::NoAudio,
@@ -583,11 +535,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_duration_streams() {
-        assert_eq!(
-            route(&request(None)),
-            Route::Stream(Refusal::UnknownDuration)
-        );
+    fn an_unknown_duration_is_decoded_not_refused() {
+        // The container could not report a length. Decode it and weigh the
+        // exact bytes instead of refusing it to disk for no good reason.
+        assert_eq!(route(&request(None)), Route::Preload);
+    }
+
+    #[test]
+    fn a_container_estimate_within_tolerance_is_decoded() {
+        let caps = caps();
+        let max_secs = caps.per_sound_bytes as f32 / BYTES_PER_SECOND as f32;
+        let mut slightly_over = request(Some(max_secs * 1.02));
+        slightly_over.caps = caps;
+        assert_eq!(route(&slightly_over), Route::Preload);
+
+        let far_over = request(Some(max_secs * 1.2));
+        assert_eq!(route(&far_over), Route::Stream(Refusal::TooLong));
     }
 
     #[test]
@@ -595,16 +558,6 @@ mod tests {
         let mut req = request(Some(2.0));
         req.retain = false;
         assert_eq!(route(&req), Route::Stream(Refusal::PreloadOff));
-    }
-
-    #[test]
-    fn a_full_cache_streams() {
-        let mut req = request(Some(2.0));
-        req.usage = Usage {
-            bytes: caps().total_bytes - 1000,
-            sounds: 1,
-        };
-        assert_eq!(route(&req), Route::Stream(Refusal::ByteCap));
     }
 
     #[test]
@@ -625,9 +578,6 @@ mod tests {
             admit(Usage::default(), 1_000_000, None, &caps()),
             Err(Refusal::ProcessUnreadable)
         );
-        let mut req = request(Some(2.0));
-        req.process_bytes = None;
-        assert_eq!(route(&req), Route::Stream(Refusal::ProcessUnreadable));
     }
 
     #[test]
