@@ -7,6 +7,9 @@ dist/
 # Portable review build (binary + runtime config + demo library)
 sounddeck/review/
 
+# Local review build at the repo root (built by hand, not a release artifact)
+/review/
+
 # Local screenshots / scratch files
 shot*.png
 crop*.png
