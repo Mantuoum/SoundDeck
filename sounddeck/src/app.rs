@@ -8036,9 +8036,11 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
     let hovered = response.hovered();
     let close = matches!(kind, WindowButton::Close);
     if hovered {
+        // A title-bar button highlights its whole cell, square, like a native
+        // window button: no inset and no rounded "squircle" around the icon.
         ui.painter().rect_filled(
-            rect.shrink2(Vec2::new(2.0, 2.0)),
-            CornerRadius::same(theme::RADIUS_MD),
+            rect,
+            CornerRadius::same(0),
             if close {
                 theme::alpha(theme::red(), 50)
             } else {
@@ -8051,12 +8053,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
         Id::new(("window_button", kind as i32)),
         response.is_pointer_button_down_on(),
     );
-    press_overlay(
-        ui.painter(),
-        rect.shrink2(Vec2::new(2.0, 2.0)),
-        theme::RADIUS_MD,
-        press,
-    );
+    press_overlay(ui.painter(), rect, 0, press);
     let color = if close && hovered {
         theme::red()
     } else if hovered {
