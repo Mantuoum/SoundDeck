@@ -193,8 +193,12 @@ every switch), so re-asserting the same retention cannot re-decode or re-log it.
 `Loaded/Failed/Refused/Warning` are polled by the UI; `Refused`
 carries `{ id, reason }` and the UI supplies the name.
 
-**Policy caps** (`policy.rs`): ≤ 30 s per sound, ≤ 32 MiB and ≤ 16 sounds resident,
-process commit ≤ 125 MiB (fail **closed** if the query fails). Admission decisions and
+**Policy caps** (`policy.rs`): one sound may use the whole RAM budget but never more than
+128 MiB; ≤ 16 sounds resident; the budget is `ram_budget_mb` (default 32 MiB, 16–512),
+and the process commit ceiling scales with it (`max(125 MiB, budget + 96 MiB)`, fail
+**closed** if the query fails). `policy::Caps` holds every cap, derived once by
+`Caps::from_budget_mb`; the loader, the eviction plan and the UI readout read that one
+value. Admission decisions and
 their explanations come from one `policy::Refusal` type — extend it, never re-derive
 the rules. `Refusal::message(name)` owns every user-visible sentence (the size caps all
 read `"<name>" is too big; Streaming from disk`), and `evictable()` owns what may be paid

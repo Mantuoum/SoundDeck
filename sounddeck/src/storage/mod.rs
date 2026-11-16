@@ -35,6 +35,8 @@ pub struct Settings {
     pub master_gain_db: f32,
     pub link_volumes: bool,
     pub preload_hotkey_sounds: bool,
+    /// RAM budget in MB for decoded, resident audio (Settings → Playback → Memory).
+    pub ram_budget_mb: u32,
     /// Shows the loop player in the sidebar. Does not auto-start playback.
     pub loop_enabled: bool,
     /// Referenced file for the looping track; same path rules as sounds.
@@ -77,6 +79,7 @@ impl Default for Settings {
             master_gain_db: 0.0,
             link_volumes: true,
             preload_hotkey_sounds: true,
+            ram_budget_mb: crate::model::RAM_BUDGET_DEFAULT_MB,
             loop_enabled: false,
             loop_path: None,
             loop_volume: 1.0,
@@ -110,6 +113,10 @@ impl Settings {
             }
         });
         self.loop_volume = finite_or(self.loop_volume, 1.0).clamp(0.0, 1.0);
+        self.ram_budget_mb = self.ram_budget_mb.clamp(
+            crate::model::RAM_BUDGET_MIN_MB,
+            crate::model::RAM_BUDGET_MAX_MB,
+        );
         self.stop_all_hotkey = self.stop_all_hotkey.take().and_then(|label| {
             let trimmed = label.trim();
             if trimmed.is_empty() {
@@ -517,6 +524,25 @@ mod tests {
     }
 
     #[test]
+    fn the_ram_budget_defaults_and_clamps_on_load() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.ram_budget_mb, crate::model::RAM_BUDGET_DEFAULT_MB);
+
+        settings.ram_budget_mb = 0;
+        settings.normalize();
+        assert_eq!(settings.ram_budget_mb, crate::model::RAM_BUDGET_MIN_MB);
+
+        settings.ram_budget_mb = 99_999;
+        settings.normalize();
+        assert_eq!(settings.ram_budget_mb, crate::model::RAM_BUDGET_MAX_MB);
+
+        // A value inside the range is kept as written.
+        settings.ram_budget_mb = 64;
+        settings.normalize();
+        assert_eq!(settings.ram_budget_mb, 64);
+    }
+
+    #[test]
     fn migrates_legacy_single_file() {
         let base = temp_base("migrate");
         let legacy = json!({
@@ -865,6 +891,7 @@ mod tests {
             master_gain_db: 3.0,
             link_volumes: false,
             preload_hotkey_sounds: false,
+            ram_budget_mb: 64,
             loop_enabled: true,
             loop_path: Some("audio/rain.flac".into()),
             loop_volume: 0.6,
@@ -904,6 +931,7 @@ mod tests {
     const SETTINGS_PAGE_FIELDS: &[&str] = &[
         "theme",
         "preload_hotkey_sounds",
+        "ram_budget_mb",
         "loop_enabled",
         "loop_path",
         "loop_on_monitor",

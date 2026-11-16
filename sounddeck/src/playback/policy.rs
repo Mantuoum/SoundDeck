@@ -30,14 +30,28 @@ pub const BYTES_PER_SECOND: usize = SAMPLE_RATE as usize * CHANNELS * SAMPLE_BYT
 /// Bytes in a mebibyte: the unit every cap and every message is expressed in.
 const MIB: usize = 1024 * 1024;
 
-/// Total decoded audio that may stay resident, across all sounds.
-pub const RETAINED_BYTES_CAP: usize = 32 * MIB;
+/// Default RAM budget: decoded audio that may stay resident, across all sounds.
+pub const DEFAULT_BUDGET_MB: u32 = crate::model::RAM_BUDGET_DEFAULT_MB;
+/// Smallest RAM budget the user may choose.
+pub const MIN_BUDGET_MB: u32 = crate::model::RAM_BUDGET_MIN_MB;
+/// Largest RAM budget the user may choose.
+pub const MAX_BUDGET_MB: u32 = crate::model::RAM_BUDGET_MAX_MB;
+
 /// Maximum number of resident sounds.
 pub const RETAINED_SOUND_CAP: usize = 16;
-/// Longest single sound that may be kept resident. Longer sounds always stream.
-pub const RETAIN_SECONDS_CAP: f32 = 30.0;
-/// Bytes a single sound may occupy to be eligible for preloading.
-pub const PER_SOUND_RETAIN_BYTES: usize = (RETAIN_SECONDS_CAP as usize) * BYTES_PER_SECOND;
+
+/// Never decode more than this at once, whatever the budget.
+///
+/// `decode_file` builds the whole sound in memory before admission. A single
+/// sound bigger than this is always streamed, so a large budget cannot turn one
+/// trigger into a huge transient allocation.
+pub const TRANSIENT_DECODE_CAP: usize = 128 * MIB;
+
+/// Commit allowance above the decoded cache for the app itself.
+///
+/// The app measures ~70 MiB of private commit before any cache, a little more
+/// under heavy UI. 96 MiB keeps the valve from binding before the cache does.
+pub const PROCESS_BASELINE_ALLOWANCE: usize = 96 * MIB;
 
 /// Hard ceiling for the whole process, measured as private commit charge.
 ///
@@ -46,6 +60,50 @@ pub const PER_SOUND_RETAIN_BYTES: usize = (RETAIN_SECONDS_CAP as usize) * BYTES_
 /// product promise quotes.
 pub const PROCESS_CEILING: usize = 125 * MIB;
 pub const PROCESS_HEADROOM: usize = 4 * MIB;
+
+/// Every cap the loader reads, derived once from the user's RAM budget.
+///
+/// Keeping them in one value means the admission rule, the eviction plan and
+/// the UI readout can never disagree about the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Caps {
+    /// Total decoded audio that may stay resident.
+    pub total_bytes: usize,
+    /// Maximum number of resident sounds.
+    pub max_sounds: usize,
+    /// Largest single sound that may be resident (also the transient decode bound).
+    pub per_sound_bytes: usize,
+    /// Private commit the process may reach.
+    pub process_ceiling: usize,
+    /// Commit kept free below the ceiling.
+    pub process_headroom: usize,
+}
+
+impl Caps {
+    /// Derive every cap from a RAM budget in megabytes.
+    ///
+    /// The budget is clamped to [`MIN_BUDGET_MB`]..=[`MAX_BUDGET_MB`]. A single
+    /// sound may use the whole budget, but never more than
+    /// [`TRANSIENT_DECODE_CAP`]. The process ceiling grows with the budget so the
+    /// valve cannot silently bind before the cache does.
+    pub fn from_budget_mb(mb: u32) -> Self {
+        let mb = mb.clamp(MIN_BUDGET_MB, MAX_BUDGET_MB);
+        let total_bytes = mb as usize * MIB;
+        Caps {
+            total_bytes,
+            max_sounds: RETAINED_SOUND_CAP,
+            per_sound_bytes: total_bytes.min(TRANSIENT_DECODE_CAP),
+            process_ceiling: (total_bytes + PROCESS_BASELINE_ALLOWANCE).max(PROCESS_CEILING),
+            process_headroom: PROCESS_HEADROOM,
+        }
+    }
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self::from_budget_mb(DEFAULT_BUDGET_MB)
+    }
+}
 
 /// What the cache currently holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,9 +132,9 @@ pub enum Refusal {
     PreloadOff,
     /// The container duration could not be read, so the size is unknown.
     UnknownDuration,
-    /// Longer than [`RETAIN_SECONDS_CAP`].
+    /// Longer than the RAM budget allows for a single sound.
     TooLong,
-    /// Bigger than [`PER_SOUND_RETAIN_BYTES`] even though the duration passed.
+    /// Bigger than the per-sound cap even though the duration estimate passed.
     TooLarge,
     /// The decoder produced no audio.
     NoAudio,
@@ -151,6 +209,7 @@ pub struct Request {
     pub duration: Option<f32>,
     pub usage: Usage,
     pub process_bytes: Option<usize>,
+    pub caps: Caps,
 }
 
 /// The single decision function. `None` means "already resident" and never
@@ -162,39 +221,47 @@ pub fn route(request: &Request) -> Route {
     let Some(duration) = request.duration else {
         return Route::Stream(Refusal::UnknownDuration);
     };
-    if duration > RETAIN_SECONDS_CAP {
+    if bytes_for_seconds(duration) > request.caps.per_sound_bytes {
         return Route::Stream(Refusal::TooLong);
     }
     match admit(
         request.usage,
         bytes_for_seconds(duration),
         request.process_bytes,
+        &request.caps,
     ) {
         Ok(()) => Route::Preload,
         Err(refusal) => Route::Stream(refusal),
     }
 }
 
-/// Admits or refuses a sound of `bytes` against `usage`.
+/// Admits or refuses a sound of `bytes` against `usage` and `caps`.
 ///
 /// `process_bytes` is the current private commit when known. `None` means the
 /// platform refused to tell us, and admission fails closed.
-pub fn admit(usage: Usage, bytes: usize, process_bytes: Option<usize>) -> Result<(), Refusal> {
+pub fn admit(
+    usage: Usage,
+    bytes: usize,
+    process_bytes: Option<usize>,
+    caps: &Caps,
+) -> Result<(), Refusal> {
     if bytes == 0 {
         return Err(Refusal::NoAudio);
     }
-    if bytes > PER_SOUND_RETAIN_BYTES {
+    if bytes > caps.per_sound_bytes {
         return Err(Refusal::TooLarge);
     }
-    if usage.sounds >= RETAINED_SOUND_CAP {
+    if usage.sounds >= caps.max_sounds {
         return Err(Refusal::SoundCap);
     }
-    if usage.bytes.saturating_add(bytes) > RETAINED_BYTES_CAP {
+    if usage.bytes.saturating_add(bytes) > caps.total_bytes {
         return Err(Refusal::ByteCap);
     }
     match process_bytes {
         Some(current) => {
-            if current.saturating_add(bytes) <= PROCESS_CEILING.saturating_sub(PROCESS_HEADROOM) {
+            if current.saturating_add(bytes)
+                <= caps.process_ceiling.saturating_sub(caps.process_headroom)
+            {
                 Ok(())
             } else {
                 Err(Refusal::ProcessCeiling)
@@ -238,12 +305,18 @@ mod tests {
     /// Comfortably below every cap, so only the field under test decides.
     const ROOMY_PROCESS: Option<usize> = Some(60 * MIB);
 
+    /// The default caps every table row uses unless it says otherwise.
+    fn caps() -> Caps {
+        Caps::default()
+    }
+
     fn request(duration: Option<f32>) -> Request {
         Request {
             retain: true,
             duration,
             usage: Usage::default(),
             process_bytes: ROOMY_PROCESS,
+            caps: caps(),
         }
     }
 
@@ -263,6 +336,7 @@ mod tests {
 
     #[test]
     fn admission_and_its_explanation_agree_for_every_cap() {
+        let caps = caps();
         let cases = [
             Case {
                 name: "no audio at all",
@@ -275,7 +349,7 @@ mod tests {
             Case {
                 name: "per-sound bytes cap",
                 usage: Usage::default(),
-                bytes: PER_SOUND_RETAIN_BYTES + 1,
+                bytes: caps.per_sound_bytes + 1,
                 process: ROOMY_PROCESS,
                 expected: Refusal::TooLarge,
                 message_contains: "is too big; Streaming from disk",
@@ -294,7 +368,7 @@ mod tests {
             Case {
                 name: "total byte budget",
                 usage: Usage {
-                    bytes: RETAINED_BYTES_CAP - 1000,
+                    bytes: caps.total_bytes - 1000,
                     sounds: 1,
                 },
                 bytes: 100_000,
@@ -306,7 +380,7 @@ mod tests {
                 name: "process ceiling",
                 usage: Usage::default(),
                 bytes: 1_000_000,
-                process: Some(PROCESS_CEILING - PROCESS_HEADROOM - 1000),
+                process: Some(caps.process_ceiling - caps.process_headroom - 1000),
                 expected: Refusal::ProcessCeiling,
                 message_contains: "is too big; Streaming from disk",
             },
@@ -321,7 +395,7 @@ mod tests {
         ];
 
         for case in cases {
-            let decision = admit(case.usage, case.bytes, case.process);
+            let decision = admit(case.usage, case.bytes, case.process, &caps);
             assert_eq!(
                 decision,
                 Err(case.expected),
@@ -371,12 +445,18 @@ mod tests {
 
     #[test]
     fn a_sound_within_every_cap_is_admitted() {
-        assert_eq!(admit(Usage::default(), 1_000_000, ROOMY_PROCESS), Ok(()));
+        assert_eq!(
+            admit(Usage::default(), 1_000_000, ROOMY_PROCESS, &caps()),
+            Ok(())
+        );
         let full_but_legal = Usage {
-            bytes: RETAINED_BYTES_CAP - 1_000_000,
+            bytes: caps().total_bytes - 1_000_000,
             sounds: RETAINED_SOUND_CAP - 1,
         };
-        assert_eq!(admit(full_but_legal, 1_000_000, ROOMY_PROCESS), Ok(()));
+        assert_eq!(
+            admit(full_but_legal, 1_000_000, ROOMY_PROCESS, &caps()),
+            Ok(())
+        );
     }
 
     #[test]
@@ -394,7 +474,7 @@ mod tests {
             ),
             (
                 Usage {
-                    bytes: RETAINED_BYTES_CAP - 1000,
+                    bytes: caps().total_bytes - 1000,
                     sounds: 1,
                 },
                 ROOMY_PROCESS,
@@ -404,7 +484,7 @@ mod tests {
         ];
 
         for (usage, process) in cases {
-            let expected = admit(usage, bytes, process)
+            let expected = admit(usage, bytes, process, &caps())
                 .err()
                 .unwrap_or(Refusal::NoAudio);
             let mut req = request(Some(2.0));
@@ -480,12 +560,26 @@ mod tests {
     }
 
     #[test]
-    fn the_thirty_second_boundary_is_inclusive() {
-        assert_eq!(route(&request(Some(30.0))), Route::Preload);
+    fn the_derived_per_sound_bound_is_inclusive() {
+        let caps = caps();
+        let max_secs = caps.per_sound_bytes as f32 / BYTES_PER_SECOND as f32;
+        assert_eq!(route(&request(Some(max_secs * 0.9))), Route::Preload);
         assert_eq!(
-            route(&request(Some(30.01))),
+            route(&request(Some(max_secs * 1.1))),
             Route::Stream(Refusal::TooLong)
         );
+    }
+
+    #[test]
+    fn a_larger_budget_admits_a_longer_sound() {
+        let duration = 100.0;
+        assert_eq!(
+            route(&request(Some(duration))),
+            Route::Stream(Refusal::TooLong)
+        );
+        let mut req = request(Some(duration));
+        req.caps = Caps::from_budget_mb(256);
+        assert_eq!(route(&req), Route::Preload);
     }
 
     #[test]
@@ -507,7 +601,7 @@ mod tests {
     fn a_full_cache_streams() {
         let mut req = request(Some(2.0));
         req.usage = Usage {
-            bytes: RETAINED_BYTES_CAP - 1000,
+            bytes: caps().total_bytes - 1000,
             sounds: 1,
         };
         assert_eq!(route(&req), Route::Stream(Refusal::ByteCap));
@@ -519,13 +613,16 @@ mod tests {
             bytes: 1_000_000,
             sounds: RETAINED_SOUND_CAP,
         };
-        assert_eq!(admit(usage, 100_000, ROOMY_PROCESS), Err(Refusal::SoundCap));
+        assert_eq!(
+            admit(usage, 100_000, ROOMY_PROCESS, &caps()),
+            Err(Refusal::SoundCap)
+        );
     }
 
     #[test]
     fn an_unreadable_process_size_fails_closed() {
         assert_eq!(
-            admit(Usage::default(), 1_000_000, None),
+            admit(Usage::default(), 1_000_000, None, &caps()),
             Err(Refusal::ProcessUnreadable)
         );
         let mut req = request(Some(2.0));
@@ -535,10 +632,42 @@ mod tests {
 
     #[test]
     fn the_process_ceiling_binds() {
-        let near = PROCESS_CEILING - PROCESS_HEADROOM - 1000;
+        let caps = caps();
+        let near = caps.process_ceiling - caps.process_headroom - 1000;
         assert_eq!(
-            admit(Usage::default(), 1_000_000, Some(near)),
+            admit(Usage::default(), 1_000_000, Some(near), &caps),
             Err(Refusal::ProcessCeiling)
         );
+    }
+
+    #[test]
+    fn a_budget_derives_the_caps() {
+        let caps = Caps::from_budget_mb(64);
+        assert_eq!(caps.total_bytes, 64 * MIB);
+        assert_eq!(caps.max_sounds, RETAINED_SOUND_CAP);
+        assert_eq!(caps.per_sound_bytes, 64 * MIB);
+        assert_eq!(caps.process_headroom, PROCESS_HEADROOM);
+        assert!(
+            caps.process_ceiling >= caps.total_bytes + caps.process_headroom,
+            "the process ceiling must leave room for the whole budget"
+        );
+    }
+
+    #[test]
+    fn a_budget_outside_the_range_is_clamped() {
+        assert_eq!(
+            Caps::from_budget_mb(0).total_bytes,
+            MIN_BUDGET_MB as usize * MIB
+        );
+        assert_eq!(
+            Caps::from_budget_mb(99_999).total_bytes,
+            MAX_BUDGET_MB as usize * MIB
+        );
+    }
+
+    #[test]
+    fn a_single_sound_is_bounded_by_the_transient_decode_cap() {
+        let caps = Caps::from_budget_mb(MAX_BUDGET_MB);
+        assert_eq!(caps.per_sound_bytes, TRANSIENT_DECODE_CAP);
     }
 }

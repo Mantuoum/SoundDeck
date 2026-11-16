@@ -46,9 +46,12 @@ live in `config/` next to the executable.
 - **Stop-all hotkey** (off by default): enable it in Settings → Playback → Hotkeys and
   set the key there (the same capture dialog as a sound hotkey). The sidebar then shows a
   compact **Stop all** button; the key works while hidden and still reaches the focused app.
-- **Long sounds stream from disk**: anything over 30 s, or that does not fit the
-  preload budget, streams with constant memory. No file is fully decoded just to be
-  played once.
+- **Long sounds stream from disk**: anything that does not fit the preload budget
+  streams with constant memory. No file is fully decoded just to be played once.
+  The **RAM budget** slider in Settings → Playback → Memory sets how much decoded audio
+  may stay resident (16–512 MB, default 32). One sound may use the whole budget, up to
+  128 MB. Raising the budget lets longer files preload; lowering it drops the least
+  recently used buffers.
 - **Progress only once the length is known**: a card's progress line appears after
   SoundDeck has read the sound's total duration, so the first trigger of a long,
   streamed file may show none. The length is remembered for the next trigger.
@@ -79,6 +82,7 @@ live in `config/` next to the executable.
   bar per output, zone colours, and a peak-hold marker.
 - Only sounds with a hotkey can be kept in RAM.
   - Global `Load hotkey sounds into RAM` switch in Settings → Playback → Memory.
+  - `RAM budget` slider there sets the total the cache may use (16–512 MB, default 32).
   - Per-sound `RAM` / `DISK` chip overrides that sound until the next global toggle.
   - Toolbar pill mirrors the state: `RAM`, `DISK`, or `MIXED`; click it to toggle.
   - Disk mode decodes on trigger, plays, and releases the samples.
@@ -117,7 +121,7 @@ About, Support) sits in a second column. On a narrow window those panels move un
 column.
 
 - **Playback** — **Looping** (enable, choose the file, send it to Monitor and/or Cable),
-  **Memory** (load hotkey sounds into RAM, show the RAM state) and
+  **Memory** (load hotkey sounds into RAM, show the RAM state, RAM budget) and
   **Hotkeys** (stop-all switch plus the key row).
 - **Appearance** — theme, reload themes, Animate the interface.
 - **Window** — minimize-to-tray, whether the sidebar shows the master gain, and

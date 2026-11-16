@@ -10,6 +10,15 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "wav", "mp3", "ogg", "flac", "m4a", "aac", "opus", "wma", "aif", "aiff",
 ];
 
+/// RAM budget bounds, shared by the settings clamp and the preload policy.
+///
+/// They live here because both `storage` and `playback` may depend on `model`,
+/// while `storage` may not depend on `playback` (AGENTS §3). One definition, no
+/// drift between the slider and the loader.
+pub const RAM_BUDGET_MIN_MB: u32 = 16;
+pub const RAM_BUDGET_MAX_MB: u32 = 512;
+pub const RAM_BUDGET_DEFAULT_MB: u32 = 32;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Layout {

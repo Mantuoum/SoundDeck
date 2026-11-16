@@ -52,11 +52,17 @@ service. Everything lives beside the executable.
 
 ### Preload cache and memory limits (`playback/policy.rs`, `playback/mod.rs`)
 
-- Retained decoded audio: **32 MB**, **16 sounds**, **30 s** per sound.
-- A longer sound is refused for preload *before* decoding (container probe) and
-  streams from disk; the log says why.
+- Retained decoded audio: the **RAM budget** (default **32 MB**, range 16–512 MB, set
+  in Settings → Playback → Memory), **16 sounds**, and **one sound may use the whole
+  budget** but never more than 128 MB.
+- `policy::Caps` holds every cap, derived once from the budget
+  (`Caps::from_budget_mb`). The loader, the eviction plan and the UI readout all use
+  that one value, so they cannot disagree.
+- A sound over the per-sound bound is refused for preload *before* decoding (container
+  probe) and streams from disk; the log says why.
 - Admission is LRU: the not-currently-playing buffer with the oldest `last_used`
-  is dropped to make room. The playing sound is never evicted.
+  is dropped to make room. The playing sound is never evicted. Lowering the budget
+  trims the cache in place, also never evicting a playing sound.
 - **Eviction only pays for cache caps.** `Refusal::evictable()` is true for
   `SoundCap`/`ByteCap` only; a sound that is too big on its own, a process at its
   ceiling, or a decoder that produced nothing is refused with **no victims**, so one
@@ -65,10 +71,11 @@ service. Everything lives beside the executable.
   not change (the tab-switch sync re-asserts it on every switch), so re-asserting the same
   retention neither re-decodes nor re-logs it.
 - The refusal wording is `Refusal::message(name)` — the size caps read
-  `"<name>" is too big; Streaming from disk`, the 30 s cap `"<name>" is too long;
-  Streaming from disk`, an empty decode `"<name>" has no audio`. `PlaybackEvent::Refused`
-  carries `{ id, reason }`; the UI supplies the name.
-- A process commit ceiling (125 MB) is the last-resort valve; if the query fails,
+  `"<name>" is too big; Streaming from disk`, a sound over the per-sound bound
+  `"<name>" is too long; Streaming from disk`, an empty decode `"<name>" has no audio`.
+  `PlaybackEvent::Refused` carries `{ id, reason }`; the UI supplies the name.
+- A process commit ceiling is the last-resort valve; it scales with the budget
+  (`max(125 MB, budget + 96 MB)`), so the budget binds first. If the query fails,
   the cache fails closed and refuses to grow.
 - Everything that is not resident streams: one bounded channel (8 × 1024 frames,
   ~130 KB) regardless of file length. No playback path decodes a whole file.
@@ -168,6 +175,7 @@ copied. `sounddeck.json` from older builds is imported once and renamed
 | `master_gain_db` | `0..12 dB` master gain |
 | `link_volumes` | One slider moves both outputs |
 | `preload_hotkey_sounds` | Global RAM default for hotkey sounds |
+| `ram_budget_mb` | RAM budget in MB for decoded audio (`16..=512`, default 32) |
 | `loop_enabled` | Show the loop player |
 | `loop_path` | Loop file reference |
 | `loop_volume` | Linear `0..1` loop level, independent of outputs |
@@ -260,8 +268,9 @@ not depend on decode block size. Sound effects are capped at 20 minutes.
 | `retain` | Per-sound preload toggle |
 
 - **Resident:** trigger plays the cached `Arc` immediately.
-- **Not resident:** `policy::route` decides between a preload job (≤ 30 s, fits the
-  budget) and a stream thread. There is no full-file decode on the trigger path.
+- **Not resident:** `policy::route` decides between a preload job (within the per-sound
+  bound, fits the budget) and a stream thread. There is no full-file decode on the
+  trigger path.
 - **Stream:** a bounded channel feeds a streamed mixer voice; memory is constant.
 - **Duration probe:** a streamed sound with no known length gets one detached
   `sounddeck-probe` worker (`probe_pending` deduplicates, `generation` discards stale

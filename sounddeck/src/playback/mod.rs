@@ -51,7 +51,7 @@ use crate::audio::engine::{effective_gain, Engine};
 use crate::audio::reader::{frames_for_seconds, probe_seconds};
 use crate::audio::stream;
 
-use policy::{Refusal, Route, Usage};
+use policy::{Caps, Refusal, Route, Usage};
 
 /// `skip` value meaning "no sound is being admitted": excludes nothing.
 const NO_SKIP: u64 = u64::MAX;
@@ -204,11 +204,14 @@ pub struct Playback {
     jobs: Sender<Job>,
     events_tx: Sender<PlaybackEvent>,
     events_rx: Receiver<PlaybackEvent>,
+    /// Live RAM caps, derived from the user's budget. The loader reads them per job.
+    caps: Arc<Mutex<Caps>>,
 }
 
 impl Playback {
     pub fn new(engine: Arc<Engine>) -> Self {
         let state = Arc::new(Mutex::new(HashMap::new()));
+        let caps = Arc::new(Mutex::new(Caps::default()));
         // Unbounded on purpose; see the module header.
         let (jobs, jobs_rx) = unbounded::<Job>();
         let (events_tx, events_rx) = unbounded::<PlaybackEvent>();
@@ -217,9 +220,10 @@ impl Playback {
             let state = state.clone();
             let engine = engine.clone();
             let events = events_tx.clone();
+            let loader_caps = caps.clone();
             let spawned = thread::Builder::new()
                 .name("sounddeck-loader".into())
-                .spawn(move || loader_loop(jobs_rx, state, engine, events));
+                .spawn(move || loader_loop(jobs_rx, state, engine, events, loader_caps));
             if let Err(err) = spawned {
                 let _ = events_tx.send(PlaybackEvent::Warning(format!(
                     "Could not start the preload worker: {err}. Sounds will stream from disk."
@@ -233,6 +237,69 @@ impl Playback {
             jobs,
             events_tx,
             events_rx,
+            caps,
+        }
+    }
+
+    /// The live caps, as a copy.
+    pub fn caps(&self) -> Caps {
+        self.caps.lock().map(|caps| *caps).unwrap_or_default()
+    }
+
+    /// Replace the live caps and trim the cache if the new budget is smaller.
+    ///
+    /// A playing sound is never evicted; if usage still exceeds the budget the
+    /// trim finishes on the next admission pass.
+    pub fn set_caps(&self, new_caps: Caps) {
+        if let Ok(mut caps) = self.caps.lock() {
+            *caps = new_caps;
+        }
+        self.trim_to_budget();
+    }
+
+    /// Evict LRU residents until the cache fits the budget.
+    fn trim_to_budget(&self) {
+        let caps = self.caps();
+        let (usage, candidates) = {
+            let Ok(state) = self.state.lock() else {
+                return;
+            };
+            let usage = usage_of(&state, NO_SKIP);
+            if usage.bytes <= caps.total_bytes && usage.sounds <= caps.max_sounds {
+                return;
+            }
+            let mut candidates: Vec<(Instant, u64, usize)> = state
+                .iter()
+                .filter(|(_, entry)| entry.samples.is_some())
+                .map(|(id, entry)| (entry.last_used, *id, entry.bytes()))
+                .collect();
+            candidates.sort_by_key(|(last_used, _, _)| *last_used);
+            (usage, candidates)
+        };
+
+        let mut bytes = usage.bytes;
+        let mut sounds = usage.sounds;
+        let mut victims = Vec::new();
+        for &(_, id, size) in &candidates {
+            if bytes <= caps.total_bytes && sounds <= caps.max_sounds {
+                break;
+            }
+            if self.engine.is_playing_sound(id) {
+                continue;
+            }
+            victims.push(id);
+            bytes = bytes.saturating_sub(size);
+            sounds = sounds.saturating_sub(1);
+        }
+        if victims.is_empty() {
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            for id in &victims {
+                if let Some(entry) = state.get_mut(id) {
+                    entry.samples = None;
+                }
+            }
         }
     }
 
@@ -680,9 +747,10 @@ fn plan_evictions(
     candidates: &[(Instant, u64, usize)],
     need: usize,
     process: Option<usize>,
+    caps: &Caps,
     is_playing: impl Fn(u64) -> bool,
 ) -> Vec<u64> {
-    match policy::admit(usage, need, process) {
+    match policy::admit(usage, need, process, caps) {
         Ok(()) => return Vec::new(),
         Err(reason) if !reason.evictable() => return Vec::new(),
         Err(_) => {}
@@ -697,7 +765,7 @@ fn plan_evictions(
         victims.push(id);
         bytes = bytes.saturating_sub(size);
         sounds = sounds.saturating_sub(1);
-        if policy::admit(Usage { bytes, sounds }, need, process).is_ok() {
+        if policy::admit(Usage { bytes, sounds }, need, process, caps).is_ok() {
             break;
         }
     }
@@ -728,6 +796,7 @@ fn evict_to_fit(
     engine: &Engine,
     need: usize,
     skip: u64,
+    caps: &Caps,
 ) -> Admission {
     let process = policy::process_bytes();
     let (usage, candidates) = {
@@ -735,7 +804,7 @@ fn evict_to_fit(
             return Admission::Unavailable;
         };
         let usage = usage_of(&state, skip);
-        if policy::admit(usage, need, process).is_ok() {
+        if policy::admit(usage, need, process, caps).is_ok() {
             return Admission::Admitted;
         }
         let mut candidates: Vec<(Instant, u64, usize)> = state
@@ -747,11 +816,11 @@ fn evict_to_fit(
         (usage, candidates)
     };
 
-    let victims = plan_evictions(usage, &candidates, need, process, |id| {
+    let victims = plan_evictions(usage, &candidates, need, process, caps, |id| {
         engine.is_playing_sound(id)
     });
     if victims.is_empty() {
-        return verdict(policy::admit(usage, need, process));
+        return verdict(policy::admit(usage, need, process, caps));
     }
 
     // The world may have moved while the engine was queried, so drop only what is
@@ -764,7 +833,7 @@ fn evict_to_fit(
             entry.samples = None;
         }
     }
-    verdict(policy::admit(usage_of(&state, skip), need, process))
+    verdict(policy::admit(usage_of(&state, skip), need, process, caps))
 }
 
 fn loader_loop(
@@ -772,6 +841,7 @@ fn loader_loop(
     state: Arc<Mutex<HashMap<u64, Playable>>>,
     engine: Arc<Engine>,
     events: Sender<PlaybackEvent>,
+    caps: Arc<Mutex<Caps>>,
 ) {
     while let Ok(job) = jobs.recv() {
         // Snapshot under the lock, then do file I/O unlocked.
@@ -797,11 +867,14 @@ fn loader_loop(
             };
             usage_of(&state, job.id)
         };
+        // Copy the live budget out; the guard must not live across the decode.
+        let caps = caps.lock().map(|caps| *caps).unwrap_or_default();
         let route = policy::route(&policy::Request {
             retain: retain && job.retain,
             duration,
             usage,
             process_bytes: policy::process_bytes(),
+            caps,
         });
 
         match route {
@@ -849,11 +922,12 @@ fn loader_loop(
                 match decoded {
                     Ok(audio) => {
                         let bytes = audio.samples.len() * policy::SAMPLE_BYTES;
-                        let (keep, refusal) = match evict_to_fit(&state, &engine, bytes, job.id) {
-                            Admission::Admitted => (true, None),
-                            Admission::Refused(reason) => (false, Some(reason)),
-                            Admission::Unavailable => continue,
-                        };
+                        let (keep, refusal) =
+                            match evict_to_fit(&state, &engine, bytes, job.id, &caps) {
+                                Admission::Admitted => (true, None),
+                                Admission::Refused(reason) => (false, Some(reason)),
+                                Admission::Unavailable => continue,
+                            };
                         let pending;
                         let mut completed = None;
                         {
@@ -1031,10 +1105,12 @@ mod tests {
     fn a_long_sound_is_refused() {
         let dir = temp_dir("long");
         let path = dir.join("long.wav");
-        write_wav(&path, 40);
+        write_wav(&path, 60);
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
+        // A 16 MB budget holds ~41 s, so the 60 s sound can never fit.
+        playback.set_caps(policy::Caps::from_budget_mb(16));
         playback.register(1, path, 1.0, 0.0);
         playback.set_retain(1, true);
 
@@ -1359,6 +1435,7 @@ mod tests {
 
     #[test]
     fn eviction_takes_the_oldest_buffers_until_the_new_one_fits() {
+        let caps = policy::Caps::default();
         let resident = [(1u64, 8 * MIB), (2, 8 * MIB), (3, 8 * MIB)];
         let usage = Usage {
             bytes: 24 * MIB,
@@ -1366,32 +1443,33 @@ mod tests {
         };
         let need = 10 * MIB; // 24 + 10 > 32, 16 + 10 fits.
 
-        let victims = plan_evictions(usage, &lru(&resident), need, Some(0), |_| false);
+        let victims = plan_evictions(usage, &lru(&resident), need, Some(0), &caps, |_| false);
         assert_eq!(victims, vec![1], "only the oldest buffer has to go");
 
         // The same pass with the oldest busy playing takes the next one.
-        let victims = plan_evictions(usage, &lru(&resident), need, Some(0), |id| id == 1);
+        let victims = plan_evictions(usage, &lru(&resident), need, Some(0), &caps, |id| id == 1);
         assert_eq!(victims, vec![2]);
 
         // Nothing to free when the sound already fits.
-        let victims = plan_evictions(usage, &lru(&resident), MIB, Some(0), |_| false);
+        let victims = plan_evictions(usage, &lru(&resident), MIB, Some(0), &caps, |_| false);
         assert!(victims.is_empty());
     }
 
     #[test]
     fn eviction_counts_the_sound_cap_as_well_as_the_bytes() {
+        let caps = policy::Caps::default();
         let resident = [(1u64, MIB), (2, MIB), (3, MIB)];
         let usage = Usage {
             bytes: 16 * MIB,
             sounds: policy::RETAINED_SOUND_CAP,
         };
         assert_eq!(
-            policy::admit(usage, MIB, Some(0)),
+            policy::admit(usage, MIB, Some(0), &caps),
             Err(Refusal::SoundCap),
             "the count cap is what makes this fail"
         );
 
-        let victims = plan_evictions(usage, &lru(&resident), MIB, Some(0), |_| false);
+        let victims = plan_evictions(usage, &lru(&resident), MIB, Some(0), &caps, |_| false);
         assert_eq!(victims, vec![1]);
         // Accounting after the eviction: one sound fewer, byte total reduced.
         assert_eq!(
@@ -1401,7 +1479,8 @@ mod tests {
                     sounds: usage.sounds - 1
                 },
                 MIB,
-                Some(0)
+                Some(0),
+                &caps
             ),
             Ok(())
         );
@@ -1409,16 +1488,17 @@ mod tests {
 
     #[test]
     fn eviction_gives_up_when_the_process_ceiling_is_the_reason() {
+        let caps = policy::Caps::default();
         let resident = [(1u64, MIB), (2, MIB)];
         let usage = Usage {
             bytes: 2 * MIB,
             sounds: 2,
         };
-        let pinned = Some(policy::PROCESS_CEILING);
+        let pinned = Some(caps.process_ceiling);
 
         // The ceiling is measured once per pass, so dropping our own buffers
         // cannot move the verdict: the pass must not evict anything for it.
-        let victims = plan_evictions(usage, &lru(&resident), MIB, pinned, |_| false);
+        let victims = plan_evictions(usage, &lru(&resident), MIB, pinned, &caps, |_| false);
         assert!(
             victims.is_empty(),
             "a process-ceiling refusal must not empty the cache"
@@ -1430,7 +1510,8 @@ mod tests {
                     sounds: 0
                 },
                 MIB,
-                pinned
+                pinned,
+                &caps
             ),
             Err(Refusal::ProcessCeiling)
         );
@@ -1454,7 +1535,13 @@ mod tests {
         let state = Mutex::new(entries);
 
         // Larger than one sound may ever be, so no eviction can help.
-        let admission = evict_to_fit(&state, &engine, policy::PER_SOUND_RETAIN_BYTES + 1, 99);
+        let admission = evict_to_fit(
+            &state,
+            &engine,
+            policy::Caps::default().per_sound_bytes + 1,
+            99,
+            &policy::Caps::default(),
+        );
         assert_eq!(admission, Admission::Refused(Refusal::TooLarge));
 
         let state = state.lock().unwrap();
@@ -1477,11 +1564,13 @@ mod tests {
         let too_long = dir.join("too-long.wav");
         let last = dir.join("last.wav");
         write_wav(&first, 1);
-        write_wav(&too_long, 40);
+        write_wav(&too_long, 60);
         write_wav(&last, 1);
 
         let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
         let playback = Playback::new(engine);
+        // A 16 MB budget holds ~41 s, so the 60 s sound can never fit.
+        playback.set_caps(policy::Caps::from_budget_mb(16));
         playback.register(41, first, 1.0, 0.0);
         playback.register(42, too_long, 1.0, 0.0);
         playback.register(43, last, 1.0, 0.0);
@@ -1558,7 +1647,13 @@ mod tests {
 
         let state = Mutex::new(entries);
         assert_eq!(
-            evict_to_fit(&state, &engine, bytes, admitted_id),
+            evict_to_fit(
+                &state,
+                &engine,
+                bytes,
+                admitted_id,
+                &policy::Caps::default()
+            ),
             Admission::Admitted
         );
 
@@ -1588,5 +1683,34 @@ mod tests {
                 .count(),
             policy::RETAINED_SOUND_CAP
         );
+    }
+
+    #[test]
+    fn shrinking_the_budget_evicts_lru_buffers() {
+        let engine = Arc::new(Engine::new(1.0, 1.0, 0.0));
+        let playback = Playback::new(engine);
+        // 8 buffers of 4 MB = 32 MB, each older than the next.
+        {
+            let mut state = playback.state.lock().unwrap();
+            let base = Instant::now();
+            for id in 0..8u64 {
+                let mut entry = Playable::new(PathBuf::from(format!("{id}.wav")), 1.0, 0.0);
+                entry.samples = Some(Arc::new(vec![0.0f32; 1024 * 1024]));
+                entry.last_used = base - Duration::from_secs(100 - id);
+                state.insert(id, entry);
+            }
+        }
+        assert_eq!(playback.cache_usage().bytes, 32 * MIB);
+
+        playback.set_caps(policy::Caps::from_budget_mb(16));
+
+        let usage = playback.cache_usage();
+        assert!(
+            usage.bytes <= 16 * MIB,
+            "the cache must fit the new budget, got {} MB",
+            usage.bytes / MIB
+        );
+        assert!(!playback.info(0).loaded, "the oldest buffer goes first");
+        assert!(playback.info(7).loaded, "the newest buffer stays");
     }
 }

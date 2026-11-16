@@ -111,7 +111,7 @@ specification:**
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
 | FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
-| FR-5.3.11 | Decoded audio retained in memory MUST stay within 32 MB and 16 sounds. A single sound longer than 30 s is never preloaded; it plays from disk and the log says why. A sound the cache cannot admit MUST NOT evict anything, MUST be skipped while the rest of the preload batch continues, and its refusal MUST be logged once per attempt. |
+| FR-5.3.11 | Decoded audio retained in memory MUST stay within the RAM budget and 16 sounds. The budget is a setting (`ram_budget_mb`, default 32 MB, range 16–512 MB). A single sound may use the whole budget, but never more than 128 MB, so one trigger cannot spike the process. A sound the cache cannot admit MUST NOT evict anything, MUST be skipped while the rest of the preload batch continues, and its refusal MUST be logged once per attempt. |
 | FR-5.3.12 | A sound that is not resident MUST stream from disk through a bounded channel. It MUST NOT be fully decoded into memory in order to be played once. |
 | FR-5.3.13 | The stream channel MUST default to 8 chunks of 1024 frames (~170 ms) and MUST be raised to 16 only if the `--stats` underrun counter or a listening test shows cracks. |
 | FR-5.3.14 | SoundDeck MUST NOT create, rename, move or delete audio files. Renaming a card or removing a sound changes the board only. |
@@ -197,7 +197,7 @@ specification:**
 | --- | --- |
 | FR-5.9.1 | Settings MUST replace the board in the same window and MUST have four tabs: Playback, Appearance, Window and General. General MUST be pinned at the bottom of the rail. |
 | FR-5.9.2 | Controls that belong to the board (devices, output volumes, link, master gain, RAM summary) MUST NOT be duplicated in Settings. Settings MAY show the same state as read-only status. |
-| FR-5.9.3 | Playback MUST have three sections: **Looping** (loop on/off, loop file, Monitor/Cable routing — one section), **Memory** (RAM preloading, RAM-state visibility) and **Hotkeys** (stop-all on/off plus its key row). |
+| FR-5.9.3 | Playback MUST have three sections: **Looping** (loop on/off, loop file, Monitor/Cable routing — one section), **Memory** (RAM preloading, RAM-state visibility, RAM budget) and **Hotkeys** (stop-all on/off plus its key row). |
 | FR-5.9.4 | Appearance MUST have two sections: **Theme** (theme picker, reload) and **Animation** (motion). |
 | FR-5.9.5 | Window MUST have three sections: **System tray** (minimize to tray), **Sidebar** (master-gain visibility) and **Tab navigation** (`Ctrl+Tab` cycling). |
 | FR-5.9.6 | General MUST have **Configuration** (config folder, export, import), **Reset** (reset all settings, confirmed, near the bottom), **About** (name, version, licence, accessibility note) and **Support** (project links, author credit). |
@@ -264,6 +264,7 @@ specification:**
 | `master_gain_db` | f32 | 0.0 | `0..=12` |
 | `link_volumes` | bool | true | Sliders move together |
 | `preload_hotkey_sounds` | bool | true | Default for new hotkey sounds |
+| `ram_budget_mb` | u32 | 32 | RAM budget in MB for decoded audio, clamped `16..=512` (FR-5.3.11) |
 | `loop_enabled` | bool | false | Shows the loop card |
 | `loop_path` | string? | null | Same path rules as sounds |
 | `loop_volume` | f32 | 1.0 | Independent of slots |
@@ -445,7 +446,7 @@ Rules that enforce them:
 | NFR-8.2.3 | 40 MB is an aspiration. It is not reachable with eframe/glow and requires a different UI stack (§13). |
 | NFR-8.2.4 | RAM-preloaded sounds count against the budget; the loop never does (streamed). |
 | NFR-8.2.5 | No decoded buffer may be held after a sound is no longer retained. |
-| NFR-8.2.6 | Retained decoded audio ≤ 32 MB and ≤ 16 sounds; the process refuses work that would cross its commit ceiling. Measured after hardening. |
+| NFR-8.2.6 | Retained decoded audio ≤ the RAM budget (default 32 MB) and ≤ 16 sounds; the process refuses work that would cross its commit ceiling. The ceiling scales with the budget, so the budget binds first. Measured after hardening. |
 | NFR-8.2.7 | The loop is excluded from these caps: it is streamed, not retained. |
 | NFR-8.2.8 | One-shot playback is also excluded: streamed voices hold one bounded channel (130 KB) regardless of file length. No playback path decodes a whole file into RAM. |
 
@@ -502,7 +503,7 @@ Rules that enforce them:
 | Keyboard hook blocked | Log entry; app remains usable with the board and tray menu. |
 | Hotkey conflict | The capture dialog refuses the combination and names its owner; a conflict found on load, tab switch or stop-all change unbinds the losing sound (hotkey cleared, RAM off) and logs it. |
 | Blocked chord | Capture refuses it with `<chord> is a system shortcut and can't be used` and saves nothing; one found in the config is unbound at load (sound or stop-all), the sound is kept, and a warning is logged (FR-5.7.11). |
-| RAM preload refused | The sound streams from disk and the log says so once per attempt: `"<name>" is too big; Streaming from disk` for the size caps (per-sound bytes, 32 MB, 125 MB ceiling), `"<name>" is too long; Streaming from disk` over 30 s, `"<name>" has no audio` for an empty decode. Nothing is evicted for a refusal the cache cannot pay for (FR-5.3.11). |
+| RAM preload refused | The sound streams from disk and the log says so once per attempt: `"<name>" is too big; Streaming from disk` for the size caps (per-sound bytes, the RAM budget, the process ceiling), `"<name>" is too long; Streaming from disk` when the sound cannot fit the per-sound bound, `"<name>" has no audio` for an empty decode. Nothing is evicted for a refusal the cache cannot pay for (FR-5.3.11). |
 | Theme id missing | Graphite is used, a warning names the missing id and the available ones, and the stored id is corrected to `graphite` (FR-5.10.8). |
 
 ## 10. Non-goals

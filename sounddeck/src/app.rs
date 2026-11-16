@@ -694,6 +694,7 @@ impl App {
         engine.set_loop_outputs(cfg.loop_on_monitor, cfg.loop_on_cable);
         link_output_volumes(&mut cfg);
         let playback = Arc::new(Playback::new(engine.clone()));
+        playback.set_caps(caps_from_settings(&cfg));
 
         register_sounds(&playback, &sounds);
 
@@ -1627,14 +1628,15 @@ impl App {
     fn playback_stats(&mut self) -> Option<RamState> {
         if !self.playback_stats.fresh {
             let usage = self.playback.cache_usage();
+            let caps = self.playback.caps();
             self.playback_stats.ram = self.ram_summary();
             self.playback_stats.usage = usage;
             self.playback_stats.label = format!(
                 "{} of {} MB - {} of {} sounds",
                 usage.bytes / (1024 * 1024),
-                policy::RETAINED_BYTES_CAP / (1024 * 1024),
+                caps.total_bytes / (1024 * 1024),
                 usage.sounds,
-                policy::RETAINED_SOUND_CAP
+                caps.max_sounds
             );
             self.playback_stats.fresh = true;
         }
@@ -2132,6 +2134,8 @@ impl App {
             .set_master(Slot::Monitor, self.cfg.monitor_volume);
         self.engine.set_master(Slot::Cable, self.cfg.cable_volume);
         self.engine.set_master_gain_db(self.cfg.master_gain_db);
+        // A reset or import can change the RAM budget; re-derive the loader caps.
+        self.playback.set_caps(caps_from_settings(&self.cfg));
         self.engine.set_loop_volume(self.cfg.loop_volume);
         self.engine
             .set_loop_outputs(self.cfg.loop_on_monitor, self.cfg.loop_on_cable);
@@ -4112,6 +4116,39 @@ impl App {
                 self.cfg.show_ram_state = show_state;
                 self.mark_dirty();
             }
+
+            settings_divider(ui);
+            // The budget is the single limit the loader reads. Changing it trims
+            // the cache in place, so the readout below is honest next frame.
+            let mut budget = self.cfg.ram_budget_mb;
+            let mut budget_changed = false;
+            settings_value(ui, "RAM budget", SETTINGS_THEME_W, |ui| {
+                budget_changed = ui
+                    .add(
+                        egui::Slider::new(
+                            &mut budget,
+                            model::RAM_BUDGET_MIN_MB..=model::RAM_BUDGET_MAX_MB,
+                        )
+                        .step_by(8.0)
+                        .suffix(" MB"),
+                    )
+                    .changed();
+            });
+            if budget_changed {
+                self.cfg.ram_budget_mb = budget;
+                self.playback.set_caps(policy::Caps::from_budget_mb(budget));
+                self.invalidate_playback_stats();
+                self.mark_dirty();
+            }
+            let usage = self.playback_stats.usage;
+            settings_detail(
+                ui,
+                format!(
+                    "Using {} of {} MB",
+                    usage.bytes / (1024 * 1024),
+                    self.cfg.ram_budget_mb
+                ),
+            );
         });
 
         settings_group(ui, "Hotkeys", |ui| {
@@ -7670,6 +7707,11 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
     };
     let response = response.on_hover_text(tooltip);
     response.clicked()
+}
+
+/// The one place settings become loader caps.
+fn caps_from_settings(cfg: &storage::Settings) -> policy::Caps {
+    policy::Caps::from_budget_mb(cfg.ram_budget_mb)
 }
 
 fn format_gain_db(db: f32) -> String {

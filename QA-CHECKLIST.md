@@ -184,10 +184,11 @@ already parked and waiting.
 ## 14. RAM / preload behaviour
 
 - [x] Settings → Playback → **Memory → Show RAM state ON** → cards show chips; toolbar pill shows counts; all reflect **actual** state (loaded vs streaming), not intent. The **Cache** status card mirrors the counts.
-- [x] Add a **> 30 s** file with a hotkey → plays streamed; log says why it isn't preloaded; chip consistent.
-- [ ] Add **17+ hotkey sounds** → cache stops at 16 sounds / 32 MB; the excess streams and plays fine; log explains; LRU = least-recently-used gets evicted first; **playing sound is never evicted**. [untested ]
-- [ ] **Skip-and-continue (B1)**: with the RAM pill, load a batch that contains **one** file that can never fit (a 45 s file, or one bigger than the 32 MB cache) → the rest of the batch still preloads (chips fill), only the over-budget sound stays on disk, and it is logged **once** — re-asserting the same retention (e.g. clicking the same tab again) does not re-decode or re-log it; only a real change of the per-sound RAM flag retries.
-- [ ] The refusal wording reads `"name" is too big; Streaming from disk` for the size caps, `"name" is too long; Streaming from disk` for the >30 s case, and `"name" has no audio` for an empty/corrupt file (B2).
+- [ ] **RAM budget** slider: set 16 MB → the cache trims to 16 MB (LRU buffers drop, a playing sound keeps its buffer); set 512 MB → longer files preload; the `Using X of Y MB` detail and the Cache line follow; the value survives a restart.
+- [ ] Add a file longer than the per-sound bound (over ~87 s at the default 32 MB budget) with a hotkey → plays streamed; log says why it isn't preloaded; chip consistent.
+- [ ] Add **17+ hotkey sounds** → cache stops at 16 sounds / the budget; the excess streams and plays fine; log explains; LRU = least-recently-used gets evicted first; **playing sound is never evicted**. [untested ]
+- [ ] **Skip-and-continue (B1)**: with the RAM pill, load a batch that contains **one** file that can never fit (one longer than the per-sound bound, or bigger than the budget) → the rest of the batch still preloads (chips fill), only the over-budget sound stays on disk, and it is logged **once** — re-asserting the same retention (e.g. clicking the same tab again) does not re-decode or re-log it; only a real change of the per-sound RAM flag retries.
+- [ ] The refusal wording reads `"name" is too big; Streaming from disk` for the size caps, `"name" is too long; Streaming from disk` for a sound past the per-sound bound, and `"name" has no audio` for an empty/corrupt file (B2).
 - [x] Context menu RAM block (hotkey sounds): **Keep in RAM** / **Play from disk** / **Reload in RAM** do what they say; chip updates.
 - [x] Switch tabs → other tab's sounds drop out of RAM (chip/pill counts change).
 
