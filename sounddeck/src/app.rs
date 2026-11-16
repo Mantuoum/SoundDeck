@@ -36,6 +36,10 @@ use crate::ui::volume;
 const CARD_HEIGHT: f32 = 112.0;
 const ROW_HEIGHT: f32 = 46.0;
 const SIDEBAR_WIDTH: f32 = 300.0;
+/// Title-bar height. The window buttons are this tall so a hover has no gap.
+const TITLEBAR_HEIGHT: f32 = 38.0;
+/// Window-button width. The three are adjacent, so the hover fills the corner.
+const WINDOW_BUTTON_W: f32 = 36.0;
 
 // Board metrics (B4). The toolbar and the grid both size themselves from
 // `board_content_width`, so the RAM pill and the last column end on the same
@@ -2560,7 +2564,7 @@ impl App {
             );
 
             // Browser-style tabs live in the title bar, after the app name.
-            let buttons_width = 116.0;
+            let buttons_width = 3.0 * WINDOW_BUTTON_W;
             let tabs_width = (ui.available_width() - buttons_width - 10.0).max(90.0);
             ui.add_space(16.0);
             let tabs = ui.allocate_ui_with_layout(
@@ -2577,6 +2581,9 @@ impl App {
             tabs_rect = tabs.response.rect;
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                // Caption buttons sit side by side with no gap, so a hover fills
+                // its cell edge to edge.
+                ui.spacing_mut().item_spacing.x = 0.0;
                 if window_button(
                     ui,
                     WindowButton::Close,
@@ -2606,7 +2613,6 @@ impl App {
                     }
                 }
             });
-            ui.add_space(6.0);
         });
 
         // Dragging or double-clicking a tab must not move/maximize the window.
@@ -5786,19 +5792,22 @@ impl eframe::App for App {
         self.tick(ctx);
 
         let screen = ctx.screen_rect();
-        let titlebar_rect = Rect::from_min_size(screen.min, Vec2::new(screen.width(), 38.0));
+        let titlebar_rect =
+            Rect::from_min_size(screen.min, Vec2::new(screen.width(), TITLEBAR_HEIGHT));
         let status_rect = Rect::from_min_max(
             Pos2::new(screen.left(), screen.bottom() - 34.0),
             screen.right_bottom(),
         );
 
         egui::TopBottomPanel::top("titlebar")
-            .exact_height(38.0)
-            .frame(
-                Frame::NONE
-                    .fill(theme::panel_deep())
-                    .inner_margin(Margin::symmetric(12, 0)),
-            )
+            .exact_height(TITLEBAR_HEIGHT)
+            .frame(Frame::NONE.fill(theme::panel_deep()).inner_margin(Margin {
+                left: 12,
+                // No right margin: the window buttons reach the window edge.
+                right: 0,
+                top: 0,
+                bottom: 0,
+            }))
             .show(ctx, |ui| self.title_bar(ctx, ui));
 
         egui::TopBottomPanel::bottom("statusbar")
@@ -8032,7 +8041,9 @@ enum WindowButton {
 }
 
 fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 28.0), Sense::click());
+    // The full title-bar height, so a highlight covers top to bottom with no gap.
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(WINDOW_BUTTON_W, TITLEBAR_HEIGHT), Sense::click());
     let hovered = response.hovered();
     let close = matches!(kind, WindowButton::Close);
     if hovered {

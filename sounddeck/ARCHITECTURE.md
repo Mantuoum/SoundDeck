@@ -458,9 +458,10 @@ above-normal so audio still meets its deadlines.
 
 ### Board
 
-- **Title bar:** logo, library tabs, window buttons; draggable except over tabs. A window
-  button highlights its whole cell, square, like a native title-bar button — not a rounded
-  card hover (minimize/maximize use the muted card fill, close uses red).
+- **Title bar:** logo, library tabs, window buttons; draggable except over tabs. The three
+  window buttons are contiguous, full title-bar height, and flush with the right edge; a
+  hover fills the whole cell (square, no inset), grey for minimize/maximize and red for
+  close — not a rounded card hover.
 - **Sidebar:** scrollable part is Load sounds, layout switch, Monitor/Cable devices +
   volumes + link, master gain (optional), **Stop all** button (when its hotkey is
   enabled; the key itself is set in Settings), loop card (when enabled); the footer below
