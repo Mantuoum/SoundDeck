@@ -9,13 +9,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 use super::resample::StereoResampler;
@@ -25,7 +24,7 @@ const MAX_DECODE_ERRORS: usize = 64;
 
 struct Source {
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     track_id: u32,
 }
 
@@ -39,28 +38,31 @@ impl Source {
             hint.with_extension(ext);
         }
 
-        let probed = symphonia::default::get_probe()
-            .format(
+        // Gapless now lives on `AudioDecoderOptions` (on by default); the format
+        // options only tune probing. `probe` returns the reader directly.
+        let format = symphonia::default::get_probe()
+            .probe(
                 &hint,
                 stream,
-                &FormatOptions {
-                    enable_gapless: true,
-                    ..Default::default()
-                },
-                &MetadataOptions::default(),
+                FormatOptions::default(),
+                MetadataOptions::default(),
             )
             .with_context(|| format!("Unsupported or corrupt audio file: {}", path.display()))?;
 
-        let format = probed.format;
         let (track_id, params) = {
             let track = format
-                .default_track()
-                .filter(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+                .default_track(TrackType::Audio)
                 .ok_or_else(|| anyhow::anyhow!("No decodable audio track"))?;
-            (track.id, track.codec_params.clone())
+            let params = track
+                .codec_params
+                .as_ref()
+                .and_then(|params| params.audio())
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("No decodable audio track"))?;
+            (track.id, params)
         };
         let decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
             .context("No decoder for this audio format")?;
 
         Ok(Self {
@@ -75,7 +77,7 @@ impl Source {
         let seek = self.format.seek(
             SeekMode::Accurate,
             SeekTo::Time {
-                time: Time::new(0, 0.0),
+                time: Time::ZERO,
                 track_id: Some(self.track_id),
             },
         );
@@ -117,20 +119,17 @@ impl PcmReader {
     /// Appends the next decoded block to `out`. Returns `false` at end of file.
     pub fn next_block(&mut self, out: &mut Vec<f32>) -> Result<bool> {
         loop {
+            // `Ok(None)` is the end of the media now, not an `UnexpectedEof` error.
             let packet = match self.source.format.next_packet() {
-                Ok(packet) => packet,
-                Err(SymphoniaError::IoError(err))
-                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    return Ok(false);
-                }
+                Ok(Some(packet)) => packet,
+                Ok(None) => return Ok(false),
                 Err(SymphoniaError::ResetRequired) => {
                     self.reopen()?;
                     continue;
                 }
                 Err(err) => return Err(err).context("Failed while reading audio packets"),
             };
-            if packet.track_id() != self.source.track_id {
+            if packet.track_id != self.source.track_id {
                 continue;
             }
 
@@ -158,9 +157,9 @@ impl PcmReader {
                 Err(err) => return Err(err).context("Failed while decoding audio"),
             };
 
-            let spec = *decoded.spec();
-            let channels = spec.channels.count();
-            let rate = spec.rate;
+            let spec = decoded.spec();
+            let channels = spec.channels().count();
+            let rate = spec.rate();
             if channels == 0 || rate == 0 {
                 continue;
             }
@@ -173,17 +172,17 @@ impl PcmReader {
                 self.spec = Some((rate, channels));
             }
 
-            let frames = decoded.capacity().max(decoded.frames()) as u64;
+            let frames = decoded.frames();
             if frames == 0 {
                 continue;
             }
-            let mut buffer = SampleBuffer::<f32>::new(frames, spec);
-            buffer.copy_interleaved_ref(decoded);
+            let mut interleaved = Vec::with_capacity(frames * channels);
+            decoded.copy_to_vec_interleaved(&mut interleaved);
 
             let Some(resampler) = self.resampler.as_mut() else {
                 bail!("internal: resampler missing");
             };
-            out.extend_from_slice(&resampler.push(buffer.samples()));
+            out.extend_from_slice(&resampler.push(&interleaved));
             return Ok(true);
         }
     }
@@ -220,23 +219,20 @@ pub fn probe_seconds(path: &Path) -> Option<f32> {
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
-    let probed = symphonia::default::get_probe()
-        .format(
+    let format = symphonia::default::get_probe()
+        .probe(
             &hint,
             stream,
-            &FormatOptions {
-                enable_gapless: true,
-                ..Default::default()
-            },
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .ok()?;
-    let track = probed.format.default_track()?;
-    let params = &track.codec_params;
-    let frames = params.n_frames?;
-    let time_base = params.time_base?;
-    let time = time_base.calc_time(frames);
-    let seconds = time.seconds as f64 + time.frac;
+    // The track carries the duration and the timebase that converts it to
+    // seconds; the codec parameters no longer hold a frame count.
+    let track = format.default_track(TrackType::Audio)?;
+    let duration = track.duration?;
+    let time_base = track.time_base?;
+    let seconds = time_base.calc_duration(duration)?.as_secs_f64();
     if !seconds.is_finite() || seconds <= 0.0 {
         return None;
     }
