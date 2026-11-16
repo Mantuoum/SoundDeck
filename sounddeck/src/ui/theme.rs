@@ -530,7 +530,16 @@ fn install_fonts(ctx: &egui::Context) {
 
 pub fn apply_style(ctx: &egui::Context) {
     let p = palette();
-    let mut style = (*ctx.style()).clone();
+    // egui 0.37 keeps one style per theme and follows the OS by default. Pin the
+    // theme to the palette's light flag and style both slots, so a system theme
+    // change can never swap our colours out.
+    let theme = if p.is_light {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    ctx.set_theme(theme);
+    let mut style = (*ctx.style_of(theme)).clone();
     let mut visuals = if p.is_light {
         egui::Visuals::light()
     } else {
@@ -615,7 +624,8 @@ pub fn apply_style(ctx: &egui::Context) {
         egui::TextStyle::Monospace,
         FontId::new(12.5, FontFamily::Monospace),
     );
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }
 
 pub fn alpha(color: Color32, a: u8) -> Color32 {
@@ -798,11 +808,11 @@ mod tests {
         let ctx = eframe::egui::Context::default();
         apply_style(&ctx);
         assert_eq!(
-            ctx.style().visuals.panel_fill,
+            ctx.style_of(ctx.theme()).visuals.panel_fill,
             Color32::from_rgb(0x65, 0x43, 0x21)
         );
         assert_eq!(
-            ctx.style().visuals.override_text_color,
+            ctx.style_of(ctx.theme()).visuals.override_text_color,
             Some(palette().text)
         );
     }
@@ -1084,11 +1094,11 @@ mod tests {
         let _registry = registry_guard();
         let ctx = eframe::egui::Context::default();
         assert!(
-            ctx.style().interaction.selectable_labels,
+            ctx.style_of(ctx.theme()).interaction.selectable_labels,
             "egui's default is selectable, so this test can only pass through apply_style"
         );
         apply_style(&ctx);
-        assert!(!ctx.style().interaction.selectable_labels);
+        assert!(!ctx.style_of(ctx.theme()).interaction.selectable_labels);
     }
 
     /// The snapshot cache must not hide a theme switch made on the same thread.

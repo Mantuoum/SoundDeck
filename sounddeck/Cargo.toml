@@ -15,7 +15,7 @@ winres = "0.1"
 [dependencies]
 anyhow = "1"
 crossbeam-channel = "0.5"
-eframe = { version = "0.31.1", default-features = false, features = ["glow", "default_fonts"] }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
 png = "0.18"
 rfd = "0.18"
 serde = { version = "1", features = ["derive"] }

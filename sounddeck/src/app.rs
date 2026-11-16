@@ -2138,12 +2138,17 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("import_modal"),
+            Id::unique("import_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
             &mut close,
             |ui, dismiss| {
-                modal_header(ui, "Import configuration", Id::new("import_close"), dismiss);
+                modal_header(
+                    ui,
+                    "Import configuration",
+                    Id::unique("import_close"),
+                    dismiss,
+                );
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(format!(
@@ -2253,7 +2258,7 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("reset_settings_modal"),
+            Id::unique("reset_settings_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
             &mut close,
@@ -2261,7 +2266,7 @@ impl App {
                 modal_header(
                     ui,
                     "Reset all settings",
-                    Id::new("reset_settings_close"),
+                    Id::unique("reset_settings_close"),
                     dismiss,
                 );
                 ui.add_space(6.0);
@@ -2550,7 +2555,11 @@ impl App {
 
     fn title_bar(&mut self, ctx: &egui::Context, ui: &mut Ui) {
         let bar_rect = ui.max_rect();
-        let drag = ui.interact(bar_rect, Id::new("titlebar_drag"), Sense::click_and_drag());
+        let drag = ui.interact(
+            bar_rect,
+            Id::unique("titlebar_drag"),
+            Sense::click_and_drag(),
+        );
         let mut tabs_rect = Rect::NOTHING;
 
         ui.horizontal_centered(|ui| {
@@ -2682,7 +2691,7 @@ impl App {
                         paint_link_row(ui, link_rect, self.cfg.link_volumes);
                         let link_resp = ui.interact(
                             Rect::from_center_size(link_rect.center(), Vec2::new(80.0, 24.0)),
-                            Id::new("link_volumes"),
+                            Id::unique("link_volumes"),
                             Sense::click(),
                         );
                         if link_resp.clicked() {
@@ -2802,7 +2811,7 @@ impl App {
         ui.painter().rect(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            anim::hover_fill(ui, Id::new("stop_all_card"), rect),
+            anim::hover_fill(ui, Id::unique("stop_all_card"), rect),
             Stroke::new(1.0_f32, theme::border_soft()),
             StrokeKind::Inside,
         );
@@ -2843,8 +2852,8 @@ impl App {
         } else {
             1.0
         };
-        let pos = anim::tween(ui, Id::new("layout_pill"), target, 0.09);
-        let smear = anim::tween(ui, Id::new("layout_pill_smear"), target, 0.16);
+        let pos = anim::tween(ui, Id::unique("layout_pill"), target, 0.09);
+        let smear = anim::tween(ui, Id::unique("layout_pill_smear"), target, 0.16);
         let pill = Rect::from_min_size(
             Pos2::new(inner.left() + pos * half, inner.top()),
             Vec2::new(half, inner.height()),
@@ -2869,7 +2878,11 @@ impl App {
                 Vec2::new(half, inner.height()),
             );
             let active = self.cfg.layout == layout;
-            let response = ui.interact(segment, Id::new(("layout_segment", index)), Sense::click());
+            let response = ui.interact(
+                segment,
+                Id::unique(("layout_segment", index)),
+                Sense::click(),
+            );
             if !active && response.hovered() {
                 painter.rect_filled(
                     segment,
@@ -2880,7 +2893,8 @@ impl App {
             let color = if active {
                 Color32::WHITE
             } else {
-                let hover = anim::hover(ui, Id::new(("layout_hover", index)), response.hovered());
+                let hover =
+                    anim::hover(ui, Id::unique(("layout_hover", index)), response.hovered());
                 let base = theme::muted();
                 theme::mix(base, theme::text(), hover * 0.4)
             };
@@ -2947,6 +2961,7 @@ impl App {
         );
         ComboBox::from_id_salt(("device", slot.index()))
             .width(width)
+            .truncate()
             .selected_text(RichText::new(selected_label).size(13.5))
             .show_ui(ui, |ui| {
                 ui.set_min_width(width - 20.0);
@@ -2955,7 +2970,7 @@ impl App {
                     .clicked()
                 {
                     chosen = Some(None);
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 for device in &self.devices {
@@ -2963,7 +2978,7 @@ impl App {
                     let label = device.name.to_string();
                     if ui.selectable_label(active, label).clicked() {
                         chosen = Some(Some(device.id.clone()));
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
                 if self.devices.is_empty() {
@@ -2972,7 +2987,7 @@ impl App {
                 ui.separator();
                 if ui.button("Refresh devices").clicked() {
                     refresh = true;
-                    ui.close_menu();
+                    ui.close();
                 }
             });
 
@@ -3030,7 +3045,7 @@ impl App {
             ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let painter = ui.painter();
 
-        let fill = anim::hover_fill(ui, Id::new("loop_card"), rect);
+        let fill = anim::hover_fill(ui, Id::unique("loop_card"), rect);
         let fill = if active {
             theme::mix(fill, theme::accent(), 0.08)
         } else {
@@ -3077,14 +3092,14 @@ impl App {
 
         let transport = ui.interact(
             transport_rect,
-            Id::new("loop_transport"),
+            Id::unique("loop_transport"),
             if playable || retry || active {
                 Sense::click()
             } else {
                 Sense::hover()
             },
         );
-        let pick = ui.interact(pick_rect, Id::new("loop_pick"), Sense::click());
+        let pick = ui.interact(pick_rect, Id::unique("loop_pick"), Sense::click());
 
         // Transport button: filled accent while playing, outlined otherwise.
         let (bg, fg, stroke) = if active {
@@ -3108,7 +3123,7 @@ impl App {
         );
         let press = anim::press(
             ui,
-            Id::new("loop_transport_press"),
+            Id::unique("loop_transport_press"),
             transport.is_pointer_button_down_on(),
         );
         press_overlay(painter, transport_rect.shrink(1.5), theme::RADIUS_MD, press);
@@ -3139,7 +3154,7 @@ impl App {
         }
 
         // Pick / Locate.
-        let pick_hover = anim::hover(ui, Id::new("loop_pick_hover"), pick.hovered());
+        let pick_hover = anim::hover(ui, Id::unique("loop_pick_hover"), pick.hovered());
         if pick_hover > 0.01 {
             painter.rect_filled(
                 pick_rect.expand(3.0),
@@ -3262,7 +3277,7 @@ impl App {
         volume::bar(
             ui,
             volume_rect,
-            Id::new("loop_volume"),
+            Id::unique("loop_volume"),
             self.cfg.loop_volume,
             |volume| self.set_loop_volume(volume),
             compact,
@@ -3506,7 +3521,7 @@ impl App {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         if !dropped.is_empty() {
@@ -3619,7 +3634,7 @@ impl App {
                                     tabs.push((library.id, rect));
                                     let hover = anim::hover(
                                         ui,
-                                        Id::new(("tab_hover", library.id)),
+                                        Id::unique(("tab_hover", library.id)),
                                         response.hovered(),
                                     );
                                     // Its own tab is a no-op drop, so it never lights up.
@@ -3642,7 +3657,7 @@ impl App {
                                     response.context_menu(|ui| {
                                         if ui.button("Rename...").clicked() {
                                             rename = Some(library.id);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                         if can_delete
                                             && ui
@@ -3653,7 +3668,7 @@ impl App {
                                                 .clicked()
                                         {
                                             delete = Some(library.id);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     });
                                 }
@@ -3916,7 +3931,7 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("delete_library_modal"),
+            Id::unique("delete_library_modal"),
             CONFIRM_MODAL_WIDTH,
             MODAL_MARGIN,
             &mut close,
@@ -3926,7 +3941,7 @@ impl App {
                     library.name,
                     if count == 1 { "" } else { "s" }
                 );
-                modal_header(ui, &title, Id::new("delete_library_close"), dismiss);
+                modal_header(ui, &title, Id::unique("delete_library_close"), dismiss);
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new(
@@ -3949,7 +3964,7 @@ impl App {
                                     .clicked()
                                 {
                                     state.target_id = target.id;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             }
                         });
@@ -4103,7 +4118,7 @@ impl App {
                                     bottom: 2,
                                 })
                                 .text_color(theme::text())
-                                .vertical_align(Align::Center),
+                                .align(Align2::LEFT_CENTER),
                         )
                     })
                     .inner;
@@ -4131,7 +4146,7 @@ impl App {
                         ui.allocate_exact_size(Vec2::new(pill_width, 28.0), Sense::hover());
                     let response = ui.interact(
                         rect,
-                        Id::new("ram_status_pill"),
+                        Id::unique("ram_status_pill"),
                         if enabled {
                             Sense::click()
                         } else {
@@ -4388,7 +4403,7 @@ impl App {
             let mut enabled = self.cfg.loop_enabled;
             if settings_toggle(
                 ui,
-                Id::new("settings_loop_enabled"),
+                Id::unique("settings_loop_enabled"),
                 "Loop a track",
                 &mut enabled,
                 false,
@@ -4403,7 +4418,7 @@ impl App {
                 let mut monitor = self.cfg.loop_on_monitor;
                 if settings_toggle(
                     ui,
-                    Id::new("settings_loop_monitor"),
+                    Id::unique("settings_loop_monitor"),
                     "Send to Monitor",
                     &mut monitor,
                     false,
@@ -4418,7 +4433,7 @@ impl App {
                 let mut cable = self.cfg.loop_on_cable;
                 if settings_toggle(
                     ui,
-                    Id::new("settings_loop_cable"),
+                    Id::unique("settings_loop_cable"),
                     "Send to Cable",
                     &mut cable,
                     false,
@@ -4441,7 +4456,7 @@ impl App {
             let mut on = matches!(ram, Some(RamState::On));
             if settings_toggle(
                 ui,
-                Id::new("settings_ram"),
+                Id::unique("settings_ram"),
                 "Load hotkey sounds into RAM",
                 &mut on,
                 mixed,
@@ -4453,7 +4468,7 @@ impl App {
             let mut show_state = self.cfg.show_ram_state;
             if settings_toggle(
                 ui,
-                Id::new("settings_show_ram"),
+                Id::unique("settings_show_ram"),
                 "Show RAM state",
                 &mut show_state,
                 false,
@@ -4468,17 +4483,24 @@ impl App {
             // the cache in place, so the readout below is honest next frame.
             let mut budget = self.cfg.ram_budget_mb;
             let mut budget_changed = false;
-            settings_value(ui, "RAM budget", SETTINGS_THEME_W, |ui| {
-                budget_changed = ui
-                    .add(
-                        egui::Slider::new(
-                            &mut budget,
-                            model::RAM_BUDGET_MIN_MB..=model::RAM_BUDGET_MAX_MB,
+            let budget_label = format!("RAM budget ({budget} MB)");
+            settings_value(ui, &budget_label, SETTINGS_THEME_W, |ui| {
+                ui.scope(|ui| {
+                    // The rail paints with `widgets.inactive.bg_fill`, which is the
+                    // card colour here; give it the field colour so the track is
+                    // visible on the card.
+                    ui.visuals_mut().widgets.inactive.bg_fill = theme::field();
+                    budget_changed = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut budget,
+                                model::RAM_BUDGET_MIN_MB..=model::RAM_BUDGET_MAX_MB,
+                            )
+                            .step_by(8.0)
+                            .show_value(false),
                         )
-                        .step_by(8.0)
-                        .suffix(" MB"),
-                    )
-                    .changed();
+                        .changed();
+                });
             });
             if budget_changed {
                 self.cfg.ram_budget_mb = budget;
@@ -4501,7 +4523,7 @@ impl App {
             let mut enabled = self.cfg.stop_all_hotkey_enabled;
             if settings_toggle(
                 ui,
-                Id::new("settings_stop_all"),
+                Id::unique("settings_stop_all"),
                 "Stop-all hotkey",
                 &mut enabled,
                 false,
@@ -4609,7 +4631,7 @@ impl App {
             let mut animate = self.cfg.animate_ui;
             if settings_toggle(
                 ui,
-                Id::new("settings_animate"),
+                Id::unique("settings_animate"),
                 "Animate the interface",
                 &mut animate,
                 false,
@@ -4627,7 +4649,7 @@ impl App {
             let mut minimize = self.cfg.minimize_to_tray;
             if settings_toggle(
                 ui,
-                Id::new("settings_minimize_to_tray"),
+                Id::unique("settings_minimize_to_tray"),
                 "Minimize to tray",
                 &mut minimize,
                 false,
@@ -4642,7 +4664,7 @@ impl App {
             let mut show_gain = self.cfg.show_gain_slider;
             if settings_toggle(
                 ui,
-                Id::new("settings_show_gain"),
+                Id::unique("settings_show_gain"),
                 "Show master gain",
                 &mut show_gain,
                 false,
@@ -4657,7 +4679,7 @@ impl App {
             let mut cycle = self.cfg.cycle_tabs_ctrl_tab;
             if settings_toggle_hinted(
                 ui,
-                Id::new("settings_cycle_tabs"),
+                Id::unique("settings_cycle_tabs"),
                 "Cycle tabs with Ctrl+Tab",
                 &mut cycle,
                 false,
@@ -4809,7 +4831,7 @@ impl App {
                         .clicked()
                     {
                         selected = id.clone();
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -4927,12 +4949,12 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("capture_modal"),
+            Id::unique("capture_modal"),
             400.0,
             MODAL_MARGIN,
             &mut close,
             |ui, dismiss| {
-                modal_header(ui, title, Id::new("capture_close"), dismiss);
+                modal_header(ui, title, Id::unique("capture_close"), dismiss);
                 ui.label(RichText::new(subject).size(13.0).color(theme::muted()));
                 ui.add_space(12.0);
 
@@ -5087,12 +5109,12 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("rename_modal"),
+            Id::unique("rename_modal"),
             380.0,
             MODAL_MARGIN,
             &mut close,
             |ui, dismiss| {
-                modal_header(ui, title, Id::new("rename_close"), dismiss);
+                modal_header(ui, title, Id::unique("rename_close"), dismiss);
                 ui.add_space(8.0);
                 let response = ui.add_sized(
                     [ui.available_width(), 34.0],
@@ -5193,12 +5215,12 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("gain_modal"),
+            Id::unique("gain_modal"),
             GAIN_MODAL_WIDTH,
             MODAL_MARGIN,
             &mut close,
             |ui, dismiss| {
-                modal_header(ui, "Set gain", Id::new("gain_close"), dismiss);
+                modal_header(ui, "Set gain", Id::unique("gain_close"), dismiss);
                 ui.add_space(6.0);
                 ui.add(
                     egui::Label::new(RichText::new(name).size(13.0).color(theme::muted()))
@@ -5225,7 +5247,7 @@ impl App {
                     ui.label(RichText::new("Gain").size(12.5).color(theme::muted()));
                     let field = ui.add_sized(
                         [GAIN_FIELD_W, GAIN_FIELD_H],
-                        TextEdit::singleline(&mut gain.text).horizontal_align(Align::RIGHT),
+                        TextEdit::singleline(&mut gain.text).align(Align2::RIGHT_CENTER),
                     );
                     if gain.focus {
                         field.request_focus();
@@ -5291,12 +5313,12 @@ impl App {
         modal_shell(
             ctx,
             content,
-            Id::new("log_modal"),
+            Id::unique("log_modal"),
             520.0,
             MODAL_MARGIN_COMPACT,
             &mut close,
             |ui, dismiss| {
-                modal_header(ui, "Activity log", Id::new("log_close"), dismiss);
+                modal_header(ui, "Activity log", Id::unique("log_close"), dismiss);
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()
                     .max_height(380.0)
@@ -5347,7 +5369,7 @@ impl App {
         }
         let size = Vec2::new(drag.size.x.min(260.0), 64.0);
         let rect = Rect::from_min_size(pointer + Vec2::new(12.0, 12.0), size);
-        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("drag_ghost")));
+        let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("drag_ghost")));
         painter.rect(
             rect,
             CornerRadius::same(theme::RADIUS_LG),
@@ -5381,8 +5403,9 @@ impl App {
         if !hovering || self.drag.is_some() {
             return;
         }
-        let screen = ctx.screen_rect();
-        let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("drop_overlay")));
+        let screen = ctx.content_rect();
+        let painter =
+            ctx.layer_painter(LayerId::new(Order::Foreground, Id::unique("drop_overlay")));
         painter.rect_filled(screen, CornerRadius::ZERO, theme::alpha(theme::bg(), 220));
         painter.rect_stroke(
             screen.shrink(18.0),
@@ -5413,7 +5436,7 @@ impl App {
         let Some(pos) = ctx.pointer_hover_pos() else {
             return;
         };
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let margin = 6.0;
         let left = pos.x <= screen.left() + margin;
         let right = pos.x >= screen.right() - margin;
@@ -5471,7 +5494,7 @@ impl App {
         // Esc is a universal "back": close an open popup first, then the current
         // overlay, cancel a drag, clear a search, and only then stop playback.
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if ctx.memory(|memory| memory.any_popup_open()) {
+            if ctx.any_popup_open() {
                 return;
             }
             if self.show_settings {
@@ -5534,7 +5557,7 @@ impl App {
                 // chord died until the window was clicked (G3). Parking the
                 // focus on an id no widget owns cancels the grant; `update`
                 // clears it again once the pass has painted.
-                ctx.memory_mut(|memory| memory.request_focus(Id::new(TAB_FOCUS_BLOCK)));
+                ctx.memory_mut(|memory| memory.request_focus(Id::unique(TAB_FOCUS_BLOCK)));
                 return;
             }
         }
@@ -5736,7 +5759,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    /// Non-paint work: events, shortcuts, timers, saves. eframe calls this even
+    /// while the window is hidden, and painting is not allowed here.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         // Detect the settings screen opening so its fade starts from zero.
         if self.show_settings && !self.settings_was_open {
@@ -5778,9 +5803,8 @@ impl eframe::App for App {
         // well (taskbar button, Win+D) when the user asked to minimize to tray.
         self.handle_os_minimize(ctx);
 
-        // Nothing on screen: skip the whole paint pass. The idle timer alone
-        // still pays tessellation and a present, which is what kept a hidden
-        // window busier than a visible one.
+        // Nothing on screen: eframe calls `ui` for the root viewport while
+        // minimized in this version, so keep the logic-only path explicit.
         if self.hidden {
             self.hidden_tick(ctx);
             stats::record_frame(frame_start.elapsed(), true, self.last_interval_ms);
@@ -5790,8 +5814,17 @@ impl eframe::App for App {
         self.global_shortcuts(ctx);
         self.handle_resize(ctx);
         self.tick(ctx);
+    }
 
-        let screen = ctx.screen_rect();
+    /// The paint pass. The given `Ui` covers the whole window with no margin.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.quit || self.hidden {
+            return;
+        }
+        let frame_start = Instant::now();
+        let ctx = ui.ctx().clone();
+
+        let screen = ctx.content_rect();
         let titlebar_rect =
             Rect::from_min_size(screen.min, Vec2::new(screen.width(), TITLEBAR_HEIGHT));
         let status_rect = Rect::from_min_max(
@@ -5799,8 +5832,8 @@ impl eframe::App for App {
             screen.right_bottom(),
         );
 
-        egui::TopBottomPanel::top("titlebar")
-            .exact_height(TITLEBAR_HEIGHT)
+        egui::Panel::top("titlebar")
+            .exact_size(TITLEBAR_HEIGHT)
             .frame(Frame::NONE.fill(theme::panel_deep()).inner_margin(Margin {
                 left: 12,
                 // No right margin: the window buttons reach the window edge.
@@ -5808,32 +5841,32 @@ impl eframe::App for App {
                 top: 0,
                 bottom: 0,
             }))
-            .show(ctx, |ui| self.title_bar(ctx, ui));
+            .show(ui, |ui| self.title_bar(&ctx, ui));
 
-        egui::TopBottomPanel::bottom("statusbar")
-            .exact_height(34.0)
+        egui::Panel::bottom("statusbar")
+            .exact_size(34.0)
             .frame(
                 Frame::NONE
                     .fill(theme::panel_deep())
                     .inner_margin(Margin::symmetric(12, 0)),
             )
-            .show(ctx, |ui| self.status_bar(ctx, ui));
+            .show(ui, |ui| self.status_bar(&ctx, ui));
 
         let side = if self.show_settings {
-            egui::SidePanel::left("settings_rail")
+            egui::Panel::left("settings_rail")
                 .resizable(false)
-                .exact_width(200.0)
+                .exact_size(200.0)
                 .frame(Frame::NONE.fill(theme::panel_deep()).inner_margin(Margin {
                     left: 14,
                     right: 14,
                     top: 14,
                     bottom: 16,
                 }))
-                .show(ctx, |ui| self.settings_rail(ui))
+                .show(ui, |ui| self.settings_rail(ui))
         } else {
-            egui::SidePanel::right("sidebar")
+            egui::Panel::right("sidebar")
                 .resizable(false)
-                .exact_width(SIDEBAR_WIDTH)
+                .exact_size(SIDEBAR_WIDTH)
                 .frame(
                     Frame::NONE
                         .fill(theme::panel())
@@ -5846,7 +5879,7 @@ impl eframe::App for App {
                             bottom: 22,
                         }),
                 )
-                .show(ctx, |ui| self.side_panel(ui))
+                .show(ui, |ui| self.side_panel(ui))
         };
 
         // Separator between the rail and the content. Clamp it to the area
@@ -5867,13 +5900,13 @@ impl eframe::App for App {
                     top: 20,
                     bottom: 14,
                 }))
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.painter().with_clip_rect(screen).vline(
                         edge,
                         divider,
                         Stroke::new(1.0_f32, theme::border()),
                     );
-                    self.settings_content(ctx, ui);
+                    self.settings_content(&ctx, ui);
                 })
                 .response
                 .rect
@@ -5884,7 +5917,7 @@ impl eframe::App for App {
                         .fill(theme::bg())
                         .inner_margin(Margin::symmetric(14, 10)),
                 )
-                .show(ctx, |ui| {
+                .show(ui, |ui| {
                     ui.painter().with_clip_rect(screen).vline(
                         edge,
                         divider,
@@ -5900,7 +5933,7 @@ impl eframe::App for App {
 
         // Window chrome: keep it below modals/drop overlays so popups are never
         // crossed by the title/status separators.
-        let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::new("chrome")));
+        let painter = ctx.layer_painter(LayerId::new(Order::Middle, Id::unique("chrome")));
         painter.hline(
             screen.x_range(),
             titlebar_rect.bottom(),
@@ -5918,13 +5951,13 @@ impl eframe::App for App {
             StrokeKind::Inside,
         );
 
-        self.draw_drop_overlay(ctx);
-        self.drag_ghost(ctx);
-        self.modals(ctx);
+        self.draw_drop_overlay(&ctx);
+        self.drag_ghost(&ctx);
+        self.modals(&ctx);
 
         // Undo the focus block a Ctrl+Tab press parked in `global_shortcuts`
         // now that every widget has painted and the grant is cancelled.
-        if ctx.memory(|memory| memory.focused()) == Some(Id::new(TAB_FOCUS_BLOCK)) {
+        if ctx.memory(|memory| memory.focused()) == Some(Id::unique(TAB_FOCUS_BLOCK)) {
             ctx.memory_mut(|memory| memory.stop_text_input());
         }
 
@@ -6405,7 +6438,7 @@ fn settings_hotkey_row(
             // Right-to-left: Set/Change at the row edge, the pill, then Clear.
             if ghost_button_at(
                 ui,
-                Id::new(("settings_hotkey_button", id_salt)),
+                Id::unique(("settings_hotkey_button", id_salt)),
                 if bound { "Change" } else { "Set" },
                 SETTINGS_BUTTON_SIZE,
                 theme::text(),
@@ -6414,13 +6447,13 @@ fn settings_hotkey_row(
             {
                 action = HotkeyRowAction::Capture;
             }
-            if settings_key_pill(ui, Id::new(("settings_hotkey_pill", id_salt)), hotkey) {
+            if settings_key_pill(ui, Id::unique(("settings_hotkey_pill", id_salt)), hotkey) {
                 action = HotkeyRowAction::Capture;
             }
             if bound
                 && ghost_button_at(
                     ui,
-                    Id::new(("settings_hotkey_clear", id_salt)),
+                    Id::unique(("settings_hotkey_clear", id_salt)),
                     "Clear",
                     Vec2::new(SETTINGS_HOTKEY_CLEAR_W, SETTINGS_ROW_H),
                     theme::text(),
@@ -6671,7 +6704,7 @@ fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
     );
     let hover = anim::hover(
         ui,
-        Id::new(("settings_nav", tab.title())),
+        Id::unique(("settings_nav", tab.title())),
         response.hovered(),
     );
     let painter = ui.painter();
@@ -6722,7 +6755,7 @@ fn settings_back(ui: &mut Ui) -> bool {
         Vec2::new(ui.available_width(), SETTINGS_RAIL_ITEM_H),
         Sense::click(),
     );
-    let hover = anim::hover(ui, Id::new("settings_back"), response.hovered());
+    let hover = anim::hover(ui, Id::unique("settings_back"), response.hovered());
     let painter = ui.painter();
     if hover > 0.01 {
         painter.rect_filled(
@@ -6972,7 +7005,7 @@ fn modal_shell(
     body: impl FnOnce(&mut Ui, &mut bool),
 ) {
     let modal = egui::Modal::new(id)
-        .area(centered_modal_area(id, content, ctx.screen_rect()))
+        .area(centered_modal_area(id, content, ctx.content_rect()))
         .backdrop_color(Color32::TRANSPARENT)
         .frame(
             Frame::NONE
@@ -7458,7 +7491,7 @@ fn sound_item(
 
     let hover = anim::hover(
         ui,
-        Id::new((geometry.hover_tag, sound.id)),
+        Id::unique((geometry.hover_tag, sound.id)),
         response.hovered(),
     );
     let (fill, border, width) = sound_surface(hover, ram_active, playing, missing, selected, flash);
@@ -7546,7 +7579,7 @@ fn sound_item(
         ui,
         &painter,
         geometry.pill,
-        ui.id().with((geometry.pill_tag, sound.id)),
+        ui.scope_id().with((geometry.pill_tag, sound.id)),
         sound,
         capture_active,
         geometry.pill_font,
@@ -7560,7 +7593,7 @@ fn sound_item(
             ui,
             &painter,
             chip,
-            ui.id().with((geometry.chip_tag, sound.id)),
+            ui.scope_id().with((geometry.chip_tag, sound.id)),
             sound,
             info,
             geometry.chip_font,
@@ -7574,7 +7607,7 @@ fn sound_item(
         ui,
         &painter,
         geometry.close,
-        ui.id().with((geometry.close_tag, sound.id)),
+        ui.scope_id().with((geometry.close_tag, sound.id)),
     );
     if close.clicked() {
         actions.push(Action::Remove(sound.id));
@@ -7587,7 +7620,7 @@ fn sound_item(
         volume::bar(
             ui,
             volume_rect,
-            ui.id().with((geometry.volume_tag, sound.id)),
+            ui.scope_id().with((geometry.volume_tag, sound.id)),
             sound.volume,
             |v| actions.push(Action::Volume(sound.id, v)),
             geometry.volume_compact,
@@ -7642,7 +7675,7 @@ fn sound_context_menu(
                     }
                     if ui.button(&library.name).clicked() {
                         actions.push(Action::MoveSelected(library.id));
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             });
@@ -7653,38 +7686,38 @@ fn sound_context_menu(
             .clicked()
         {
             actions.push(Action::RemoveSelected);
-            ui.close_menu();
+            ui.close();
         }
         return;
     }
 
     if ui.button("Play").clicked() {
         actions.push(Action::Play(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Stop").clicked() {
         actions.push(Action::Stop(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     // One entry opens the trim dialog; the dialog is the only place the value
     // is shown (FR-5.3.17).
     if ui.button("Set gain...").clicked() {
         actions.push(Action::SetGain(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     if ui.button("Rename...").clicked() {
         actions.push(Action::Rename(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Set hotkey...").clicked() {
         actions.push(Action::SetHotkey(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     if sound.hotkey.is_some() && ui.button("Clear hotkey").clicked() {
         actions.push(Action::ClearHotkey(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     if libraries.len() > 1 {
         ui.menu_button("Move to", |ui| {
@@ -7694,7 +7727,7 @@ fn sound_context_menu(
                 }
                 if ui.button(&library.name).clicked() {
                     actions.push(Action::MoveSound(sound.id, library.id));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -7704,24 +7737,24 @@ fn sound_context_menu(
         if sound.ram {
             if ui.button("Play from disk").clicked() {
                 actions.push(Action::ToggleRam(sound.id));
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Reload in RAM").clicked() {
                 actions.push(Action::Reload(sound.id));
-                ui.close_menu();
+                ui.close();
             }
         } else if ui.button("Keep in RAM").clicked() {
             actions.push(Action::ToggleRam(sound.id));
-            ui.close_menu();
+            ui.close();
         }
     }
     if (info.error.is_some() || info.missing) && ui.button("Locate file...").clicked() {
         actions.push(Action::Locate(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Show in Explorer").clicked() {
         actions.push(Action::ShowInExplorer(sound.id));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     if ui
@@ -7729,7 +7762,7 @@ fn sound_context_menu(
         .clicked()
     {
         actions.push(Action::Remove(sound.id));
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -7839,9 +7872,9 @@ fn paint_list_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
 fn plus_button(ui: &mut Ui) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
     let painter = ui.painter();
-    let hover = anim::hover(ui, Id::new("plus_hover"), response.hovered());
+    let hover = anim::hover(ui, Id::unique("plus_hover"), response.hovered());
     icon_hover(painter, rect, hover);
-    let press = anim::press(ui, Id::new("plus"), response.is_pointer_button_down_on());
+    let press = anim::press(ui, Id::unique("plus"), response.is_pointer_button_down_on());
     press_overlay(painter, rect, theme::RADIUS_MD, press);
     let color = theme::mix(theme::muted(), theme::accent(), hover);
     let stroke = Stroke::new(1.4_f32, color);
@@ -7889,7 +7922,7 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
     }
     pressable(
         ui,
-        Id::new(("accent", text, size.x as i32, size.y as i32)),
+        Id::unique(("accent", text, size.x as i32, size.y as i32)),
         &response,
         theme::RADIUS_MD,
         2.0,
@@ -7906,7 +7939,7 @@ fn ghost_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
 fn ghost_button_colored(ui: &mut Ui, text: &str, size: Vec2, color: Color32) -> egui::Response {
     ghost_button_at(
         ui,
-        Id::new(("ghost", text, size.x as i32, size.y as i32)),
+        Id::unique(("ghost", text, size.x as i32, size.y as i32)),
         text,
         size,
         color,
@@ -7933,7 +7966,7 @@ fn tiny_button(ui: &mut Ui, text: &str) -> egui::Response {
         ui.add(Button::new(RichText::new(text).size(11.5).color(theme::muted())).frame(false));
     pressable(
         ui,
-        Id::new(("tiny", text)),
+        Id::unique(("tiny", text)),
         &response,
         theme::RADIUS_SM,
         0.0,
@@ -8061,7 +8094,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
     }
     let press = anim::press(
         ui,
-        Id::new(("window_button", kind as i32)),
+        Id::unique(("window_button", kind as i32)),
         response.is_pointer_button_down_on(),
     );
     press_overlay(ui.painter(), rect, 0, press);
@@ -8797,7 +8830,7 @@ mod tests {
     /// the dead chord back silently.
     #[test]
     fn a_parked_focus_cancels_the_move_a_tab_press_makes() {
-        let probe = Id::new("focus_probe");
+        let probe = Id::unique("focus_probe");
 
         fn focused_after_a_tab_pass(park: bool) -> Option<Id> {
             let ctx = egui::Context::default();
@@ -8811,14 +8844,17 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     if park {
-                        ctx.memory_mut(|memory| memory.request_focus(Id::new(TAB_FOCUS_BLOCK)));
+                        ui.ctx()
+                            .memory_mut(|memory| memory.request_focus(Id::unique(TAB_FOCUS_BLOCK)));
                     }
-                    ui.interact(ui.max_rect(), Id::new("focus_probe"), Sense::click());
+                    ui.interact(ui.max_rect(), Id::unique("focus_probe"), Sense::click());
                 });
             });
+            // A headless pass has no renderer to apply the font atlas to.
+            output.textures_delta.clear();
             ctx.memory(|memory| memory.focused())
         }
 
@@ -8829,7 +8865,7 @@ mod tests {
         );
         assert_eq!(
             focused_after_a_tab_pass(true),
-            Some(Id::new(TAB_FOCUS_BLOCK)),
+            Some(Id::unique(TAB_FOCUS_BLOCK)),
             "the park holds the focus, so no widget is granted it — and `update` \
              clears exactly this id again after painting"
         );

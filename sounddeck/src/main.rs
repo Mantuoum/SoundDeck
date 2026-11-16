@@ -205,7 +205,6 @@ fn main() -> Result<(), eframe::Error> {
 
     let options = eframe::NativeOptions {
         viewport,
-        vsync: true,
         centered: true,
         ..Default::default()
     };

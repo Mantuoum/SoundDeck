@@ -286,17 +286,20 @@ functions **collect `Action` values** (play/remove/rename/move/drag…) which
 `handle_actions` applies after painting — mutations are centralized and the borrow
 checker stays happy. Singleton chrome (sidebar, settings) mutates directly by design.
 
-**Frame lifecycle** (`update`): detect Settings transition → debounce search
-(`search` → `filter_needle`, 120 ms) → `poll_events` (playback/engine/hotkey channels plus
-the `explorer_tx` shell-log channel) → close/minimize handling → `global_shortcuts`
+**Frame lifecycle** (eframe 0.37 splits it): `App::logic(ctx, frame)` runs the non-paint
+work and runs even while hidden; `App::ui(ui, frame)` is the paint pass on the root `Ui`.
+`logic`: detect Settings transition → debounce search (`search` → `filter_needle`, 120 ms)
+→ `poll_events` (playback/engine/hotkey channels plus the `explorer_tx` shell-log channel)
+→ close/minimize handling → (`hidden` → `hidden_tick` and stop) → `global_shortcuts`
 (typing-guarded: `focused().is_some()`, and egui reads Tab for focus navigation *before*
-`update` runs, so Ctrl+Tab parks the focus on `TAB_FOCUS_BLOCK` to cancel that grant —
-cleared after painting; without it the chord dies until the window is clicked) →
-edge-resize
-hit-testing → `tick` (loop state, save debounce, meters, frame pacing) → paint title
-bar + (board | settings) → chrome, drop overlay, drag ghost, modals. When hidden
-(tray): `hidden_tick` only, zero painting — the window is *minimized*, never
-`Visible(false)` (the latter freezes event draining and burns a core; known trap).
+the UI pass, so Ctrl+Tab parks the focus on `TAB_FOCUS_BLOCK` to cancel that grant —
+cleared at the end of `ui`; without it the chord dies until the window is clicked) →
+edge-resize hit-testing → `tick` (loop state, save debounce, meters, frame pacing).
+`ui`: `egui::Panel::top/bottom/left/right` (title bar, status bar, settings rail or board
+sidebar) → `egui::CentralPanel` (board | settings) → chrome, drop overlay, drag ghost,
+modals. When hidden (tray): `hidden_tick` only, zero painting — the window is
+*minimized*, never `Visible(false)` (the latter freezes event draining and burns a core;
+known trap).
 
 Frame pacing: 33 ms moving, 100 ms settings+audio, 1 s idle (the idle-CPU guarantee,
 NFR-8.1.x).

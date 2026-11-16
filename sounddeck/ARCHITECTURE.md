@@ -420,18 +420,26 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 
 ### Frame structure
 
-`App::update` runs every frame:
+eframe 0.37 splits the frame into two calls. `App::logic(ctx, frame)` does everything
+that is not painting and runs even while the window is hidden (eframe runs a logic-only
+pass then). `App::ui(ui, frame)` is the paint pass; the `Ui` is the root, with no margin.
+
+`logic`:
 
 1. Detect Settings opening/closing; set fade timestamps and clear text focus.
-2. Poll playback/engine/hotkey events and the shell-failure log channel.
-3. Handle close requests, global shortcuts, window-edge resize, `tick`. egui reads Tab
-   for focus navigation *before* `update` runs, so a `Ctrl+Tab` switch parks the focus on
-   `TAB_FOCUS_BLOCK` to cancel the grant (cleared after painting) — without it the chord
-   dies until the window is clicked.
-4. Draw the title bar and status bar.
-5. If Settings is open: left settings rail + content panel.
-   Otherwise: board sidebar (right) + main page.
-6. Draw window chrome, drop overlay (board only), drag ghost, and modals.
+2. Debounce search, poll playback/engine/hotkey events and the shell-failure channel.
+3. Handle close requests and OS minimize; while `hidden`, run `hidden_tick` and return.
+4. Global shortcuts, window-edge resize, `tick`. egui reads Tab for focus navigation
+   *before* the UI pass, so a `Ctrl+Tab` switch parks the focus on `TAB_FOCUS_BLOCK` to
+   cancel the grant (cleared at the end of `ui`) — without it the chord dies until the
+   window is clicked.
+
+`ui`:
+
+1. `egui::Panel::top` title bar, `egui::Panel::bottom` status bar.
+2. `egui::Panel::left` settings rail, or `egui::Panel::right` board sidebar.
+3. `egui::CentralPanel` with the settings content or the board's main page.
+4. Window chrome, drop overlay, drag ghost, modals (all on `ui.ctx()`).
 
 `tick` also debounces saves, updates the meters, and hands the frame pacing to
 `repaint_interval()`: 33 ms while audio is moving, 100 ms with Settings open during
@@ -442,10 +450,10 @@ actually did something.
 
 A hidden window is *minimized*, not hidden with `Visible(false)`. With the latter,
 winit stops delivering paints, eframe stays in `ControlFlow::Poll` and burns a full
-core while `update` never runs, so tray events are never drained and the window can
+core while the UI never runs, so tray events are never drained and the window can
 never be restored. Minimizing keeps the frame loop alive and lets the idle timer do
-its job. While `hidden`, `update` skips the whole paint pass and runs `hidden_tick`
-only (loop state, save debounce, tray tooltip).
+its job. While `hidden`, `logic` runs `hidden_tick` only (loop state, save debounce,
+tray tooltip) and `ui` returns without painting.
 
 `ITaskbarList::DeleteTab` removes the taskbar button while parked in the tray and
 `AddTab` restores it. The OS-minimize detector reacts to a transition only, with a

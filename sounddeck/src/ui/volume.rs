@@ -144,9 +144,9 @@ pub fn bar(
         // (`input_state::begin_pass`); `ScrollArea::end` reads that field after
         // its children painted. Clearing only the event frame left the leftover
         // smoothing to scroll the page a few frames later.
-        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         ui.input_mut(|i| {
-            i.raw_scroll_delta = Vec2::ZERO;
+            i.smooth_scroll_delta = Vec2::ZERO;
             i.smooth_scroll_delta = Vec2::ZERO;
         });
         if let Some(target) = wheel_step(position, scroll) {

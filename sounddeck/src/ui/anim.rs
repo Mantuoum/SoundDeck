@@ -31,13 +31,13 @@ pub fn enabled() -> bool {
 }
 
 /// A value that eases toward `target`. Returns the current value.
-pub fn tween(ui: &egui::Ui, id: impl Hash, target: f32, seconds: f32) -> f32 {
+pub fn tween(ui: &egui::Ui, id: impl Hash + std::fmt::Debug, target: f32, seconds: f32) -> f32 {
     if !enabled() {
         return target;
     }
     let value = ui
         .ctx()
-        .animate_value_with_time(Id::new(id), target, seconds);
+        .animate_value_with_time(Id::unique(id), target, seconds);
     if (value - target).abs() > 0.002 {
         ui.ctx().request_repaint();
     }
@@ -55,12 +55,14 @@ pub fn ease_out(t: f32) -> f32 {
 }
 
 /// 0 when idle, 1 when hovered; eases over ~60 ms.
-pub fn hover(ui: &egui::Ui, id: impl Hash, hovered: bool) -> f32 {
+pub fn hover(ui: &egui::Ui, id: impl Hash + std::fmt::Debug, hovered: bool) -> f32 {
     let target = if hovered { 1.0 } else { 0.0 };
     if !enabled() {
         return target;
     }
-    let value = ui.ctx().animate_value_with_time(Id::new(id), target, 0.06);
+    let value = ui
+        .ctx()
+        .animate_value_with_time(Id::unique(id), target, 0.06);
     if (value - target).abs() > 0.002 {
         ui.ctx().request_repaint();
     }
@@ -72,13 +74,13 @@ pub fn hover(ui: &egui::Ui, id: impl Hash, hovered: bool) -> f32 {
 /// stop-all card both paint through this, so their hover treatment cannot
 /// drift apart (G1). A caller with its own state colouring (the loop card's
 /// accent wash while it plays) layers that on the returned colour.
-pub fn hover_fill(ui: &egui::Ui, id: impl Hash, rect: Rect) -> Color32 {
+pub fn hover_fill(ui: &egui::Ui, id: impl Hash + std::fmt::Debug, rect: Rect) -> Color32 {
     let hover = hover(ui, id, ui.rect_contains_pointer(rect));
     theme::mix(theme::card(), theme::text(), HOVER_LIFT * hover)
 }
 
 /// 0 when released, 1 while pressed; eases over ~50 ms / 90 ms.
-pub fn press(ui: &egui::Ui, id: impl Hash, pressed: bool) -> f32 {
+pub fn press(ui: &egui::Ui, id: impl Hash + std::fmt::Debug, pressed: bool) -> f32 {
     let target = if pressed { 1.0 } else { 0.0 };
     if !enabled() {
         return target;
@@ -86,7 +88,7 @@ pub fn press(ui: &egui::Ui, id: impl Hash, pressed: bool) -> f32 {
     let seconds = if pressed { 0.05 } else { 0.09 };
     let value = ui
         .ctx()
-        .animate_value_with_time(Id::new(id), target, seconds);
+        .animate_value_with_time(Id::unique(id), target, seconds);
     if (value - target).abs() > 0.002 {
         ui.ctx().request_repaint();
     }
