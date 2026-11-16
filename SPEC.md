@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Document | `SPEC.md` |
-| Describes | SoundDeck 0.5.0 |
+| Describes | SoundDeck 0.6.0 |
 | Status | Living document; update it with the code |
 | Keywords | **MUST**, **SHOULD**, **MAY** as defined in RFC 2119 |
 
@@ -478,7 +478,7 @@ Rules that enforce them:
 | NFR-8.5.2 | `cargo test` MUST pass; pure logic (paths, normalisation, migration, volume curve, hotkey table, ring/wake behaviour) MUST be covered. |
 | NFR-8.5.3 | Every module carries a `//!` header stating its responsibility. |
 | NFR-8.5.4 | `ARCHITECTURE.md` MUST be updated with any change to threads, storage or the frame loop. |
-| NFR-8.5.5 | 230 tests as of 0.5.0. |
+| NFR-8.5.5 | 245 tests as of 0.6.0. |
 
 ### 8.6 Accessibility
 

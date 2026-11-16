@@ -15,7 +15,7 @@ already parked and waiting.
       the board itself can go.)
 - [x] Test at 960×540 and once more at 1200×800; note the window scale you use (SPEC
       targets 100 %; other factors = usable, not pixel-perfect).
-- [x] You are running `review\SoundDeck.exe` = build 0.5.0 (Settings → General must say 0.5.0).
+- [x] You are running `review\SoundDeck.exe` = build 0.6.0 (Settings → General must say 0.6.0).
 
 **Known nuances — expected, not bugs**
 
