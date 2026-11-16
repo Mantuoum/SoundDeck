@@ -310,7 +310,11 @@ state, log-curve volume bar, progress line — drawn only once the total duratio
 context menu with **Set gain…** between Stop and Rename, label only: the dialog carries
 the value). The toolbar and the grid both size from `board_content_width(ui)` (available
 width minus the floating scroll-bar gutter), so the RAM pill and the last column share a
-right edge at any window width. Delete removes with one-slot undo (`Ctrl+Z`).
+right edge at any window width. Selection lives in `Selection { ids, anchor }`: a plain
+click plays and collapses to one, Ctrl+click toggles, Shift+click takes the visible range,
+and a drag on empty board space is a marquee. Delete removes the batch as one undoable
+`UndoDelete` (ascending-index restore); the context menu on a multi-selection offers
+**Move N sounds to** / **Remove N sounds**, and a selected card drags the whole block.
 Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
 remove them from the board (files untouched); cancel leaves everything alone.
 

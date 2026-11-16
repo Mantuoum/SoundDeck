@@ -480,6 +480,12 @@ above-normal so audio still meets its deadlines.
   cannot move the wrong sound); a library **tab** is a drop target too — it tints while a
   drag is over it, the drop moves the sound with the context menu's semantics, and the
   active tab is unchanged; Delete/undo uses a one-slot `UndoDelete`.
+- **Multi-select:** `Selection { ids, anchor }`. A plain click plays and collapses to one;
+  Ctrl+click toggles; Shift+click takes the visible range from the anchor; a drag that
+  starts on empty board space draws a marquee and selects the cards it touches. Delete
+  removes the batch as one undoable unit (ascending-index restore); the context menu on a
+  multi-selection offers **Move N sounds to** and **Remove N sounds**; dragging a selected
+  card drags the whole block. A right-click outside the selection picks that card first.
 
 ### Settings screen
 

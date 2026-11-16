@@ -431,15 +431,140 @@ enum RenameTarget {
 }
 
 struct DragState {
+    /// The whole dragged block, in selection order. One card drags alone.
+    ids: Vec<u64>,
+    /// The card under the pointer, used for the ghost's name and pill.
     sound_id: u64,
     size: Vec2,
     name: String,
     hotkey: String,
 }
 
+/// A drag-select rectangle started on empty board space.
+struct Marquee {
+    start: Pos2,
+    current: Pos2,
+    /// Ctrl was held: keep the existing selection and add to it.
+    additive: bool,
+}
+
 struct UndoDelete {
-    sound: Sound,
-    index: usize,
+    /// The removed sounds with their original index in the flat sound list,
+    /// ascending, so one Ctrl+Z restores a whole batch in place.
+    sounds: Vec<(Sound, usize)>,
+}
+
+/// The board's multi-selection: ordered ids plus the Shift+click anchor.
+///
+/// A `Vec` keeps the order visible to the user and avoids per-frame `HashSet`
+/// allocation (AGENTS §6.4). The set is small, so `contains` is a linear scan.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct Selection {
+    ids: Vec<u64>,
+    anchor: Option<u64>,
+}
+
+impl Selection {
+    fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.ids.contains(&id)
+    }
+
+    /// The id when exactly one sound is selected (rename and other single-only
+    /// actions use this).
+    fn single(&self) -> Option<u64> {
+        if self.ids.len() == 1 {
+            self.ids.first().copied()
+        } else {
+            None
+        }
+    }
+
+    /// The id Space plays: the anchor when it is still selected, else the first.
+    fn focus(&self) -> Option<u64> {
+        self.anchor
+            .filter(|anchor| self.ids.contains(anchor))
+            .or_else(|| self.ids.first().copied())
+    }
+
+    fn clear(&mut self) {
+        self.ids.clear();
+        self.anchor = None;
+    }
+
+    /// A plain click: this sound only.
+    fn set_single(&mut self, id: u64) {
+        self.ids.clear();
+        self.ids.push(id);
+        self.anchor = Some(id);
+    }
+
+    /// Ctrl+click: add or remove one sound, and move the anchor to it.
+    fn toggle(&mut self, id: u64) {
+        if let Some(position) = self.ids.iter().position(|candidate| *candidate == id) {
+            self.ids.remove(position);
+        } else {
+            self.ids.push(id);
+        }
+        self.anchor = Some(id);
+    }
+
+    /// Shift+click: replace the selection with the visible range from `anchor`
+    /// to `id`. Without an anchor, behave like a plain pick.
+    fn select_range(&mut self, order: &[u64], id: u64) {
+        let Some(anchor) = self.anchor else {
+            self.set_single(id);
+            return;
+        };
+        let anchor_index = order.iter().position(|candidate| *candidate == anchor);
+        let id_index = order.iter().position(|candidate| *candidate == id);
+        let (Some(anchor_index), Some(id_index)) = (anchor_index, id_index) else {
+            self.set_single(id);
+            return;
+        };
+        let (low, high) = if anchor_index <= id_index {
+            (anchor_index, id_index)
+        } else {
+            (id_index, anchor_index)
+        };
+        self.ids.clear();
+        self.ids.extend_from_slice(&order[low..=high]);
+    }
+
+    /// Drop ids that a filter or tab switch hid. A vanished anchor moves to the
+    /// last visible id so Shift+click still has a sensible origin.
+    fn retain_visible(&mut self, visible: &[u64]) {
+        self.ids.retain(|id| visible.contains(id));
+        if let Some(anchor) = self.anchor {
+            if !self.ids.contains(&anchor) {
+                self.anchor = self.ids.last().copied();
+            }
+        }
+    }
+
+    /// Drop ids that left the board or this tab, keeping the rest.
+    fn remove_ids(&mut self, gone: &[u64]) {
+        self.ids.retain(|id| !gone.contains(id));
+        if let Some(anchor) = self.anchor {
+            if !self.ids.contains(&anchor) {
+                self.anchor = self.ids.last().copied();
+            }
+        }
+    }
+}
+
+/// How a click on a card changes the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectMode {
+    /// A right-click on a card outside the selection: pick only it.
+    Single,
+    /// Ctrl+click: add or remove one sound.
+    Toggle,
+    /// Shift+click: take the visible range from the anchor.
+    Range,
 }
 
 /// Buffers the board rebuilds from scratch every frame. Immediate mode throws
@@ -492,13 +617,19 @@ struct ImportState {
 
 enum Action {
     Play(u64),
+    /// Ctrl+click / Shift+click on a card: change the selection, do not play.
+    Select(u64, SelectMode),
     Stop(u64),
     Remove(u64),
+    /// Remove every selected sound in one undoable batch.
+    RemoveSelected,
     Rename(u64),
     SetHotkey(u64),
     ClearHotkey(u64),
     ToggleRam(u64),
     MoveSound(u64, u64),
+    /// Move every selected sound to `library_id`.
+    MoveSelected(u64),
     Reload(u64),
     Locate(u64),
     ShowInExplorer(u64),
@@ -557,7 +688,8 @@ pub struct App {
     /// When the text box last changed; None means the filter is current.
     search_pending: Option<Instant>,
     focus_search: bool,
-    selected: Option<u64>,
+    /// The board's multi-selection. A plain click collapses it to one sound.
+    selection: Selection,
     /// Reused per-frame buffers for the board (see [`BoardScratch`]).
     board_scratch: BoardScratch,
     /// Newest last; the oldest entry falls off the front at `MAX_STATUS_ENTRIES`.
@@ -580,6 +712,8 @@ pub struct App {
     /// "Reset all settings" confirmation is open (A6).
     confirm_reset: bool,
     drag: Option<DragState>,
+    /// A drag-select rectangle on the board, started on empty space.
+    marquee: Option<Marquee>,
     card_rects: Vec<(u64, Rect)>,
     row_rects: Vec<(u64, Rect)>,
     /// Library tabs painted this frame, for the drag-to-tab hit test (B11).
@@ -775,7 +909,7 @@ impl App {
             filter_needle: String::new(),
             search_pending: None,
             focus_search: false,
-            selected: None,
+            selection: Selection::default(),
             board_scratch: BoardScratch::default(),
             statuses,
             show_log: false,
@@ -789,6 +923,7 @@ impl App {
             importing: None,
             confirm_reset: false,
             drag: None,
+            marquee: None,
             card_rects: Vec::new(),
             row_rects: Vec::new(),
             tab_rects: Vec::new(),
@@ -1070,10 +1205,15 @@ impl App {
         for action in actions.drain(..) {
             match action {
                 Action::Play(id) => self.play_sound(id),
+                Action::Select(id, mode) => self.select_sound(id, mode),
                 Action::Stop(id) => {
                     self.playback.stop_sound(id);
                 }
-                Action::Remove(id) => self.remove_sound(id),
+                Action::Remove(id) => self.remove_sounds(&[id]),
+                Action::RemoveSelected => {
+                    let ids = self.selection.ids.clone();
+                    self.remove_sounds(&ids);
+                }
                 Action::Rename(id) => {
                     if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                         self.renaming = Some(RenameState {
@@ -1101,6 +1241,10 @@ impl App {
                 Action::MoveSound(id, library_id) => {
                     self.move_sound_to_library(id, library_id);
                 }
+                Action::MoveSelected(library_id) => {
+                    let ids = self.selection.ids.clone();
+                    self.move_sounds_to_library(&ids, library_id);
+                }
                 Action::Reload(id) => {
                     self.playback.reload(id, true);
                 }
@@ -1125,7 +1269,14 @@ impl App {
                 Action::DragStart { id, size } => {
                     if self.search.trim().is_empty() {
                         if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
+                            // Dragging a selected card drags the whole selection;
+                            // dragging another card picks it first.
+                            if !self.selection.contains(id) {
+                                self.selection.set_single(id);
+                            }
+                            let ids = self.selection.ids.clone();
                             self.drag = Some(DragState {
+                                ids,
                                 sound_id: id,
                                 size,
                                 name: sound.name.clone(),
@@ -1148,10 +1299,10 @@ impl App {
                             ) {
                                 // A tab is the context menu's "Move to" (B11).
                                 Some(DropLanding::Library(library_id)) => {
-                                    self.move_sound_to_library(drag.sound_id, library_id);
+                                    self.move_sounds_to_library(&drag.ids, library_id);
                                 }
                                 Some(DropLanding::Sound(target)) => {
-                                    self.reorder_sound(drag.sound_id, target);
+                                    self.reorder_sounds(&drag.ids, target);
                                 }
                                 None => {}
                             }
@@ -1215,7 +1366,7 @@ impl App {
     }
 
     fn play_sound(&mut self, id: u64) {
-        self.selected = Some(id);
+        self.selection.set_single(id);
         if self.playback.info(id).missing {
             self.log_missing_sound(id);
             return;
@@ -1233,22 +1384,62 @@ impl App {
         );
     }
 
-    fn remove_sound(&mut self, id: u64) {
-        let Some(index) = self.sounds.iter().position(|s| s.id == id) else {
-            return;
-        };
-        let sound = self.sounds.remove(index);
-        self.playback.remove(id);
-        if self.selected == Some(id) {
-            self.selected = None;
+    /// Ctrl/Shift+click: change the selection without playing.
+    fn select_sound(&mut self, id: u64, mode: SelectMode) {
+        match mode {
+            SelectMode::Single => self.selection.set_single(id),
+            SelectMode::Toggle => self.selection.toggle(id),
+            SelectMode::Range => {
+                // The range follows what the user can see: the filtered list.
+                let order: Vec<u64> = self
+                    .board_scratch
+                    .filtered
+                    .iter()
+                    .filter_map(|index| self.sounds.get(*index))
+                    .map(|sound| sound.id)
+                    .collect();
+                self.selection.select_range(&order, id);
+            }
         }
-        let label = sound.name.clone();
-        self.undo = Some(UndoDelete { sound, index });
+    }
+
+    /// Remove one or more sounds as one undoable batch.
+    fn remove_sounds(&mut self, ids: &[u64]) {
+        let mut indices: Vec<usize> = self
+            .sounds
+            .iter()
+            .enumerate()
+            .filter(|(_, sound)| ids.contains(&sound.id))
+            .map(|(index, _)| index)
+            .collect();
+        if indices.is_empty() {
+            return;
+        }
+        indices.sort_unstable();
+
+        let mut removed: Vec<(Sound, usize)> = Vec::with_capacity(indices.len());
+        // Remove from the highest index down, so earlier indices stay valid.
+        for &index in indices.iter().rev() {
+            let sound = self.sounds.remove(index);
+            self.playback.remove(sound.id);
+            removed.push((sound, index));
+        }
+        // The undo record is ascending by original index.
+        removed.reverse();
+        let count = removed.len();
+        let label = if count == 1 {
+            format!("\"{}\"", removed[0].0.name)
+        } else {
+            format!("{count} sounds")
+        };
+
+        self.selection.remove_ids(ids);
+        self.undo = Some(UndoDelete { sounds: removed });
         self.sync_hotkeys();
         self.mark_dirty();
         self.log(
             StatusKind::Warning,
-            format!("Removed \"{label}\" - Ctrl+Z to undo"),
+            format!("Removed {label} - Ctrl+Z to undo"),
         );
     }
 
@@ -1257,14 +1448,23 @@ impl App {
             self.log(StatusKind::Info, "Nothing to undo");
             return;
         };
-        let id = restore_sound(&mut self.sounds, &self.playback, undo);
-        self.selected = Some(id);
+        let ids = restore_sounds(&mut self.sounds, &self.playback, undo);
+        if let Some(first) = ids.first() {
+            self.selection.set_single(*first);
+        }
         self.sync_active_library();
         self.mark_dirty();
-        self.log(
-            StatusKind::Success,
-            format!("Restored \"{}\"", self.sound_name(id)),
-        );
+        if ids.len() == 1 {
+            self.log(
+                StatusKind::Success,
+                format!("Restored \"{}\"", self.sound_name(ids[0])),
+            );
+        } else {
+            self.log(
+                StatusKind::Success,
+                format!("Restored {} sounds", ids.len()),
+            );
+        }
     }
 
     fn open_file_dialog(&mut self) {
@@ -1498,7 +1698,7 @@ impl App {
         if added > 0 {
             self.next_id = next_id;
             if let Some(id) = last_id {
-                self.selected = Some(id);
+                self.selection.set_single(id);
             }
             self.sync_hotkeys();
             self.mark_dirty();
@@ -2016,7 +2216,7 @@ impl App {
 
         self.active_library = self.cfg.active_library;
         self.next_id = self.sounds.iter().map(|sound| sound.id).max().unwrap_or(0) + 1;
-        self.selected = None;
+        self.selection.clear();
         self.undo = None;
         self.drag = None;
         self.search.clear();
@@ -3200,6 +3400,8 @@ impl App {
         for &index in &scratch.filtered {
             scratch.ids.push(self.sounds[index].id);
         }
+        // A search or tab switch must not leave selected ids the user cannot see.
+        self.selection.retain_visible(&scratch.ids);
         let infos = self.playback.info_map(&scratch.ids);
 
         let mut rects: Vec<(u64, Rect)> = Vec::new();
@@ -3213,6 +3415,7 @@ impl App {
                 CaptureTarget::StopAll => None,
             });
 
+        let mut board_view = Rect::NOTHING;
         if self.sounds.is_empty()
             || !self
                 .sounds
@@ -3227,6 +3430,7 @@ impl App {
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
+                    board_view = ui.clip_rect();
                     ui.set_width(ui.available_width());
                     match self.cfg.layout {
                         SoundLayout::Grid => draw_grid(
@@ -3238,7 +3442,7 @@ impl App {
                             &scratch.playing,
                             allow_drag,
                             capture_id,
-                            self.selected,
+                            &self.selection,
                             self.cfg.show_ram_state,
                             &mut rects,
                             &mut scratch.actions,
@@ -3252,7 +3456,7 @@ impl App {
                             &scratch.playing,
                             allow_drag,
                             capture_id,
-                            self.selected,
+                            &self.selection,
                             self.cfg.show_ram_state,
                             &mut rows,
                             &mut scratch.actions,
@@ -3262,11 +3466,22 @@ impl App {
                 });
         }
 
+        if !board_view.is_negative() {
+            let hit_rects: &[(u64, Rect)] = match self.cfg.layout {
+                SoundLayout::Grid => &rects,
+                SoundLayout::List => &rows,
+            };
+            self.marquee_input(ui, board_view, hit_rects);
+        }
+
         self.card_rects = rects;
         self.row_rects = rows;
-        // Drain, then hand the buffer back so the next frame reuses its capacity.
-        self.handle_actions(&mut scratch.actions, ui.ctx());
+        // Hand the buffers back before handling actions: a Shift-range action
+        // reads the filtered order out of `board_scratch`.
         self.board_scratch = scratch;
+        let mut actions = std::mem::take(&mut self.board_scratch.actions);
+        self.handle_actions(&mut actions, ui.ctx());
+        self.board_scratch.actions = actions;
 
         // Drop files overlay is drawn in update(); this only consumes the drop.
         let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
@@ -3278,6 +3493,66 @@ impl App {
         });
         if !dropped.is_empty() {
             self.add_files(dropped);
+        }
+    }
+
+    /// Starts, tracks and finishes a drag-select on empty board space.
+    ///
+    /// A press that lands on a card or row is left alone, so click-to-play and
+    /// drag-to-reorder are untouched. The hit test uses this frame's rects.
+    fn marquee_input(&mut self, ui: &Ui, view: Rect, rects: &[(u64, Rect)]) {
+        let ctx = ui.ctx();
+        let pointer = ctx.pointer_latest_pos();
+        if self.marquee.is_none() {
+            if let Some(position) = pointer {
+                let pressed = ctx.input(|input| input.pointer.primary_pressed());
+                let on_item = rects.iter().any(|(_, rect)| rect.contains(position));
+                if pressed && view.contains(position) && !on_item {
+                    self.marquee = Some(Marquee {
+                        start: position,
+                        current: position,
+                        additive: ctx.input(|input| input.modifiers.ctrl),
+                    });
+                }
+            }
+        }
+        let Some(marquee) = &mut self.marquee else {
+            return;
+        };
+        if let Some(position) = pointer {
+            marquee.current = position;
+        }
+        let rectangle = Rect::from_two_pos(marquee.start, marquee.current);
+        let released = ctx.input(|input| input.pointer.primary_released());
+        if released {
+            let hits: Vec<u64> = rects
+                .iter()
+                .filter(|(_, rect)| rectangle.intersects(*rect))
+                .map(|(id, _)| *id)
+                .collect();
+            if !marquee.additive {
+                self.selection.clear();
+            }
+            for id in hits {
+                if !self.selection.contains(id) {
+                    self.selection.ids.push(id);
+                }
+            }
+            self.selection.anchor = self.selection.ids.last().copied();
+            self.marquee = None;
+        } else {
+            ui.painter().rect_filled(
+                rectangle,
+                CornerRadius::same(0),
+                theme::alpha(theme::accent(), 24),
+            );
+            ui.painter().rect_stroke(
+                rectangle,
+                CornerRadius::same(0),
+                Stroke::new(1.0_f32, theme::accent()),
+                StrokeKind::Inside,
+            );
+            ctx.request_repaint();
         }
     }
 
@@ -3401,7 +3676,7 @@ impl App {
     /// first.
     fn reset_view_state(&mut self) {
         self.search.clear();
-        self.selected = None;
+        self.selection.clear();
         self.sync_active_library();
         self.mark_dirty();
     }
@@ -3490,18 +3765,26 @@ impl App {
             self.engine.stop_all();
         }
 
-        // A pending undo may hold a sound from this library; it is not on the
-        // board, so the loops below cannot reach it.
+        // A pending undo may hold sounds from this library; they are not on the
+        // board, so the loops below cannot reach them.
         let undo_in_removed = self
             .undo
             .as_ref()
-            .map(|undo| undo.sound.library_id == removed.id)
+            .map(|undo| {
+                undo.sounds
+                    .iter()
+                    .any(|(sound, _)| sound.library_id == removed.id)
+            })
             .unwrap_or(false);
         if undo_in_removed {
             match outcome {
                 LibraryDeleteOutcome::Move(target) => {
                     if let Some(undo) = self.undo.as_mut() {
-                        undo.sound.library_id = target;
+                        for (sound, _) in &mut undo.sounds {
+                            if sound.library_id == removed.id {
+                                sound.library_id = target;
+                            }
+                        }
                     }
                 }
                 LibraryDeleteOutcome::Remove => self.undo = None,
@@ -3547,10 +3830,8 @@ impl App {
                 self.sounds.retain(|sound| sound.library_id != id);
                 for sound_id in doomed {
                     self.playback.remove(sound_id);
-                    if self.selected == Some(sound_id) {
-                        self.selected = None;
-                    }
                 }
+                self.selection.clear();
                 if was_active {
                     self.active_library = fallback;
                 }
@@ -3686,39 +3967,86 @@ impl App {
         }
     }
 
-    /// Drops a dragged sound onto another one: reorder inside the library,
-    /// select it, schedule the save. A stale source or target is a no-op.
-    fn reorder_sound(&mut self, id: u64, target: u64) {
-        if !move_sound_to_id(&mut self.sounds, id, target) {
+    /// Moves a whole dragged block so it sits where the target card was,
+    /// keeping the block's relative order.
+    fn reorder_sounds(&mut self, ids: &[u64], target: u64) {
+        if ids.is_empty() {
             return;
         }
-        self.selected = Some(id);
+        // A single drag keeps the old remove-and-insert path exactly.
+        if ids.len() == 1 {
+            if move_sound_to_id(&mut self.sounds, ids[0], target) {
+                self.selection.set_single(ids[0]);
+                self.mark_dirty();
+            }
+            return;
+        }
+        let mut moved: Vec<Sound> = Vec::new();
+        let mut rest: Vec<Sound> = Vec::with_capacity(self.sounds.len());
+        for sound in self.sounds.drain(..) {
+            if ids.contains(&sound.id) {
+                moved.push(sound);
+            } else {
+                rest.push(sound);
+            }
+        }
+        let Some(position) = rest.iter().position(|sound| sound.id == target) else {
+            // The target was part of the block: leave the order unchanged.
+            rest.extend(moved);
+            self.sounds = rest;
+            return;
+        };
+        for (offset, sound) in moved.into_iter().enumerate() {
+            rest.insert(position + offset, sound);
+        }
+        self.sounds = rest;
+        self.selection.set_single(ids[0]);
         self.mark_dirty();
     }
 
     fn move_sound_to_library(&mut self, sound_id: u64, library_id: u64) {
+        self.move_sounds_to_library(&[sound_id], library_id);
+    }
+
+    /// Moves every id to `library_id` with the context menu's semantics.
+    fn move_sounds_to_library(&mut self, ids: &[u64], library_id: u64) {
         let Some(library) = self.libraries.iter().find(|l| l.id == library_id) else {
             return;
         };
         let label = library.name.clone();
         let active = self.active_library;
-        let Some(sound) = self.sounds.iter_mut().find(|s| s.id == sound_id) else {
-            return;
-        };
-        if sound.library_id == library_id {
-            return;
+        let mut moved = 0usize;
+        let mut names: Vec<String> = Vec::new();
+        for sound in self.sounds.iter_mut() {
+            if !ids.contains(&sound.id) || sound.library_id == library_id {
+                continue;
+            }
+            sound.library_id = library_id;
+            moved += 1;
+            names.push(sound.name.clone());
         }
-        sound.library_id = library_id;
-        let name = sound.name.clone();
-        if self.selected == Some(sound_id) {
-            self.selected = None;
+        if moved == 0 {
+            return;
         }
         if library_id != active {
-            self.engine.stop_sound(sound_id);
+            for id in ids {
+                self.engine.stop_sound(*id);
+            }
+            self.selection.remove_ids(ids);
         }
         self.mark_dirty();
         self.sync_active_library();
-        self.log(StatusKind::Info, format!("Moved \"{name}\" to \"{label}\""));
+        if moved == 1 {
+            self.log(
+                StatusKind::Info,
+                format!("Moved \"{}\" to \"{label}\"", names[0]),
+            );
+        } else {
+            self.log(
+                StatusKind::Info,
+                format!("Moved {moved} sounds to \"{label}\""),
+            );
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -5136,6 +5464,8 @@ impl App {
                 self.drag = None;
             } else if !self.search.is_empty() {
                 self.search.clear();
+            } else if !self.selection.is_empty() && !typing {
+                self.selection.clear();
             } else if !typing {
                 self.engine.stop_all();
                 self.log(StatusKind::Info, "Stopped all sounds");
@@ -5216,17 +5546,16 @@ impl App {
             self.undo_remove();
         }
         if delete {
-            if let Some(id) = self.selected {
-                self.remove_sound(id);
-            }
+            let ids = self.selection.ids.clone();
+            self.remove_sounds(&ids);
         }
         if space {
-            if let Some(id) = self.selected {
+            if let Some(id) = self.selection.focus() {
                 self.play_sound(id);
             }
         }
         if f2 {
-            if let Some(id) = self.selected {
+            if let Some(id) = self.selection.single() {
                 if let Some(sound) = self.sounds.iter().find(|s| s.id == id) {
                     self.renaming = Some(RenameState {
                         target: RenameTarget::Sound(id),
@@ -5669,18 +5998,21 @@ fn ram_eligible(sound: &Sound, active_library: u64) -> bool {
 /// The missing flag is judged from the restored path, so a healthy file comes back
 /// healthy (the old code asked the board instead, which no longer held the sound,
 /// and marked every restored sound missing).
-fn restore_sound(sounds: &mut Vec<Sound>, playback: &Playback, undo: UndoDelete) -> u64 {
-    let index = undo.index.min(sounds.len());
-    let sound = undo.sound;
-    let id = sound.id;
-    playback.register(id, sound.path.clone(), sound.volume, sound.gain_db);
-    // `Playback` owns the "is the file missing" decision. Re-registering already set
-    // it from the restored path, so the message is refreshed from that; the old code
-    // asked the board, which no longer held the sound, and flagged every restore.
-    let missing = playback.info(id).missing;
-    playback.mark_missing(id, missing, None);
-    sounds.insert(index, sound);
-    id
+fn restore_sounds(sounds: &mut Vec<Sound>, playback: &Playback, undo: UndoDelete) -> Vec<u64> {
+    let mut ids = Vec::with_capacity(undo.sounds.len());
+    // Ascending original indices, inserted in that order, reproduce the list.
+    for (sound, index) in undo.sounds {
+        let index = index.min(sounds.len());
+        let id = sound.id;
+        playback.register(id, sound.path.clone(), sound.volume, sound.gain_db);
+        // `Playback` owns the "is the file missing" decision. Re-registering already
+        // set it from the restored path, so the message is refreshed from that.
+        let missing = playback.info(id).missing;
+        playback.mark_missing(id, missing, None);
+        sounds.insert(index, sound);
+        ids.push(id);
+    }
+    ids
 }
 
 /// The sound id under the pointer, if any. The drag rects carry ids so a list
@@ -6483,7 +6815,7 @@ fn draw_grid(
     playing: &HashMap<u64, Option<f32>>,
     drag_enabled: bool,
     capture_id: Option<u64>,
-    selected: Option<u64>,
+    selection: &Selection,
     show_ram: bool,
     rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
@@ -6515,7 +6847,8 @@ fn draw_grid(
                         state.flatten(),
                         drag_enabled,
                         capture_id == Some(sound.id),
-                        selected == Some(sound.id),
+                        selection.contains(sound.id),
+                        selection.ids.len(),
                         show_ram,
                         libraries,
                         ItemLayout::Grid,
@@ -6539,7 +6872,7 @@ fn draw_list(
     playing: &HashMap<u64, Option<f32>>,
     drag_enabled: bool,
     capture_id: Option<u64>,
-    selected: Option<u64>,
+    selection: &Selection,
     show_ram: bool,
     rects: &mut Vec<(u64, Rect)>,
     actions: &mut Vec<Action>,
@@ -6567,7 +6900,8 @@ fn draw_list(
                     state.flatten(),
                     drag_enabled,
                     capture_id == Some(sound.id),
-                    selected == Some(sound.id),
+                    selection.contains(sound.id),
+                    selection.ids.len(),
                     show_ram,
                     libraries,
                     ItemLayout::List,
@@ -7084,6 +7418,7 @@ fn sound_item(
     drag_enabled: bool,
     capture_active: bool,
     selected: bool,
+    selected_count: usize,
     show_ram: bool,
     libraries: &[Library],
     layout: ItemLayout,
@@ -7125,7 +7460,21 @@ fn sound_item(
     }
 
     if response.clicked() {
-        actions.push(Action::Play(sound.id));
+        // Ctrl/Shift change the selection; a plain click plays (and collapses
+        // the selection to this sound).
+        let modifiers = ui.input(|input| input.modifiers);
+        if modifiers.ctrl {
+            actions.push(Action::Select(sound.id, SelectMode::Toggle));
+        } else if modifiers.shift {
+            actions.push(Action::Select(sound.id, SelectMode::Range));
+        } else {
+            actions.push(Action::Play(sound.id));
+        }
+    }
+    if response.secondary_clicked() && !selected {
+        // A right-click outside the selection picks that card first, so the
+        // menu and a following Delete agree on what is selected.
+        actions.push(Action::Select(sound.id, SelectMode::Single));
     }
     if drag_enabled && response.drag_started() {
         let drag_size = match layout {
@@ -7141,7 +7490,15 @@ fn sound_item(
         actions.push(Action::DragStop);
     }
     response.context_menu(|ui| {
-        sound_context_menu(ui, sound, info, libraries, &mut *actions);
+        sound_context_menu(
+            ui,
+            sound,
+            info,
+            libraries,
+            selected && selected_count > 1,
+            selected_count,
+            &mut *actions,
+        );
     });
 
     // Name.
@@ -7250,8 +7607,36 @@ fn sound_context_menu(
     sound: &Sound,
     info: &SoundInfo,
     libraries: &[Library],
+    bulk: bool,
+    selected_count: usize,
     actions: &mut Vec<Action>,
 ) {
+    if bulk {
+        // A right-click inside a multi-selection acts on the whole selection.
+        if libraries.len() > 1 {
+            ui.menu_button(format!("Move {selected_count} sounds to"), |ui| {
+                for library in libraries {
+                    if library.id == sound.library_id {
+                        continue;
+                    }
+                    if ui.button(&library.name).clicked() {
+                        actions.push(Action::MoveSelected(library.id));
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+        ui.separator();
+        if ui
+            .button(RichText::new(format!("Remove {selected_count} sounds")).color(theme::red()))
+            .clicked()
+        {
+            actions.push(Action::RemoveSelected);
+            ui.close_menu();
+        }
+        return;
+    }
+
     if ui.button("Play").clicked() {
         actions.push(Action::Play(sound.id));
         ui.close_menu();
@@ -8230,15 +8615,14 @@ mod tests {
         present.path = path.clone();
         let mut sounds = Vec::new();
         assert_eq!(
-            restore_sound(
+            restore_sounds(
                 &mut sounds,
                 &playback,
                 UndoDelete {
-                    sound: present,
-                    index: 0,
+                    sounds: vec![(present, 0)],
                 }
             ),
-            11
+            vec![11]
         );
         let info = playback.info(11);
         assert!(!info.missing, "an existing file must not come back missing");
@@ -8249,20 +8633,41 @@ mod tests {
         let gone = std::env::temp_dir().join("sounddeck-test-undo-gone.wav");
         let mut absent = sound_with_id(12);
         absent.path = gone;
-        let id = restore_sound(
+        let ids = restore_sounds(
             &mut sounds,
             &playback,
             UndoDelete {
-                sound: absent,
-                index: 1,
+                sounds: vec![(absent, 1)],
             },
         );
-        assert_eq!(id, 12);
+        assert_eq!(ids, vec![12]);
         assert!(playback.info(12).missing);
         assert_eq!(sounds.len(), 2, "both sounds are on the board again");
         assert_eq!(sounds[1].id, 12, "restored at the recorded index");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_batch_undo_restores_every_sound_at_its_original_index() {
+        let playback = Playback::new(Arc::new(Engine::new(1.0, 1.0, 0.0)));
+        let mut sounds = vec![
+            sound_with_id(1),
+            sound_with_id(2),
+            sound_with_id(3),
+            sound_with_id(4),
+        ];
+        // Remove 2 and 4, exactly as `remove_sounds` records them.
+        let removed = vec![(sounds.remove(1), 1), (sounds.remove(2), 3)];
+        assert_eq!(sounds.iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 3]);
+
+        let ids = restore_sounds(&mut sounds, &playback, UndoDelete { sounds: removed });
+        assert_eq!(ids, vec![2, 4]);
+        assert_eq!(
+            sounds.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "ascending insert order rebuilds the original list"
+        );
     }
 
     #[test]
@@ -9091,5 +9496,70 @@ mod tests {
         let stored = GainState::new(9, -7.3);
         assert_eq!(stored.db, -7.5);
         assert_eq!(stored.text, "-7.5 dB");
+    }
+
+    #[test]
+    fn selection_plain_pick_keeps_one_and_moves_the_anchor() {
+        let mut selection = Selection::default();
+        selection.set_single(4);
+        selection.set_single(9);
+        assert_eq!(selection.ids, vec![9]);
+        assert!(selection.contains(9));
+        assert!(!selection.contains(4));
+        assert_eq!(selection.anchor, Some(9));
+    }
+
+    #[test]
+    fn selection_ctrl_click_toggles_without_touching_the_others() {
+        let mut selection = Selection::default();
+        selection.set_single(1);
+        selection.toggle(2);
+        selection.toggle(3);
+        assert_eq!(selection.ids, vec![1, 2, 3]);
+        selection.toggle(2);
+        assert_eq!(selection.ids, vec![1, 3]);
+        assert_eq!(selection.anchor, Some(2));
+    }
+
+    #[test]
+    fn selection_shift_click_takes_the_visible_range_in_either_direction() {
+        let order = [10, 20, 30, 40, 50];
+        let mut selection = Selection::default();
+        selection.set_single(20);
+        // Forward range.
+        selection.select_range(&order, 40);
+        assert_eq!(selection.ids, vec![20, 30, 40]);
+        assert_eq!(selection.anchor, Some(20));
+        // Backward range from the same anchor.
+        selection.select_range(&order, 10);
+        assert_eq!(selection.ids, vec![10, 20]);
+        assert_eq!(selection.anchor, Some(20));
+    }
+
+    #[test]
+    fn selection_shift_click_without_an_anchor_behaves_like_a_plain_pick() {
+        let order = [1, 2, 3];
+        let mut selection = Selection::default();
+        selection.select_range(&order, 3);
+        assert_eq!(selection.ids, vec![3]);
+    }
+
+    #[test]
+    fn selection_drops_ids_that_left_the_view() {
+        let mut selection = Selection::default();
+        selection.set_single(1);
+        selection.toggle(2);
+        selection.toggle(3);
+        selection.retain_visible(&[1, 3, 4]);
+        assert_eq!(selection.ids, vec![1, 3]);
+        assert_eq!(
+            selection.anchor,
+            Some(3),
+            "a gone anchor moves to the last id"
+        );
+
+        selection.retain_visible(&[9]);
+        assert!(selection.is_empty());
+        assert_eq!(selection.anchor, None);
     }
 }

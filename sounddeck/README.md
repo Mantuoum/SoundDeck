@@ -102,6 +102,10 @@ live in `config/` next to the executable.
   `<id>.md` theme is converted once on load and kept beside the JSON as `<id>.md.migrated`.
 - Grid and list layouts, search (scoped to the active library), drag to reorder,
   rename, remove with undo.
+- **Multi-select**: Ctrl+click picks several sounds, Shift+click takes a range, and
+  dragging on empty board space selects everything the box touches. **Delete** removes
+  the whole selection as one undoable step; right-click a selected card to **Move N
+  sounds to** another library. Dragging a selected card carries the whole selection.
 - Missing file detection: the card is marked, triggering it logs an error and does
   nothing else, and **right-click → Locate** relinks the sound.
 - System tray. **Double-click the tray icon to show or hide SoundDeck**; right-click
@@ -170,10 +174,10 @@ dropdown first. There is no Save button; changes apply immediately.
 | `Ctrl+,` | Settings |
 | `Ctrl+Z` | Undo removal |
 | `Ctrl+Q` | Quit |
-| `Esc` | Close popup / return from Settings / clear search / stop playback |
-| `Delete` | Remove selected |
-| `Space` | Play selected |
-| `F2` | Rename selected |
+| `Esc` | Close popup / return from Settings / clear search / clear selection / stop playback |
+| `Delete` | Remove the selected sounds (one undoable batch) |
+| `Space` | Play the focused sound |
+| `F2` | Rename the selected sound (one selection only) |
 | `Ctrl+Tab` | Next library — only when **Cycle tabs with Ctrl+Tab** is on (Settings → Window, off by default) |
 | `Ctrl+Shift+Tab` | Previous library — same switch, both wrap around |
 

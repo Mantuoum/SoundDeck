@@ -107,7 +107,7 @@ specification:**
 | FR-5.3.4 | A sound MUST have: id, display name (defaults to the file stem), path, volume in `0..=1`, trim in dB (FR-5.3.17), optional hotkey, optional RAM preload. |
 | FR-5.3.5 | RAM preload MUST only be meaningful for sounds with a hotkey; assigning no hotkey clears it. |
 | FR-5.3.6 | A sound whose file is missing MUST be marked in the UI; triggering it MUST report the failure in the status log and MUST NOT open a dialog on its own. Relinking MUST be offered from the sound's context menu (Locate). |
-| FR-5.3.7 | Removing a sound MUST be undoable once (`Ctrl+Z` restores the last removal at its original index). |
+| FR-5.3.7 | Removing sounds MUST be undoable once: `Ctrl+Z` restores the whole last removal batch at each sound's original index. |
 | FR-5.3.8 | Search MUST filter the active library by display name and by file name, case-insensitively. |
 | FR-5.3.9 | Board layout MUST support grid and list; the choice is persisted. |
 | FR-5.3.10 | A sound longer than 20 minutes MUST be rejected by the decoder with a clear message. |
@@ -120,6 +120,7 @@ specification:**
 | FR-5.3.17 | A sound MUST have a trim in dB, `-12..=+12` (default `0`), applied as a linear multiplier on top of its stored volume. The trim MUST apply when the sound starts and to a voice that is already sounding when it changes; a boost that would exceed full scale is clipped by the mix, never rejected. `engine::clamp_gain_db` is the only range clamp (used by `effective_gain`, storage normalisation and the dialog); a value stored under the old `-24` floor loads clamped at `-12`. |
 | FR-5.3.18 | The trim MUST be set from the sound's context menu (**Set gain…**, between Stop and Rename), which opens a dialog with a slider and an editable numeric field over `-12..=+12 dB` in 0.5 dB steps, plus OK and Cancel. Nothing is applied before OK: Cancel, `Esc`, the close button and a backdrop click MUST leave the trim untouched. Non-numeric input MUST be ignored (the pending value stands) and an out-of-range number MUST clamp. The sign MUST always be shown (`+3.0 dB`, `0.0 dB`). The menu row carries the label only; the dialog is the only place the value is shown. |
 | FR-5.3.19 | **Show in Explorer** MUST select the file through the shell namespace (`SHParseDisplayName` + `SHOpenFolderAndSelectItems`), not an `explorer.exe /select,` command line, so spaces, commas, unicode and long paths all land on the file. It MUST run off the UI thread and report failures in the activity log; when the file is gone it MUST open the containing folder. |
+| FR-5.3.20 | The board MUST support multi-selection. A plain click still plays the sound and collapses the selection to it. Ctrl+click toggles one sound. Shift+click selects the visible range from the anchor. A drag that starts on empty board space selects every card it touches. Delete and **Move to** act on the whole selection, and dragging a selected card drags the whole block. A right-click outside the selection picks that card first. Selection is cleared on tab switch, on import, and when a filter hides a selected sound; it is not persisted. |
 
 ### 5.4 Playback
 

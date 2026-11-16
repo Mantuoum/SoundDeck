@@ -88,6 +88,7 @@ already parked and waiting.
 ## 6. Select, rename, remove, undo
 
 - [x] Click a card → selection highlight; **F2** opens rename; Esc cancels (name unchanged); typing + Enter/Save applies; empty name is rejected.
+- [ ] **Multi-select**: Ctrl+click adds/removes several cards (no play); Shift+click takes the range from the last clicked card; drag on empty grid space draws a box and selects what it touches; a plain click still plays and collapses the selection. **Delete** removes them all with one `Ctrl+Z` restore at the original positions. Right-click a selected card → **Move N sounds to ▸** moves the whole set; dragging one selected card drags the block. A right-click on an unselected card picks just that card first.
 - [x] **Delete** removes the selected sound; status line confirms.
 - [x] **Ctrl+Z** restores it at its **original position** with volume/hotkey intact and **no false "missing" flag** if the file exists.
 - [x] Ctrl+Z with nothing to undo → "Nothing to undo" (info, not error).
