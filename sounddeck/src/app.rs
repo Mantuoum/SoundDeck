@@ -3751,15 +3751,20 @@ impl App {
         });
     }
 
-    /// Opens the delete-library dialog (FR-5.2.3). Nothing is deleted until the
-    /// user chooses; the last remaining library is refused here, so the dialog can
-    /// always offer somewhere to move its sounds.
+    /// Deletes a library (FR-5.2.3). The last remaining library is refused here, so
+    /// the dialog can always offer somewhere to move its sounds. A library with no
+    /// sounds has nothing to move or remove, so it is applied straight away instead
+    /// of asking a question with one possible answer.
     fn delete_library(&mut self, id: u64) {
         if self.libraries.len() <= 1 {
             self.log(StatusKind::Warning, "At least one library is required");
             return;
         }
         if !self.libraries.iter().any(|library| library.id == id) {
+            return;
+        }
+        if !self.sounds.iter().any(|sound| sound.library_id == id) {
+            self.confirm_delete_library(id, LibraryDeleteOutcome::Remove);
             return;
         }
         let target_id = self
@@ -3776,8 +3781,9 @@ impl App {
         });
     }
 
-    /// Applies the dialog: move the sounds to `target`, or drop them from the
-    /// board. Neither touches the audio files (FR-5.3.14).
+    /// Applies a delete: move the sounds to `target`, or drop them from the board.
+    /// Neither touches the audio files (FR-5.3.14). Also the path an empty library
+    /// takes, straight from `delete_library` and without a dialog.
     fn confirm_delete_library(&mut self, id: u64, outcome: LibraryDeleteOutcome) {
         let Some(fallback) = self
             .libraries
@@ -3845,11 +3851,11 @@ impl App {
                 }
                 (
                     StatusKind::Info,
-                    format!(
+                    Some(format!(
                         "moved {moved} sound{} to \"{}\"",
                         if moved == 1 { "" } else { "s" },
                         self.library_name(target)
-                    ),
+                    )),
                 )
             }
             LibraryDeleteOutcome::Remove => {
@@ -3868,13 +3874,14 @@ impl App {
                 if was_active {
                     self.active_library = fallback;
                 }
-                (
-                    StatusKind::Warning,
-                    format!(
-                        "removed {count} sound{} from the board",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                )
+                // Nothing was lost when the library was empty, so that case is
+                // informational; a real removal stays a warning.
+                let kind = if count == 0 {
+                    StatusKind::Info
+                } else {
+                    StatusKind::Warning
+                };
+                (kind, library_removal_note(count))
             }
         };
 
@@ -3884,7 +3891,7 @@ impl App {
             self.sync_active_library();
             self.mark_dirty();
         }
-        self.log(kind, format!("Deleted \"{label}\" - {summary}"));
+        self.log(kind, library_deleted_line(&label, summary.as_deref()));
     }
 
     /// The delete-library dialog (FR-5.2.3): the sound count, the move target, and
@@ -6129,6 +6136,28 @@ fn move_sound_to_id(sounds: &mut Vec<Sound>, id: u64, target: u64) -> bool {
     let sound = sounds.remove(from);
     sounds.insert(to, sound);
     true
+}
+
+/// The `Deleted "<name>"` line for a library deletion: the name, plus the note the
+/// caller has when there is something to report. An empty library has nothing to
+/// move or remove, so it produces no note — and that is exactly the case deleted
+/// without a dialog (FR-5.2.3).
+fn library_deleted_line(label: &str, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("Deleted \"{label}\" - {note}"),
+        None => format!("Deleted \"{label}\""),
+    }
+}
+
+/// The note a removal puts after the library name. `None` when the library held no
+/// sounds: there is no count to report, so the line stops at the name.
+fn library_removal_note(count: usize) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "removed {count} sound{} from the board",
+            if count == 1 { "" } else { "s" }
+        )
+    })
 }
 
 /// One meter slot's motion: instant attack, linear release, peak hold then fall.
@@ -9617,5 +9646,30 @@ mod tests {
         selection.retain_visible(&[9]);
         assert!(selection.is_empty());
         assert_eq!(selection.anchor, None);
+    }
+
+    /// An empty library is deleted without the dialog — the same `count == 0` case
+    /// that leaves the removal note empty — and the line ends at its name.
+    #[test]
+    fn an_empty_library_delete_logs_its_name_only() {
+        assert!(library_removal_note(0).is_none(), "nothing to count");
+        assert_eq!(
+            library_removal_note(1).as_deref(),
+            Some("removed 1 sound from the board")
+        );
+        assert_eq!(
+            library_removal_note(4).as_deref(),
+            Some("removed 4 sounds from the board")
+        );
+
+        assert_eq!(library_deleted_line("Temp", None), "Deleted \"Temp\"");
+        assert_eq!(
+            library_deleted_line("Temp", library_removal_note(2).as_deref()),
+            "Deleted \"Temp\" - removed 2 sounds from the board"
+        );
+        assert_eq!(
+            library_deleted_line("Temp", Some("moved 3 sounds to \"Main\"")),
+            "Deleted \"Temp\" - moved 3 sounds to \"Main\""
+        );
     }
 }

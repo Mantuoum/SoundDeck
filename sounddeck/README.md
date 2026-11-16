@@ -17,8 +17,9 @@ live in `config/` next to the executable.
   or delete from a tab's context menu. Sounds can be moved between libraries from
   a sound's context menu, and the active library is remembered.
   Deleting a library asks what should happen to its sounds: **move them to** a library
-  you pick, **delete the sounds** (from SoundDeck only), or cancel. Audio files are
-  never touched, and the last remaining library cannot be deleted.
+  you pick, **delete the sounds** (from SoundDeck only), or cancel. An empty library is
+  deleted straight away, with no question to answer. Audio files are never touched, and
+  the last remaining library cannot be deleted.
 - **Only the active library is live**: its hotkeys are bound and only its
   hotkey sounds are preloaded. Switching tabs stops playback and swaps the whole
   hotkey set. Hotkeys in background tabs never fire.

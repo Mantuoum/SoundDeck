@@ -625,7 +625,10 @@ Tabs are `Library { id, name }`; sounds carry `library_id`. Switching calls
 `sync_active_library`: rebinds hotkeys for the new tab, sets RAM retention, preloads,
 and stops sound playback. The loop is unaffected. Deleting a library opens a dialog
 (`deleting` state) that moves its sounds to a chosen library or removes them from the
-board; audio files are never touched, and the last library cannot be deleted.
+board; audio files are never touched, and the last library cannot be deleted. A library
+with no sounds has nothing to move or remove, so `delete_library` skips the dialog and
+goes straight to `confirm_delete_library(id, LibraryDeleteOutcome::Remove)`: the same
+apply path, minus the question, and the log line stops at `Deleted "<name>"`.
 
 ### Missing files
 

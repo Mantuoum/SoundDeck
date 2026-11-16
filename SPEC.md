@@ -92,7 +92,7 @@ specification:**
 | --- | --- |
 | FR-5.2.1 | A fresh config MUST contain one library named `Main` (id 1) and no sounds. |
 | FR-5.2.2 | Libraries MUST be addable, renamable and deletable; the last remaining library MUST NOT be deletable. |
-| FR-5.2.3 | Deleting a library MUST ask, in a confirmation dialog, whether to move its sounds to a remaining library the user chooses or to remove the sounds from the board; cancelling MUST leave the library untouched. Removing sounds MUST NOT touch their files (FR-5.3.14). |
+| FR-5.2.3 | Deleting a library MUST ask, in a confirmation dialog, whether to move its sounds to a remaining library the user chooses or to remove the sounds from the board; cancelling MUST leave the library untouched. Removing sounds MUST NOT touch their files (FR-5.3.14). A library that holds no sounds MUST be deleted straight away, without the dialog — there is nothing to move or remove — and the log line names it as `Deleted "<name>"` with no count. |
 | FR-5.2.4 | Exactly one library is active at a time; the active tab is persisted. |
 | FR-5.2.5 | The active library selects which sounds are shown and which hotkeys are registered. |
 | FR-5.2.6 | Sounds MAY be dragged between libraries and reordered inside one. |
@@ -478,7 +478,7 @@ Rules that enforce them:
 | NFR-8.5.2 | `cargo test` MUST pass; pure logic (paths, normalisation, migration, volume curve, hotkey table, ring/wake behaviour) MUST be covered. |
 | NFR-8.5.3 | Every module carries a `//!` header stating its responsibility. |
 | NFR-8.5.4 | `ARCHITECTURE.md` MUST be updated with any change to threads, storage or the frame loop. |
-| NFR-8.5.5 | 245 tests as of 0.6.0. |
+| NFR-8.5.5 | 246 tests as of 0.6.0. |
 
 ### 8.6 Accessibility
 

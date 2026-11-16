@@ -5,8 +5,8 @@ versions, not every version (see AGENTS.md §8).
 
 Walk the app top to bottom in this order. Each item: **Do** → **Expect**. Tick what
 passes; for anything else write `ID · what you did · what happened` (screenshots help).
-Nothing in the app changes until this pass is done — A7 (empty-library delete) is
-already parked and waiting.
+Nothing in the app changes until this pass is done — A7 (empty-library delete) has
+landed, so §8 expects no dialog.
 
 **Before you start**
 
@@ -23,7 +23,7 @@ already parked and waiting.
 |---|---|
 | A Win hotkey (e.g. `Win+A`) also opens Action Center | Pass-through is a settled decision; the chord reaches Windows too (README warns) |
 | A streamed sound shows **no progress line** the first time it plays | Progress appears only after the length probe lands (next trigger) — settled |
-| **Deleting an empty library still shows the dialog** | A7, already planned — that's the change you asked for |
+| An empty library is deleted **without the delete dialog** | Nothing to move or remove, so the question has one possible answer (FR-5.2.3) |
 | A device unplugged **at launch** is forgotten (falls back silently) | Device auto-rebind is a future item; runtime unplug IS reported |
 | Startup warnings are silent in release | Decided 2026-10-28 (no `startup.log`) |
 | OS-level hotkeys (including stop-all) still fire while a modal is open | Pass-through is settled: the hook never swallows a key. Board shortcuts do stand down |
@@ -112,7 +112,7 @@ already parked and waiting.
       - [x] Cancel → nothing changes.
       - [x] Move → sounds appear in the chosen library; counts correct; log summary.
       - [x] Delete sounds → sounds gone from board; **audio files still on disk**; log summary.
-- [x] Delete an **empty** library → dialog appears today (**known nuance, A7**); record whether it bothers you beyond the empty case.
+- [x] Delete an **empty** library → **no dialog**: it disappears immediately, the log reads `Deleted "<name>"` with no count, the active tab moves to a remaining library when the deleted one was active, and audio stops if that tab was playing.
 - [-] RAM rule: only the **active** tab's hotkey sounds sit in RAM (check chips in two tabs).
 
 ## 9. Hotkey management

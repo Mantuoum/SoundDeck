@@ -319,7 +319,10 @@ and a drag on empty board space is a marquee. Delete removes the batch as one un
 `UndoDelete` (ascending-index restore); the context menu on a multi-selection offers
 **Move N sounds to** / **Remove N sounds**, and a selected card drags the whole block.
 Deleting a library opens a dialog (`deleting`): move its sounds to a chosen library, or
-remove them from the board (files untouched); cancel leaves everything alone.
+remove them from the board (files untouched); cancel leaves everything alone. An empty
+library has nothing to move or remove, so it is deleted straight away with no dialog
+(`confirm_delete_library(id, LibraryDeleteOutcome::Remove)`), and the log stops at
+`Deleted "<name>"`.
 
 Per-frame board data (visible indices, ids, playing/progress map, collected `Action`s)
 is rebuilt each frame into `App::board_scratch` (clear + refill) so the *content* is
