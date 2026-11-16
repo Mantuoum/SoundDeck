@@ -235,7 +235,7 @@ sharing denied — Windows refuses rename/delete while it is on the board (FR-5.
   restartable without an app restart (FR-5.5.7). `App::apply_routes` only ever passes a
   device from the live enumeration: `route_slot` resolves the stored endpoint and, when
   it is gone, substitutes the Windows default (Cable: a `cable`/`virtual` name first,
-  never the Monitor's) and reports it in the log + Settings (`device_note`, FR-5.5.8).
+  never the Monitor's) and reports it in the log (`device_note`, FR-5.5.8).
   The stored id/name survive; `refresh_devices`/`retune_slot` refresh a stale name and
   save only when something changed. **`None (silent)` is a route of `None`**: that slot's
   render thread is shut down and the ring cleared, so it is silent immediately and after a
@@ -329,7 +329,7 @@ that tab, and the drop is a move with the context menu's semantics, without swit
 active library.
 
 **Settings** (immediate save, no Apply): four tabs — Playback (Looping: enable + file +
-Monitor/Cable routing; Memory: RAM preload + Show RAM state; Output devices: status;
+Monitor/Cable routing; Memory: RAM preload + Show RAM state;
 Hotkeys: stop-all switch + key row), Appearance (Theme + Reload, Animation), Window
 (System tray, Sidebar gain, `Ctrl+Tab` cycling — `cycle_tabs_ctrl_tab`, default off),
 General (Configuration: folder/export/import; Reset: **Reset all settings**, confirmed;

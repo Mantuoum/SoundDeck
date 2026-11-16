@@ -309,8 +309,8 @@ struct StatusEntry {
 
 /// What the user has to know about one output slot beyond "ready": a
 /// substitution (the configured device is gone and another one is playing) or
-/// the engine's last failure. One array per slot, because Settings shows one
-/// status line per slot (FR-5.5.8).
+/// the engine's last failure. One array per slot, because the activity log
+/// reports one status per slot (FR-5.5.8).
 struct DeviceNote {
     text: String,
     kind: StatusKind,
@@ -911,6 +911,12 @@ impl App {
                     self.log(StatusKind::Warning, message);
                 }
                 AudioEvent::Stopped { slot, .. } => {
+                    if self.device_ready[slot.index()] {
+                        self.log(
+                            StatusKind::Warning,
+                            format!("{} device stopped", slot.label()),
+                        );
+                    }
                     self.device_ready[slot.index()] = false;
                 }
             }
@@ -2294,16 +2300,19 @@ impl App {
             monitor.device.as_ref().map(|device| device.id.as_str()),
         );
 
-        // A substitution is user-visible, not a silent fix-up: it is logged and
-        // it is what Settings shows for that slot until the device comes back.
+        // A substitution is user-visible. It is not a silent fix-up.
+        // The log shows it for that slot until the device comes back.
         for (slot, route) in [(Slot::Monitor, &monitor), (Slot::Cable, &cable)] {
-            let note = match &route.substituted {
-                Some(text) => {
-                    self.log(StatusKind::Warning, format!("{}: {text}", slot.label()));
-                    Some(DeviceNote::warning(text.clone()))
-                }
-                None => None,
-            };
+            let note = route
+                .substituted
+                .as_ref()
+                .map(|text| DeviceNote::warning(text.clone()));
+            if let Some(note) = &note {
+                self.log(
+                    StatusKind::Warning,
+                    format!("{}: {}", slot.label(), note.text),
+                );
+            }
             self.device_note[slot.index()] = note;
         }
 
@@ -2364,16 +2373,28 @@ impl App {
             tabs_rect = tabs.response.rect;
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if window_button(ui, WindowButton::Close, self.tray_available) {
+                if window_button(
+                    ui,
+                    WindowButton::Close,
+                    self.cfg.minimize_to_tray && self.tray_available,
+                ) {
                     self.quit = true;
                     self.save_now();
                     ctx.send_viewport_cmd(ViewportCommand::Close);
                 }
-                if window_button(ui, WindowButton::Maximize, self.tray_available) {
+                if window_button(
+                    ui,
+                    WindowButton::Maximize,
+                    self.cfg.minimize_to_tray && self.tray_available,
+                ) {
                     let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                     ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
                 }
-                if window_button(ui, WindowButton::Minimize, self.tray_available) {
+                if window_button(
+                    ui,
+                    WindowButton::Minimize,
+                    self.cfg.minimize_to_tray && self.tray_available,
+                ) {
                     if self.cfg.minimize_to_tray && self.tray_available {
                         self.hide_to_tray(ctx);
                     } else {
@@ -4128,29 +4149,8 @@ impl App {
         });
     }
 
-    /// Playback's info column: device status and the RAM cache readout.
+    /// Playback's info column: the RAM cache readout.
     fn settings_playback_info(&mut self, ui: &mut Ui) {
-        settings_group(ui, "Output devices", |ui| {
-            for (index, slot) in [Slot::Monitor, Slot::Cable].into_iter().enumerate() {
-                if index > 0 {
-                    settings_divider(ui);
-                }
-                let note = self.device_note[slot.index()].as_ref();
-                // A substitution or a failure outranks "ready": the device that
-                // plays is not the one that was chosen.
-                let (status, color) = match note {
-                    Some(note) if note.kind == StatusKind::Error => ("Failed", note.kind.color()),
-                    Some(note) => ("Substituted", note.kind.color()),
-                    None if self.device_ready[slot.index()] => ("Ready", theme::accent()),
-                    None => ("Not connected", theme::muted()),
-                };
-                settings_status_row(ui, slot.label(), status, color);
-                if let Some(note) = note {
-                    settings_detail(ui, note.text.as_str());
-                }
-            }
-        });
-
         settings_group(ui, "Cache", |ui| {
             // Refreshes the cached readout when the main column has not run yet.
             let ram = self.playback_stats();
@@ -7597,7 +7597,7 @@ enum WindowButton {
     Close,
 }
 
-fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool {
+fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(36.0, 28.0), Sense::click());
     let hovered = response.hovered();
     let close = matches!(kind, WindowButton::Close);
@@ -7659,14 +7659,14 @@ fn window_button(ui: &mut Ui, kind: WindowButton, tray_available: bool) -> bool 
     }
     let tooltip = match kind {
         WindowButton::Minimize => {
-            if tray_available {
-                "Hide to tray (hotkeys keep working)"
+            if hide_to_tray {
+                "Hide to tray"
             } else {
                 "Minimize"
             }
         }
         WindowButton::Maximize => "Maximize",
-        WindowButton::Close => "Quit SoundDeck",
+        WindowButton::Close => "Close",
     };
     let response = response.on_hover_text(tooltip);
     response.clicked()
@@ -7907,7 +7907,7 @@ struct SlotRoute {
     /// one, so the engine always talks to something that exists.
     device: Option<DeviceInfo>,
     /// Set when the configured device is gone: `"Headphones" not found - using
-    /// "Speakers"`, for the log and the Settings status line (FR-5.5.8).
+    /// "Speakers"`, for the activity log (FR-5.5.8).
     substituted: Option<String>,
 }
 

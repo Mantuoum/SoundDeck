@@ -60,10 +60,10 @@ live in `config/` next to the executable.
 - **Dual output**: one monitor device and one cable device, with independent
   volumes and a link button. Volume sliders are logarithmic (`-60` to `0 dBFS`),
   so the track matches perceived loudness; stored gains stay linear. If a chosen
-  device is missing, that output plays on the Windows default (the cable prefers a
-  device named "cable"/"virtual") and both the log and Settings → Output devices say
-  which one is playing; the chosen device is remembered, so it comes back when it is
-  plugged in again. **None (silent)** is a real choice, not a missing device: that slot
+  device is missing, that output plays on the Windows default. The cable prefers a
+  device named "cable"/"virtual". The log names the device that is actually playing.
+  The chosen device is remembered. It comes back when it is plugged in again.
+  **None (silent)** is a real choice, not a missing device: that slot
   goes quiet immediately, stays quiet after a restart, and is never swapped for another
   device behind your back.
 - **Master gain** in dB (`0` to `+12 dB`, default `0 dB`) applied to both
@@ -111,14 +111,14 @@ live in `config/` next to the executable.
 ## Settings
 
 The Settings button (or `Ctrl+,`) replaces the soundboard with a full-window view.
-The rail on the left switches tabs; the status bar stays available. On a wide window the
-editable settings sit in the main column and read-only status (output devices, cache,
-About, Support) in a second column; on a narrow window those panels move under the main
+The rail on the left switches tabs. The status bar stays available. On a wide window the
+editable settings sit in the main column. Read-only status (cache,
+About, Support) sits in a second column. On a narrow window those panels move under the main
 column.
 
 - **Playback** — **Looping** (enable, choose the file, send it to Monitor and/or Cable),
-  **Memory** (load hotkey sounds into RAM, show the RAM state), **Output devices**
-  (read-only status) and **Hotkeys** (stop-all switch plus the key row).
+  **Memory** (load hotkey sounds into RAM, show the RAM state) and
+  **Hotkeys** (stop-all switch plus the key row).
 - **Appearance** — theme, reload themes, Animate the interface.
 - **Window** — minimize-to-tray, whether the sidebar shows the master gain, and
   **Cycle tabs with Ctrl+Tab** (off by default; hover the row for what it does).

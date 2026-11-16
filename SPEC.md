@@ -142,11 +142,11 @@ specification:**
 | FR-5.5.1 | There MUST be exactly two slots, `Monitor` and `Cable`, each with its own device. |
 | FR-5.5.2 | Selecting the same device for both slots MUST be allowed and MUST be reported in the activity log once. |
 | FR-5.5.3 | Each slot MUST have a linear volume in `0..=1`; an optional link makes the sliders move together. |
-| FR-5.5.4 | A master gain in `0..=+12 dB` MUST apply to both mixes after the loop is summed in. |
+| FR-5.5.4 | A master gain in `0..=+12 dB` MUST apply to both mixes after the loop is summed in. The sidebar label **Gain** means master gain for both outputs. The short label is intentional. |
 | FR-5.5.5 | Sound effects MUST go to both slots equally; only the loop is routed per slot. |
 | FR-5.5.6 | Peak metering MUST be measured where the device consumes samples, so it reflects what is heard. |
 | FR-5.5.7 | A slot whose device disappears MUST stop consuming, MUST report the failure, and MUST be restartable without restarting the app. While the configured device is absent the slot MUST play on a substitute — the Windows default, else the first device (the Cable prefers a `cable`/`virtual` device, and never the Monitor's) — and MUST say so in the log; a substitution made while the app is running MUST keep the configured endpoint, so the device is used again when it is re-plugged and the devices are refreshed. |
-| FR-5.5.8 | Settings MUST show whether each output is ready, with the last error when it is not, and MUST name the device that is actually playing when it is a substitute for the configured one. |
+| FR-5.5.8 | The activity log MUST report a failed output or a substitute route. The log MUST name the device that is actually playing when it substitutes for the configured one. Settings MUST NOT show a device status group. |
 | FR-5.5.9 | Choosing **None (silent)** for a slot MUST close that slot's render thread, so it is silent at once and still silent after a relaunch; the choice MUST be stored (the label as the slot's device name, with an empty id) rather than re-resolved to a device. The substitute rule (FR-5.5.7) MUST only apply to a *configured* device that is gone, never to a slot the user silenced. |
 | FR-5.5.10 | Right-clicking the master gain slider MUST reset it to `0.0 dB` without starting a drag or changing the output levels in any other way. |
 
@@ -197,7 +197,7 @@ specification:**
 | --- | --- |
 | FR-5.9.1 | Settings MUST replace the board in the same window and MUST have four tabs: Playback, Appearance, Window and General. General MUST be pinned at the bottom of the rail. |
 | FR-5.9.2 | Controls that belong to the board (devices, output volumes, link, master gain, RAM summary) MUST NOT be duplicated in Settings. Settings MAY show the same state as read-only status. |
-| FR-5.9.3 | Playback MUST have four sections: **Looping** (loop on/off, loop file, Monitor/Cable routing — one section), **Memory** (RAM preloading, RAM-state visibility), **Output devices** (read-only status) and **Hotkeys** (stop-all on/off plus its key row). |
+| FR-5.9.3 | Playback MUST have three sections: **Looping** (loop on/off, loop file, Monitor/Cable routing — one section), **Memory** (RAM preloading, RAM-state visibility) and **Hotkeys** (stop-all on/off plus its key row). |
 | FR-5.9.4 | Appearance MUST have two sections: **Theme** (theme picker, reload) and **Animation** (motion). |
 | FR-5.9.5 | Window MUST have three sections: **System tray** (minimize to tray), **Sidebar** (master-gain visibility) and **Tab navigation** (`Ctrl+Tab` cycling). |
 | FR-5.9.6 | General MUST have **Configuration** (config folder, export, import), **Reset** (reset all settings, confirmed, near the bottom), **About** (name, version, licence, accessibility note) and **Support** (project links, author credit). |
@@ -208,7 +208,7 @@ specification:**
 | FR-5.9.11 | Import MUST validate the bundle's kind and version, report a corrupt, foreign or newer file as a status error, and replace settings and libraries only after the user confirms a dialog stating how many sounds and libraries will be replaced. Cancel MUST change nothing. |
 | FR-5.9.12 | **Reset all settings** MUST be the only reset. It lives in General → Reset, behind a confirmation, and restores every settings field. There MUST be no per-page reset. A reset MUST NOT touch libraries, sounds or audio files. |
 | FR-5.9.13 | Every row MUST use one geometry: the label starts at the row's left edge, the control ends flush with the row's right edge, both are vertically centred in the 28 px row, and a detail line under a row starts at the label origin. Changing one geometry constant MUST reflow every page. |
-| FR-5.9.14 | On a wide window Settings MUST show two columns: the editable main column and a read-only info/status column (Playback: output devices and cache; General: About and Support). Below the breakpoint the info panels MUST stack under the main column rather than disappear. |
+| FR-5.9.14 | On a wide window Settings MUST show two columns: the editable main column and a read-only info/status column (Playback: cache; General: About and Support). Below the breakpoint the info panels MUST stack under the main column rather than disappear. |
 | FR-5.9.15 | Explanations MUST be shown on demand (tooltip or info icon). A page MUST NOT carry an introductory paragraph, a description of an obvious control, or a repeated note; warnings, device errors and confirmation messages stay visible. |
 
 ### 5.10 Themes and appearance
@@ -494,7 +494,7 @@ Rules that enforce them:
 | Sound decode fails | Log entry with the reason; the sound stays registered. |
 | Loop file missing/corrupt | Loop state `Error`; mixer parks; retry available. |
 | Device unplugged | Slot stops, `DeviceError` logged, `device_ready` cleared, route restartable. |
-| Configured device absent | The stored endpoint is kept; the slot plays on a substitute (default, else first; Cable prefers a cable/virtual device) and the log plus the Settings status line name it. |
+| Configured device absent | The stored endpoint is kept. The slot plays on a substitute (default, else first; Cable prefers a cable/virtual device). The activity log names the device that is actually playing. |
 | Device returns no callback for 2 s | Treated as failure rather than polling forever. |
 | Config corrupt | Preserve as `.corrupt`, load defaults, warn. |
 | Save fails | `save_failed` set, warning logged, no empty file written. |

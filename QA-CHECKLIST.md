@@ -136,7 +136,7 @@ already parked and waiting.
 - [ ] **Sidebar order** (top to bottom of the scrollable part): devices + link → **Gain** → **Stop all** → **Loop**; the credit, the peak meter and the Settings button stay **pinned** at the bottom and never scroll away. On a 540 px-tall window the whole upper stack scrolls instead of hiding a widget (F4).
 - [ ] **Stop-all hover matches the Loop card** (G1): hovering the stop-all card lifts the whole card's fill with the same soft tint and easing as the Loop card — no grey blocky patch behind "Stop all", no smaller inner radius.
 - [x] Peak meter: green/yellow/red zones track playback on **each** output independently; falls to floor when silence; no stale flash after restore from tray.
-- [ ] **Unplug a device** mid-play → status: activity-log warning + Settings → Playback → **Output devices** shows **Substituted** in amber with the `"X" not found - using "Y"` detail; audio continues on the fallback. Replug + refresh → resolves back.
+- [ ] **Unplug a device** mid-play → status: activity-log warning with `"X" not found - using "Y"`; audio continues on the fallback. Replug + refresh → resolves back.
 
 ## 11. Loop track
 
@@ -155,7 +155,7 @@ already parked and waiting.
 > screen; walk the list again.
 
 - [ ] Opens via sidebar **Settings** and **Ctrl+,**; left rail: Back, Playback, Appearance, Window, **General** (pinned bottom); **Esc** leaves.
-- [ ] **Playback** — Looping (loop switch, **Loop file** row + name/state detail, **Send to Monitor** / **Send to Cable**), Memory (**Load hotkey sounds into RAM** — purple half-knob when partly loaded, a click loads all; Show RAM state), Output devices (read-only status, right column on a wide window), Hotkeys (stop-all switch + **Key** row). Every control saves immediately (no Apply button).
+- [ ] **Playback** — Looping (loop switch, **Loop file** row + name/state detail, **Send to Monitor** / **Send to Cable**), Memory (**Load hotkey sounds into RAM** — purple half-knob when partly loaded, a click loads all; Show RAM state) and Hotkeys (stop-all switch + **Key** row). Every control saves immediately (no Apply button).
 - [ ] **Stop-all key row**: **Set**/**Change** opens the same capture modal as a sound hotkey; a taken chord is refused with its owner named; **Clear** removes the binding and the feature stays on; the sidebar card is now only a **Stop all** button (no pill).
 - [ ] **Appearance** — theme dropdown switches live; **Theme files → Reload** re-reads disk; **Animate the interface** off → hovers/presses/fades snap instantly (and CPU drops).
 - [ ] **Window** — System tray (Minimize to tray); Sidebar (Show master gain); Tab navigation (Cycle tabs with Ctrl+Tab, hover for the explanation).

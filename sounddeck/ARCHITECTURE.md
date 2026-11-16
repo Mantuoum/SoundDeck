@@ -476,7 +476,7 @@ above-normal so audio still meets its deadlines.
 - Content: fixed header + per-tab scroll; grouped cards and label/control rows.
   `SettingsTab` holds the tab metadata. Text is intentionally terse: explanations live
   in row tooltips, not in paragraphs (FR-5.9.15).
-- Tabs: Playback (Looping, Memory, Output devices, Hotkeys), Appearance (Theme,
+- Tabs: Playback (Looping, Memory, Hotkeys), Appearance (Theme,
   Animation), Window (System tray, Sidebar, Tab navigation), General (Configuration,
   Reset, About, Support).
 - Two columns: `settings_columns` puts the tab's editable main column beside a
@@ -501,8 +501,8 @@ above-normal so audio still meets its deadlines.
 - Reset: the only reset is General → Reset → **Reset all settings**, behind the existing
   confirmation (`Settings::reset_all`). There is no per-page reset and no
   `SettingsGroup`.
-- Devices, output volumes, link and master gain live in the sidebar, not Settings; the
-  Output devices card shows the same state read-only.
+- Devices, output volumes, link and master gain live in the sidebar, not Settings.
+  Device failures and substitutions go to the activity log only.
 - Immediate save; no modal, no backdrop. `Esc` closes a popup first, then Settings.
 - Shared helpers: `settings_group`, `settings_row`, `settings_value`,
   `settings_toggle` / `settings_toggle_hinted`, `settings_status_row`,
