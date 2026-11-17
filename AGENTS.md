@@ -22,7 +22,9 @@ auto-migrated to .md.migrated)` · `2026-10-29 — review deltas G1–G4 (one ho
 unselectable chrome text, Ctrl+Tab focus block, theme labels without the id)` · `2026-10-29 —
 G5 (gain menu row is the label only) + doc stragglers (UI-9 and Ctrl+Tab trap in
 ARCHITECTURE)` · `2026-10-29 — Settings reorganization (4 tabs, two-column wide layout,
-one row geometry, reset-all only, stop-all key set in Settings)`. Details live in git
+one row geometry, reset-all only, stop-all key set in Settings)` · `2026-11-17 — 0.6.0:
+RAM budget, decode-and-weigh, multi-select, A7 empty-library delete; deps to eframe 0.37 /
+symphonia 0.6 / windows 0.62 / rfd 0.18 (MSRV 1.92); opaque controls`. Details live in git
 history.
 
 ## 1. Repository layout
@@ -375,9 +377,11 @@ while `TextEdit` (search, rename, gain) keeps its own selection (SPEC UI-9).
 **Volume** (`ui/volume.rs`): stored linear 0..1, slider position logarithmic over
 −60…0 dBFS (one curve everywhere, UI-4 — never add a second). The bar has no icon and
 consumes the wheel on every frame the pointer is over it, so the page never scrolls while
-a value is being dragged or wheeled. **Animation**
-(`ui/anim.rs`): 60–90 ms tweens, gated on the user setting AND the OS animation flag;
-`anim::hover_fill` is the one card-hover surface — the loop and stop-all cards both paint
+a value is being dragged or wheeled. The `egui::Slider` rows (output volumes, master gain,
+per-sound trim, RAM budget) go through `theme::accent_slider`, which paints the fill in the
+solid accent and the rail in the field colour (opaque; see §4). **Animation**
+(`ui/anim.rs`): 60-90 ms tweens, gated on the user setting AND the OS animation flag;
+`anim::hover_fill` is the one card-hover surface - the loop and stop-all cards both paint
 through it (SPEC UI-8).
 
 ---
@@ -427,6 +431,12 @@ audio/* ─► nothing above it              ui/* ─► egui + theme only, neve
   grid stay aligned. Colors = theme tokens only. Radii
   SM/MD/LG/XL. Volumes/percentages only via `ui/volume.rs`. Fetch `theme::palette()`
   once per paint; theme locks go through `theme::read_lock`/`write_lock`.
+  **Controls paint opaque colours**: buttons, sliders, toggles, pills, chips and tabs
+  blend their tints with `theme::mix(base, colour, t)` instead of `theme::alpha`.
+  `theme::alpha` is only for card/overlay layers (card hover and selection tints, the
+  drag ghost, the drop overlay, the modal backdrop). Every `egui::Slider` goes through
+  `theme::accent_slider` (solid accent fill, field rail) — a bare slider inherits the
+  translucent `selection.bg_fill` and reads teal, and its rail vanishes on a card.
 - **Storage**: settings field = struct + `Default` + `normalize()` clamp +
   `#[serde(default)]` + control + consumer. Writes only via `io::write_json_atomic`
   (`write_text_atomic` for a user-chosen export file: same commit, no `.bak`).

@@ -2727,12 +2727,14 @@ impl App {
                                             .monospace(),
                                     );
                                     ui.spacing_mut().slider_width = ui.available_width();
-                                    let response = ui.add(
-                                        egui::Slider::new(&mut gain_db, MASTER_GAIN_RANGE)
-                                            .step_by(0.5)
-                                            .show_value(false)
-                                            .trailing_fill(true),
-                                    );
+                                    let response = theme::accent_slider(ui, |ui| {
+                                        ui.add(
+                                            egui::Slider::new(&mut gain_db, MASTER_GAIN_RANGE)
+                                                .step_by(0.5)
+                                                .show_value(false)
+                                                .trailing_fill(true),
+                                        )
+                                    });
                                     // A slider only senses drags, so its response never
                                     // reports a secondary click; the hit test is "pointer
                                     // over the slider" plus the raw click event (B9).
@@ -2865,7 +2867,7 @@ impl App {
         painter.rect_filled(
             smear_pill,
             CornerRadius::same(theme::RADIUS_SM),
-            theme::alpha(theme::accent(), 70),
+            theme::mix(theme::panel(), theme::accent(), 70.0 / 255.0),
         );
         painter.rect_filled(pill, CornerRadius::same(theme::RADIUS_SM), theme::accent());
 
@@ -2887,7 +2889,7 @@ impl App {
                 painter.rect_filled(
                     segment,
                     CornerRadius::same(theme::RADIUS_SM),
-                    theme::alpha(theme::text(), 10),
+                    theme::mix(theme::panel(), theme::text(), 10.0 / 255.0),
                 );
             }
             let color = if active {
@@ -3013,13 +3015,14 @@ impl App {
                         .monospace(),
                 );
                 ui.spacing_mut().slider_width = ui.available_width();
-                let changed = ui
-                    .add(
+                let changed = theme::accent_slider(ui, |ui| {
+                    ui.add(
                         egui::Slider::new(&mut position, 0.0..=1.0)
                             .show_value(false)
                             .trailing_fill(true),
                     )
-                    .changed();
+                })
+                .changed();
                 if changed {
                     self.set_slot_volume(slot, volume::from_position(position));
                 }
@@ -3159,7 +3162,7 @@ impl App {
             painter.rect_filled(
                 pick_rect.expand(3.0),
                 CornerRadius::same(theme::RADIUS_MD),
-                theme::alpha(theme::accent(), (16.0 * pick_hover) as u8),
+                theme::mix(theme::card(), theme::accent(), 16.0 * pick_hover / 255.0),
             );
         }
         paint_folder_icon(
@@ -3577,7 +3580,7 @@ impl App {
             ui.painter().rect_filled(
                 rectangle,
                 CornerRadius::same(0),
-                theme::alpha(theme::accent(), 24),
+                theme::mix(theme::panel(), theme::accent(), 24.0 / 255.0),
             );
             ui.painter().rect_stroke(
                 rectangle,
@@ -4492,22 +4495,17 @@ impl App {
             let mut budget_changed = false;
             let budget_label = format!("RAM budget ({budget} MB)");
             settings_value(ui, &budget_label, SETTINGS_THEME_W, |ui| {
-                ui.scope(|ui| {
-                    // The rail paints with `widgets.inactive.bg_fill`, which is the
-                    // card colour here; give it the field colour so the track is
-                    // visible on the card.
-                    ui.visuals_mut().widgets.inactive.bg_fill = theme::field();
-                    budget_changed = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut budget,
-                                model::RAM_BUDGET_MIN_MB..=model::RAM_BUDGET_MAX_MB,
-                            )
-                            .step_by(8.0)
-                            .show_value(false),
+                budget_changed = theme::accent_slider(ui, |ui| {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut budget,
+                            model::RAM_BUDGET_MIN_MB..=model::RAM_BUDGET_MAX_MB,
                         )
-                        .changed();
-                });
+                        .step_by(8.0)
+                        .show_value(false),
+                    )
+                })
+                .changed();
             });
             if budget_changed {
                 self.cfg.ram_budget_mb = budget;
@@ -5239,12 +5237,14 @@ impl App {
                 // follows. Nothing is applied while dragging.
                 let mut db = gain.db;
                 ui.spacing_mut().slider_width = ui.available_width() - 4.0;
-                let slider = ui.add(
-                    egui::Slider::new(&mut db, GAIN_DIALOG_RANGE)
-                        .step_by(GAIN_DIALOG_STEP_DB as f64)
-                        .fixed_decimals(1)
-                        .show_value(false),
-                );
+                let slider = theme::accent_slider(ui, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut db, GAIN_DIALOG_RANGE)
+                            .step_by(GAIN_DIALOG_STEP_DB as f64)
+                            .fixed_decimals(1)
+                            .show_value(false),
+                    )
+                });
                 if slider.changed() {
                     gain.set_db(db);
                 }
@@ -6529,7 +6529,11 @@ fn settings_key_pill(ui: &mut Ui, id: Id, hotkey: Option<Hotkey>) -> bool {
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_MD),
-        theme::mix(theme::field(), theme::alpha(theme::accent(), 20), hover),
+        theme::mix(
+            theme::field(),
+            theme::mix(theme::field(), theme::accent(), 20.0 / 255.0),
+            hover,
+        ),
         Stroke::new(
             1.0_f32,
             if response.hovered() {
@@ -6713,7 +6717,7 @@ fn settings_switch(ui: &mut Ui, id: Id, value: &mut bool, mixed: bool, enabled: 
         painter.rect_filled(
             rect.expand(3.0),
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), (14.0 * hover) as u8),
+            theme::mix(theme::card(), theme::accent(), 14.0 * hover / 255.0),
         );
     }
     paint_switch(painter, rect, *value, mixed, enabled);
@@ -6741,19 +6745,22 @@ fn settings_nav_item(ui: &mut Ui, tab: SettingsTab, active: bool) -> bool {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), 34),
+            theme::mix(theme::panel_deep(), theme::accent(), 34.0 / 255.0),
         );
         painter.rect_stroke(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            Stroke::new(1.0_f32, theme::alpha(theme::accent(), 90)),
+            Stroke::new(
+                1.0_f32,
+                theme::mix(theme::panel_deep(), theme::accent(), 90.0 / 255.0),
+            ),
             StrokeKind::Inside,
         );
     } else if hover > 0.01 {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::text(), (8.0 * hover) as u8),
+            theme::mix(theme::panel_deep(), theme::text(), 8.0 * hover / 255.0),
         );
     }
 
@@ -6790,7 +6797,7 @@ fn settings_back(ui: &mut Ui) -> bool {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::text(), (8.0 * hover) as u8),
+            theme::mix(theme::panel_deep(), theme::text(), 8.0 * hover / 255.0),
         );
     }
     let color = if response.hovered() {
@@ -7078,7 +7085,7 @@ fn close_button(ui: &mut Ui, painter: &egui::Painter, rect: Rect, id: Id) -> egu
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::red(), 26),
+            theme::mix(theme::card(), theme::red(), 26.0 / 255.0),
         );
     }
     let press = anim::press(ui, id, response.is_pointer_button_down_on());
@@ -7139,7 +7146,11 @@ fn hotkey_pill(
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_MD),
-        theme::mix(theme::field(), theme::alpha(theme::accent(), 20), hover),
+        theme::mix(
+            theme::field(),
+            theme::mix(theme::field(), theme::accent(), 20.0 / 255.0),
+            hover,
+        ),
         Stroke::new(1.0_f32, border),
         StrokeKind::Inside,
     );
@@ -7205,8 +7216,8 @@ fn ram_chip(
     painter.rect(
         rect,
         CornerRadius::same(theme::RADIUS_MD),
-        theme::alpha(color, (10.0 + 10.0 * hover) as u8),
-        Stroke::new(1.0_f32, theme::alpha(color, 60)),
+        theme::mix(theme::card(), color, (10.0 + 10.0 * hover) / 255.0),
+        Stroke::new(1.0_f32, theme::mix(theme::card(), color, 60.0 / 255.0)),
         StrokeKind::Inside,
     );
     let press = anim::press(ui, id, chip.is_pointer_button_down_on());
@@ -7246,7 +7257,7 @@ fn icon_hover(painter: &egui::Painter, rect: Rect, t: f32) {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), (16.0 * t) as u8),
+            theme::mix(theme::panel_deep(), theme::accent(), 16.0 * t / 255.0),
         );
     }
 }
@@ -7272,7 +7283,7 @@ fn press_overlay(painter: &egui::Painter, rect: Rect, radius: u8, press: f32) {
     painter.rect_filled(
         rect,
         CornerRadius::same(radius),
-        theme::alpha(theme::bg(), (press * 40.0) as u8),
+        theme::mix(theme::card(), theme::bg(), press * 40.0 / 255.0),
     );
 }
 
@@ -7825,25 +7836,28 @@ fn paint_library_tab(
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), 30),
+            theme::mix(theme::panel_deep(), theme::accent(), 30.0 / 255.0),
         );
         painter.rect_stroke(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            Stroke::new(1.0_f32, theme::alpha(theme::accent(), 150)),
+            Stroke::new(
+                1.0_f32,
+                theme::mix(theme::panel_deep(), theme::accent(), 150.0 / 255.0),
+            ),
             StrokeKind::Inside,
         );
     } else if active {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::accent(), 14),
+            theme::mix(theme::panel_deep(), theme::accent(), 14.0 / 255.0),
         );
     } else if hover > 0.01 {
         painter.rect_filled(
             rect,
             CornerRadius::same(theme::RADIUS_MD),
-            theme::alpha(theme::text(), (10.0 * hover) as u8),
+            theme::mix(theme::panel_deep(), theme::text(), 10.0 * hover / 255.0),
         );
     }
     let font = if active {
@@ -7932,7 +7946,7 @@ fn accent_button_enabled(ui: &mut Ui, text: &str, size: Vec2, enabled: bool) -> 
         theme::faint()
     }))
     .fill(if enabled {
-        theme::alpha(theme::accent(), 22)
+        theme::mix(theme::card(), theme::accent(), 22.0 / 255.0)
     } else {
         theme::field()
     })
@@ -8067,7 +8081,7 @@ fn paint_link_row(ui: &mut Ui, rect: Rect, linked: bool) {
         button,
         CornerRadius::same(theme::RADIUS_MD),
         if linked {
-            theme::alpha(theme::accent(), 24)
+            theme::mix(theme::panel(), theme::accent(), 24.0 / 255.0)
         } else {
             theme::field()
         },
@@ -8115,7 +8129,7 @@ fn window_button(ui: &mut Ui, kind: WindowButton, hide_to_tray: bool) -> bool {
             rect,
             CornerRadius::same(0),
             if close {
-                theme::alpha(theme::red(), 50)
+                theme::mix(theme::panel_deep(), theme::red(), 50.0 / 255.0)
             } else {
                 theme::card_hover()
             },
@@ -8303,7 +8317,7 @@ fn paint_switch(painter: &egui::Painter, rect: Rect, on: bool, mixed: bool, enab
     } else if on {
         theme::accent()
     } else if mixed {
-        theme::alpha(theme::purple(), 90)
+        theme::mix(theme::card_hover(), theme::purple(), 90.0 / 255.0)
     } else {
         theme::card_hover()
     };

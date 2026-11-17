@@ -368,6 +368,10 @@ full one), `Some(0..=1)` once the probe has reported the duration.
 - Master gain is separate, `0..+12 dB`, applied to the whole mix; right-click resets.
 - The slim `volume::bar` supports click/drag and wheel; it consumes the scroll while
   hovered and carries no icon.
+- `egui::Slider` rows (output volumes, master gain, trim, RAM budget) go through
+  `theme::accent_slider`: solid accent fill, field-coloured rail, both opaque. A bare
+  slider takes the translucent `selection.bg_fill` (reads teal) and its rail is the card
+  colour, so it disappears on a card.
 - `audio::engine::clamp_gain_db` is the single range clamp (`-12..=+12`, NaN/inf → `0`):
   `effective_gain`, `Settings`/`LibrariesFile::normalize` and the gain dialog all use it.
   The dialog snaps to 0.5 dB steps and applies nothing before OK.

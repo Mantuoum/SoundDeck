@@ -632,6 +632,22 @@ pub fn alpha(color: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
+/// Run `add` with the slider's trailing fill set to the solid palette accent and its
+/// rail set to the field colour.
+///
+/// The fill paints with `selection.bg_fill`, which is also the text-selection
+/// colour; raising it globally would put a solid block behind selected text. The rail
+/// paints with `widgets.inactive.bg_fill`, which equals the card colour and vanishes
+/// on a card. Sliders opt in here, so both are opaque and visible everywhere.
+pub fn accent_slider<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.scope(|ui| {
+        ui.visuals_mut().selection.bg_fill = accent();
+        ui.visuals_mut().widgets.inactive.bg_fill = field();
+        add(ui)
+    })
+    .inner
+}
+
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     blend(a, b, t)
 }
